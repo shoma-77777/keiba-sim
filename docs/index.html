@@ -2933,9 +2933,10 @@ function pickDarkHorse(ctx, stats, avgStats, M){
     .filter(x => x.f.odds > 1 && (x.f.odds >= 10 || (x.f.pop && x.f.pop >= 6)));
   if (!cand.length || !Engine.oddsReady(ctx.field)) return null;
   cand.forEach(x => {
-    const po = x.f.placeLo || Math.max(1.5, x.f.odds / 4);
-    x.placeEV = (M ? M.place[x.i] : x.a.top3) * po; x.winEV = (M ? M.win[x.i] : x.a.win) * x.f.odds;
-    x.score = x.placeEV + 0.5 * x.winEV + 0.15 * x.f.ana.length;
+    // 複勝オッズが取れていないときは推定値を使わず、複勝期待値は出さない（実際のオッズだけで計算する）
+    const po = x.f.placeLo > 0 ? x.f.placeLo : null;
+    x.placeEV = po ? (M ? M.place[x.i] : x.a.top3) * po : null; x.winEV = (M ? M.win[x.i] : x.a.win) * x.f.odds;
+    x.score = (x.placeEV ?? x.winEV * 0.8) + 0.5 * x.winEV + 0.15 * x.f.ana.length;
   });
   cand.sort((a, b) => b.score - a.score);
   return cand[0];
@@ -3138,16 +3139,19 @@ function statsTable(stats, ctx, opts = {}){
       <td class="r num">${pct(s.top2)}%</td>
       <td class="r num">${pct(s.top3)}%</td>
       <td class="r num">${s.avgPos.toFixed(2)}</td>
-      <td class="r num">${s.fairOdds ? (s.fairOdds < 1000 ? s.fairOdds.toFixed(1) : "999+") : "—"}</td>
-      <td class="r num small">${f.odds ? f.odds.toFixed(1) : "—"}</td>
       ${(() => { const pw = opts.M ? opts.M.win[s.i] : s.win, pp = opts.M ? opts.M.place[s.i] : placeProb(s, N);
-        return `<td class="r num ${f.odds ? evCls(pw * f.odds) : ""}">${f.odds ? (pw * f.odds).toFixed(2) : "—"}</td>
+        // 想定単勝・期待値は「買い目の判断に使う確率」（オッズと統合した確率）でそろえる：期待値 = 実単勝 ÷ 想定単勝
+        const fair = pw > 0 ? 1 / pw : null;
+        return `${opts.M ? `<td class="r num">${pct(pw)}%</td>` : ""}
+      <td class="r num">${fair ? (fair < 1000 ? fair.toFixed(1) : "999+") : "—"}</td>
+      <td class="r num small">${f.odds ? f.odds.toFixed(1) : "—"}</td>
+      <td class="r num ${f.odds ? evCls(pw * f.odds) : ""}">${f.odds ? (pw * f.odds).toFixed(2) : "—"}</td>
       <td class="r num ${f.placeLo ? evCls(pp * f.placeLo) : ""}">${f.placeLo ? (pp * f.placeLo).toFixed(2) : "—"}</td>`; })()}
       <td><div class="dist" aria-label="着順分布">${dist}</div></td>
     </tr>`;
   }).join("");
   return `<div class="tbl-wrap"><table>
-      <thead><tr><th>印</th><th>馬番</th><th>馬名</th><th>1着率</th>${prevWin ? `<th class="r">前回比</th>` : ""}<th class="r">連対率</th><th class="r">複勝率</th><th class="r">平均着順</th><th class="r">想定単勝</th><th class="r">実単勝</th><th class="r" title="1着率×単勝オッズ。1.0超で理論上プラス">単勝期待値</th><th class="r" title="複勝率×複勝オッズ（下限）">複勝期待値</th><th>着順分布（1着→${N}着）</th></tr></thead>
+      <thead><tr><th>印</th><th>馬番</th><th>馬名</th><th>${opts.M ? "1着率（シミュ）" : "1着率"}</th>${prevWin ? `<th class="r">前回比</th>` : ""}<th class="r">連対率</th><th class="r">複勝率</th><th class="r">平均着順</th>${opts.M ? `<th class="r" title="シミュレーションの1着率とオッズを統合した確率。買い目の判断にはこちらを使う">1着率（統合）</th>` : ""}<th class="r" title="1 ÷ ${opts.M ? "統合した" : ""}1着率（控除なし）">想定単勝</th><th class="r" title="ページ上部に表示した時点の単勝オッズ">実単勝</th><th class="r" title="${opts.M ? "統合した" : ""}1着率×実単勝（＝実単勝÷想定単勝）。1.0超で理論上プラス">単勝期待値</th><th class="r" title="${opts.M ? "統合した" : ""}複勝率×複勝オッズ（下限）">複勝期待値</th><th>着順分布（1着→${N}着）</th></tr></thead>
       <tbody>${rows}</tbody></table></div>`;
 }
 function renderResult(){
@@ -3168,7 +3172,7 @@ function renderResult(){
     ${darkF ? `<div class="darkcard">
       <div class="dk-badge">注目穴馬</div>
       <div class="dk-main">${ub(darkF.num, darkF.waku)} <b class="dk-name">${esc(darkF.name)}</b> <span class="small">${darkF.pop ? darkF.pop + "番人気・" : ""}単勝 ${darkF.odds?.toFixed(1)} 倍・複勝 ${darkF.placeLo ?? "—"}〜${darkF.placeHi ?? "—"} 倍</span></div>
-      <div class="dk-stats"><span>全条件平均 1着率 <b class="num">${pct(dark.a.win)}%</b></span><span>複勝率 <b class="num">${pct(dark.a.top3)}%</b></span><span>複勝期待値 <b class="num">${dark.placeEV.toFixed(2)}</b></span><span>単勝期待値 <b class="num">${dark.winEV.toFixed(2)}</b></span></div>
+      <div class="dk-stats"><span>1着率 <b class="num">${pct(sim.cands?.M ? sim.cands.M.win[dark.i] : dark.a.win)}%</b>${sim.cands?.M ? `<span class="small">（統合・シミュ${pct(dark.a.win)}%）</span>` : ""}</span><span>複勝率 <b class="num">${pct(sim.cands?.M ? sim.cands.M.place[dark.i] : dark.a.top3)}%</b>${sim.cands?.M ? `<span class="small">（統合・シミュ${pct(dark.a.top3)}%）</span>` : ""}</span><span>複勝期待値 <b class="num">${dark.placeEV != null ? dark.placeEV.toFixed(2) : "—"}</b></span><span>単勝期待値 <b class="num">${dark.winEV.toFixed(2)}</b></span></div>
       <div class="chips">${darkF.ana.map(a => `<span class="chip ana">${esc(a)}</span>`).join("") || `<span class="small">穴要素なし（能力評価が市場より高い）</span>`}</div>
     </div>` : ""}
 
@@ -3183,7 +3187,7 @@ function renderResult(){
 
     <h3 class="sec">選択条件の結果 <span class="small">馬場「${esc(ctx.race.going)}」・ペース「${PACE_LABEL[sim.pace]}」・第${sim.runNo}回実行・${res.runs.toLocaleString()}回</span></h3>
     ${statsTable(res.stats, ctx, { prev: sim.prevStats, dark: darkF?.num })}
-    <p class="small">${sim.pace === "auto" ? `自然発生したペース：スロー ${pct(pd["スローペース"])}%・ミドル ${pct(pd["ミドルペース"])}%・ハイ ${pct(pd["ハイペース"])}%。` : ""}想定単勝は 1÷1着率（控除なし）。実行するたびに新しい乱数で走らせるので数字は毎回少し変わります（1万回なら1着率の誤差は±1%程度）。</p>
+    <p class="small">${sim.pace === "auto" ? `自然発生したペース：スロー ${pct(pd["スローペース"])}%・ミドル ${pct(pd["ミドルペース"])}%・ハイ ${pct(pd["ハイペース"])}%。` : ""}この表の想定単勝は 1÷シミュレーションの1着率（控除なし・オッズと統合する前）。上の「最も可能性が高い結果」の表では、オッズと統合した1着率で想定単勝と期待値をそろえています。実行するたびに新しい乱数で走らせるので数字は毎回少し変わります（1万回なら1着率の誤差は±1%程度）。</p>
 
     <h3 class="sec">馬場×ペース 全12条件 <span class="small">各${res.runs.toLocaleString()}回・マスをクリックで詳細</span></h3>
     <div class="matrix"><div class="mrow mh"><div class="mhead"></div>${PACES.map(p => `<div class="mhead">${PACE_LABEL[p]}ペース</div>`).join("")}</div>${tiles}</div>
@@ -3528,6 +3532,7 @@ function summarizeSim(r, sim){
     bet: planTxt(sim.plans?.[1000]), bet5: planTxt(sim.plans?.[5000]), k1: kp(sim.plans?.[1000]), k5: kp(sim.plans?.[5000]), evm1: evm(sim.plans?.[1000]),
     anaTop: (() => { const L = sim.cands?.list; if (!L) return null; const pop = {}; f.forEach(x => pop[x.num] = x.pop || 99);
       return L.filter(c => c.nums.some(n => pop[n] >= 6) && c.ev >= 1.0).sort((a, b) => b.evL - a.evL).slice(0, 3).map(c => ({ t: `${c.type} ${c.nums.join("-")}`, odds: c.odds, ev: +c.ev.toFixed(2), evL: +c.evL.toFixed(2), p: c.p })); })(),
+    calc: { a: Bets.CAL.a, b: Bets.CAL.b, v: 3 },
     favPop: f[w[0].i].pop ?? null, mktFav: (f.filter(x => x.odds > 1).sort((a, b) => a.odds - b.odds)[0] || {}).num ?? null, hasOdds: !!sim.cands, oddsAsOf: r.oddsAsOf || null, evTop, moves };
 }
 // ===== クラウド版（GitHub Pages）：データは data/*.json、更新は GitHub Actions に依頼 =====
@@ -3969,13 +3974,14 @@ function computeCheck(d){
   });
   const all = checkRows(d);
   const preAvail = checkRows(d, "pre").filter(x => x.res && x.row).length;
-  CHECK[d] = { n: items.length, total: all.length, done: all.filter(x => x.res).length, noRow: all.filter(x => x.res && !x.row).length, preAvail, mode: CHECK_MODE.v, tot, fav1, fav3, tri, dark3, darkN, pre, per, at: new Date().toISOString() };
+  const stale = CHECK_MODE.v === "latest" ? items.filter(({ row }) => !row.calc || row.calc.v < 3 || Math.abs(row.calc.a - Bets.CAL.a) > 0.005 || Math.abs(row.calc.b - Bets.CAL.b) > 0.005).length : 0;
+  CHECK[d] = { stale, n: items.length, total: all.length, done: all.filter(x => x.res).length, noRow: all.filter(x => x.res && !x.row).length, preAvail, mode: CHECK_MODE.v, tot, fav1, fav3, tri, dark3, darkN, pre, per, at: new Date().toISOString() };
   return CHECK[d];
 }
 async function startCheck(){
   const d = ST.date, rows = checkRows(d);
   if (!rows.some(x => x.row)) toast("この端末にはこの日の発走前の予想が残っていません。結果の取得と学習だけ行います（「学習・成績」タブから予想し直して答え合わせできます）");
-  const need = rows.filter(x => !x.res).length;
+  const need = rows.filter(x => !x.res || !x.r.oddsFinal).length;   // 結果か確定オッズ（組み合わせ馬券を含む）がまだのレース
   if (!need || !SERVER.enabled){ showCheck(d); return; }
   if (SERVER.cloud && !LS.get("keibaGhToken", "")){ showCheck(d); toast("結果は日曜16:50と17:40に自動で取得されます。すぐ見たいときはPCのアプリで「答え合わせ」を押してください"); return; }
   if (!SERVER.on){ showCheck(d); toast("取得済みの結果だけで集計しました"); return; }
@@ -4003,6 +4009,7 @@ function checkPanel(d){
   return `<div class="checkbox"><h3>答え合わせ <span class="small">${c.n}/${c.total}レースで集計（${isPre ? "発走前の予想" : "最新の予想"}）</span></h3>
     <div class="checkmode small">集計に使う予想：<button class="btn" data-cm="pre" aria-pressed="${isPre}">発走前の予想（実力の判定用）</button><button class="btn" data-cm="latest" aria-pressed="${!isPre}">最新の予想（学習の反映を確認）</button></div>
     ${isPre && !c.preAvail ? `<p class="small neg"><b>この端末には、この日の発走前の予想が1レースも残っていません。</b>発走前に一括シミュレーションした端末（スマホなど）で答え合わせするか、「最新の予想」に切り替えてください。次回からはクラウドが発走前の予想を自動で記録します。</p>` : ""}
+    ${!isPre && c.stale ? `<p class="small neg"><b>この「最新の予想」のうち ${c.stale}レースは、修正前の版か古い学習の設定で計算されたものです。</b>「学習・成績」タブの「学習を反映して全レースを予想し直す」を押してから、もう一度確認してください。</p>` : ""}
     ${isPre && c.preAvail && c.noRow ? `<p class="small">発走前の予想がない ${c.noRow}レースは集計から除いています。</p>` : ""}
     ${c.n ? `<div class="tbl-wrap"><table><thead><tr><th>買い方</th><th class="r">購入R</th><th class="r">投資</th><th class="r">払戻</th><th class="r">収支</th><th class="r">回収率</th><th class="r">的中R</th></tr></thead>
     <tbody>${Object.values(c.tot).filter(t => t.races).map(row).join("") || `<tr><td colspan="7" class="small">買い目のあるレースはありませんでした（すべて見送り）</td></tr>`}</tbody></table></div>
