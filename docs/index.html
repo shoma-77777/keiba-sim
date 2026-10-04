@@ -261,6 +261,8 @@ tr.darkrow{background:color-mix(in srgb,var(--gold) 9%,transparent)}
   .updbar .btn{padding:7px 10px;font-size:13px}
   .updbar #batchBtn{width:100%}
 }
+.paceline{font-size:13px;margin-top:6px;display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline}
+.paceline .small{color:var(--muted)}
 .oddsline{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin:10px 0;line-height:1.9}
 .plan h5{font-size:13px;margin:10px 0 6px;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
 .plan .evmax{border-top:1px dashed var(--line);margin-top:12px;padding-top:4px}
@@ -273,6 +275,9 @@ tr.darkrow{background:color-mix(in srgb,var(--gold) 9%,transparent)}
 .cloudurl{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:8px 0;font-size:15px;word-break:break-all}
 .cloudurl img{background:#fff;border-radius:8px;padding:4px}
 .clog{font-family:var(--f-data);font-size:11px;max-height:160px;overflow:auto;background:var(--surface2);border-radius:6px;padding:6px 8px;white-space:pre-wrap;margin-top:6px}
+.checkbox{background:var(--surface);border:2px solid var(--gold);border-radius:10px;padding:10px 14px;margin-bottom:12px}
+.checkbox h3{font-size:16px;margin-bottom:6px}
+.rc .resline{font-size:12.5px;border-top:1px dashed var(--line);padding-top:6px}
 .diag{background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--turf);border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:12px;line-height:1.8}
 .updbar{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0 10px;display:flex;flex-direction:column;gap:8px}
 .updbar .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
@@ -879,6 +884,19 @@ const Engine = (() => {
   // paceMode: null=自然発生 / "slow" / "mid" / "high"（ペースを固定したシナリオ）
   const PACE_FIX = { slow: 0.8, mid: 2.1, high: 3.4 };
   const paceLabelOf = pace => pace >= 2.9 ? "ハイペース" : pace <= 1.3 ? "スローペース" : "ミドルペース";
+  // ペース予想：出走馬の脚質（前に行く馬の数）から、自然に起きるペースの確率を計算（シミュレーションと同じ式）
+  const ncdf = x => { const t = 1 / (1 + 0.2316419 * Math.abs(x)); const d = 0.3989423 * Math.exp(-x * x / 2);
+    const p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274)))); return x > 0 ? 1 - p : p; };
+  function paceForecast(ctx){
+    const mu = 1.0 + 0.5 * ctx.frontCount, sd = 0.9;
+    const slow = ncdf((1.3 - mu) / sd), high = 1 - ncdf((2.9 - mu) / sd), mid = Math.max(0, 1 - slow - high);
+    const by = k => ctx.field.filter(f => f.prof.n && f.style === k);
+    const fronts = ctx.field.filter(f => f.earlyPos < 0.2).sort((a, b) => a.earlyPos - b.earlyPos);
+    const probs = { slow, mid, high };
+    const best = Object.entries(probs).sort((a, b) => b[1] - a[1])[0][0];
+    return { ...probs, best, frontCount: ctx.frontCount, fronts: fronts.map(f => ({ num: f.num, name: f.name, style: f.style })),
+      styles: { 逃げ: by("逃げ").length, 先行: by("先行").length, 差し: by("差し").length, 追込: by("追込").length } };
+  }
   function simulateOne(ctx, seed, trace, paceMode){
     const rng = mulberry32(seed);
     const { field, N } = ctx;
@@ -961,7 +979,7 @@ const Engine = (() => {
     return 8;
   }
 
-  return { oddsReady, filledOdds, bloodProfile, seasonProfile, setWeights, get WEIGHTS(){ return WEIGHTS; }, SIRES, seasonOf, buildSpeedModel, speedFigure, setAnaWeights, get ANA(){ return ANA; }, ANA_DEFAULT, jockeyKey, paceLabelOf, COURSE, courseOf, gradeOf, parseRun, profile, buildContext, simulateOne, monteCarlo, findRunWhereWins, wakuOf, jockeyPts, GRADE_BASE };
+  return { paceForecast, oddsReady, filledOdds, bloodProfile, seasonProfile, setWeights, get WEIGHTS(){ return WEIGHTS; }, SIRES, seasonOf, buildSpeedModel, speedFigure, setAnaWeights, get ANA(){ return ANA; }, ANA_DEFAULT, jockeyKey, paceLabelOf, COURSE, courseOf, gradeOf, parseRun, profile, buildContext, simulateOne, monteCarlo, findRunWhereWins, wakuOf, jockeyPts, GRADE_BASE };
 })();
 if (typeof module !== "undefined") module.exports = Engine;
 
@@ -2375,6 +2393,23 @@ function popMoveHtml(f){
   const pp = m.fromPop && m.toPop && m.fromPop !== m.toPop ? `${m.fromPop}→${m.toPop}人気 ` : "";
   return `<span class="chip ${up ? "mvup" : down ? "mvdn" : ""}" title="${esc(m.at)} 時点からの変化">${up ? "▲" : down ? "▼" : "→"} ${pp}${m.fromOdds}→${m.toOdds}倍</span>`;
 }
+// 印：◎○▲は1着率の上位3頭。4番手以下でも▲と僅差（1着率が▲の65%以上、または3着内率が▲の85%以上）なら全て△
+function marksFor(sorted){
+  const m = sorted.map((_, k) => ["◎", "○", "▲"][k] || "");
+  const t = sorted[2]; if (!t) return m;
+  sorted.forEach((s, k) => { if (k >= 3 && (s.win >= t.win * 0.65 || s.top3 >= t.top3 * 0.85)) m[k] = "△"; });
+  return m;
+}
+const PACE_JA = { slow: "スロー", mid: "ミドル", high: "ハイ" };
+function paceLine(pf){
+  const order = ["slow", "mid", "high"].sort((a, b) => pf[b] - pf[a]);
+  return `<b>${PACE_JA[pf.best]}ペース ${pct(pf[pf.best])}%</b>（${order.filter(k => k !== pf.best).map(k => `${PACE_JA[k]} ${pct(pf[k])}%`).join("・")}）`;
+}
+function paceWhy(pf){
+  const st = pf.styles;
+  if (st.逃げ + st.先行 + st.差し + st.追込 === 0) return "新馬など過去の走りがない馬ばかりのため、展開予想は参考値です";
+  return `前に行きたい馬 ${pf.frontCount}頭${pf.fronts.length ? `（${pf.fronts.slice(0, 4).map(f => f.num + "番").join("・")}${pf.fronts.length > 4 ? "…" : ""}）` : ""}・脚質 逃げ${st.逃げ} 先行${st.先行} 差し${st.差し} 追込${st.追込}。${pf.frontCount >= 4 ? "先行争いが激しくなりやすい" : pf.frontCount <= 1 ? "競りかける馬が少なく落ち着きやすい" : "標準的な流れになりやすい"}`;
+}
 const evCls = v => v >= 1.1 ? "pos" : v < 0.8 ? "neg" : "";
 const placeProb = (s, N) => N <= 7 ? s.top2 : s.top3;
 function toast(msg){ const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.h); toast.h = setTimeout(() => t.hidden = true, 2400); }
@@ -2500,7 +2535,8 @@ function renderBand(){
     <div class="no">${r.no}R</div>
     <div class="grow"><h2>${esc(r.name)}</h2>
       <div class="cond">${esc(r.date)} ${esc(r.venue)} <span class="surf ${r.surface}">${r.surface}</span>${r.distance}m（${c.dir}回り・直線${Math.round(c.str)}m）・${r.fieldSize || r.entries?.length || "?"}頭・発走 ${esc(r.postTime || "")}</div>
-      ${(() => { const t = trackOf(r); if (!t) return ""; const gp = t.goingProb ? Object.entries(t.goingProb).filter(([, v]) => v > 0).map(([k, v]) => `${k}${Math.round(v * 100)}%`).join("・") : ""; return `<div class="trackline"><span>クッション値 <b class="num">${t.cushion}</b>（${esc(t.cushionLabel || "")}）</span><span>含水率 ${esc(t.moisture)}</span><span>${esc(t.note)}</span><span>天気 ${esc(t.weather)}${gp ? `→ 馬場予想 ${gp}` : ""}</span></div>`; })()}</div>
+      ${(() => { const t = trackOf(r); if (!t) return ""; const gp = t.goingProb ? Object.entries(t.goingProb).filter(([, v]) => v > 0).map(([k, v]) => `${k}${Math.round(v * 100)}%`).join("・") : ""; return `<div class="trackline"><span>クッション値 <b class="num">${t.cushion}</b>（${esc(t.cushionLabel || "")}）</span><span>含水率 ${esc(t.moisture)}</span><span>${esc(t.note)}</span><span>天気 ${esc(t.weather)}${gp ? `→ 馬場予想 ${gp}` : ""}</span></div>`; })()}
+      ${r.entries?.length ? (() => { const pf = Engine.paceForecast(sim?.ctx || makeCtx(r)); return `<div class="paceline">展開予想 ${paceLine(pf)}<span class="small">${esc(paceWhy(pf))}</span></div>`; })() : ""}</div>
     <div class="ctrls">
       <label>馬場 <select id="going">${GOINGS.map(g => `<option ${goingOf(r) === g ? "selected" : ""}>${g}</option>`).join("")}</select></label>
       <label>ペース <select id="pace">${Object.entries(PACE_LABEL).map(([k, v]) => `<option value="${k}" ${paceOf(r) === k ? "selected" : ""}>${v}</option>`).join("")}</select></label>
@@ -2583,7 +2619,8 @@ async function runSim(silent, opt = {}){
     // 予想条件で加重：馬場は当日の天気予報、ペースは出走馬の脚質構成から自然に起きる割合
     const t = trackOf(r), pd = res.paceDist;
     const gW = t?.goingProb || Object.fromEntries(GOINGS.map(g => [g, g === goingOf(r) ? 1 : 0]));
-    const pW = { slow: pd["スローペース"], mid: pd["ミドルペース"], high: pd["ハイペース"] };
+    const pf = Engine.paceForecast(ctx);                      // 選んだペースに関係なく、脚質構成から自然に起きる割合
+    const pW = { slow: pf.slow, mid: pf.mid, high: pf.high };
     const cells = []; Object.values(matrix).forEach(m => { const w = (gW[m.going] || 0) * (pW[m.pace] || 0); if (w > 0) cells.push({ m, w }); });
     const wsum = cells.reduce((a, c) => a + c.w, 0) || 1;
     const weighted = ctx.field.map((f, i) => {
@@ -2721,7 +2758,7 @@ function planCard(budget, pl, ctx){
 }
 function statsTable(stats, ctx, opts = {}){
   const st = stats.slice().sort((a, b) => b.win - a.win || a.avgPos - b.avgPos);
-  const marks = ["◎", "○", "▲", "△", "△"];
+  const marks = marksFor(st);
   const maxW = st[0].win || 1, N = ctx.N;
   const prevWin = opts.prev ? Object.fromEntries(opts.prev.map(x => [x.num, x.win])) : null;
   const rows = st.map((s, k) => {
@@ -3106,6 +3143,7 @@ function summarizeSim(r, sim){
   const mk = s => ({ num: s.num, name: s.name, win: s.win, top3: s.top3, odds: f[s.i].odds ?? null, pop: f[s.i].pop ?? null });
   const tri = sim.triTop[0];
   const tk = t => `${t.type} ${t.nums.join("-")} ${t.stake}円→的中${Math.round(t.stake * t.odds).toLocaleString()}円`;
+  const tks = pl => pl && !pl.none && !pl.noOdds && pl.tickets?.length ? pl.tickets.map(t => ({ type: t.type, nums: t.nums, stake: t.stake, odds: t.odds })) : null;
   const planTxt = pl => pl && !pl.none && !pl.noOdds && pl.tickets?.length ? pl.tickets.map(tk) : null;
   const kp = pl => pl && !pl.none && !pl.noOdds && pl.tickets?.length ? { exp: pl.expReturn, hit: pl.hitRate } : null;
   const evm = pl => pl?.evmax ? { t: tk(pl.evmax.tickets[0]), ev: pl.evmax.tickets[0].ev, hit: pl.evmax.hitRate } : null;
@@ -3117,6 +3155,10 @@ function summarizeSim(r, sim){
   return { id: r.id, no: r.no, venue: r.venue, name: r.name, surface: r.surface, distance: r.distance, field: f.length, postTime: r.postTime || "",
     going: sim.going, runs: sim.runs, at: new Date().toISOString(),
     marks: w.slice(0, 3).map(mk),
+    subs: (() => { const m = marksFor(w); return w.map((x, k) => m[k] === "△" ? mk(x) : null).filter(Boolean); })(),
+    pace: (() => { const pf = Engine.paceForecast(sim.ctx); return { slow: pf.slow, mid: pf.mid, high: pf.high, best: pf.best, front: pf.frontCount }; })(),
+    t1: tks(sim.plans?.[1000]), t5: tks(sim.plans?.[5000]), te: sim.plans?.[1000]?.evmax ? tks(sim.plans[1000].evmax) : null,
+    te5: sim.plans?.[5000]?.evmax ? tks(sim.plans[5000].evmax) : null,
     tri: tri ? { nums: tri.idx.map(i => f[i].num), p: tri.p } : null,
     dark: sim.dark ? { num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: sim.dark.a.top3 } : null,
     bet: planTxt(sim.plans?.[1000]), bet5: planTxt(sim.plans?.[5000]), k1: kp(sim.plans?.[1000]), k5: kp(sim.plans?.[5000]), evm1: evm(sim.plans?.[1000]),
@@ -3162,12 +3204,12 @@ async function cloudApi(path, opt){
     if (method === "GET") return LS.get("keibaSum." + d, {});
     LS.set("keibaSum." + d, JSON.parse(opt.body)); return { ok: true };
   }
-  if (p === "/api/update" || p === "/api/odds"){
+  if (p === "/api/update" || p === "/api/odds" || p === "/api/results"){
     const cfg = await cloudConfig();
     if (!cfg.owner) throw new Error("クラウドの設定ファイルが見つかりません");
     const date = u.searchParams.get("date");
-    await gh(`/repos/${cfg.owner}/${cfg.repo}/actions/workflows/${cfg.workflow || "update.yml"}/dispatches`, { method: "POST", body: JSON.stringify({ ref: "main", inputs: { kind: p === "/api/odds" ? "odds" : "full", date } }) });
-    SERVER.cloudWait = { since: Date.now(), prev: SERVER.status?.updated || "", kind: p === "/api/odds" ? "odds" : "full", date };
+    await gh(`/repos/${cfg.owner}/${cfg.repo}/actions/workflows/${cfg.workflow || "update.yml"}/dispatches`, { method: "POST", body: JSON.stringify({ ref: "main", inputs: { kind: p === "/api/odds" ? "odds" : p === "/api/results" ? "results" : "full", date } }) });
+    SERVER.cloudWait = { since: Date.now(), prev: SERVER.status?.updated || "", kind: p === "/api/odds" ? "odds" : p === "/api/results" ? "results" : "full", date };
     return { ok: true, date };
   }
   throw new Error("unsupported " + p);
@@ -3179,13 +3221,23 @@ async function api(path, opt){
   finally { clearTimeout(tm); }
 }
 function racesOfDay(d){ return Object.values(DB.races).filter(r => r.date === d && r.entries?.length >= 2).sort((a, b) => a.venue.localeCompare(b.venue, "ja") || a.no - b.no); }
-async function runBatch(){
+function raceStart(r){
+  const m = /(\d{1,2}):(\d{2})/.exec(r.postTime || "");
+  return new Date(`${r.date}T${m ? m[1].padStart(2, "0") + ":" + m[2] : "23:59"}:00+09:00`);
+}
+async function runBatch(force){
   if (BATCH.running) return;
-  const list = racesOfDay(ST.date);
+  const all = racesOfDay(ST.date);
+  // 自動実行のときは、発走済みで発走前の予想が残っているレースはそのまま（答え合わせは発走前の買い目で行う）
+  const saved0 = Object.fromEntries((BATCH.saved[ST.date]?.rows || []).map(x => [x.id, x]));
+  const now = new Date();
+  const list = force === true ? all : all.filter(r => !(raceStart(r) <= now && saved0[r.id] && new Date(saved0[r.id].at) <= raceStart(r)));
   if (!list.length){ toast("この日は出馬表のあるレースがありません。先に全レースを取得してください"); return; }
   while (simBusy) await new Promise(r => setTimeout(r, 100));
   BATCH.running = true; BATCH.date = ST.date; BATCH.done = 0; BATCH.total = list.length;
   list.forEach(r => delete BATCH.rows[r.id]);
+  all.filter(r => !list.includes(r)).forEach(r => { BATCH.rows[r.id] = saved0[r.id]; });
+  if (!list.length){ BATCH.running = false; renderAllTab(); renderUpd(); return; }
   setTab("all"); renderUpd();
   const t0 = performance.now();
   for (const r of list){
@@ -3197,7 +3249,10 @@ async function runBatch(){
   SERVER.lastMsg = `一括シミュレーション完了：${list.length}レース（各条件${BATCH_RUNS.toLocaleString()}回×13条件・${sec}秒）。「全レース予想」タブで一覧できます`;
   renderUpd(); setUpdProgress(1); renderAllTab(); renderVenues();
   if (SERVER.on){
-    const rows = list.map(r => BATCH.rows[r.id]).filter(Boolean);
+    // 発走後に計算し直したレースは、発走前の予想（買い目）を preRace として残す
+    const rows = all.map(r => { const x = BATCH.rows[r.id]; if (!x) return saved0[r.id] || null; const o = saved0[r.id];
+      if (o && x !== o && new Date(x.at) > raceStart(r)){ const pre = o.preRace || (new Date(o.at) <= raceStart(r) ? o : null); if (pre){ const { preRace, ...p } = pre; return { ...x, preRace: p }; } }
+      return x; }).filter(Boolean);
     api("/api/summary?date=" + ymdOf(ST.date), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date: ST.date, at: new Date().toISOString(), rows }) })
       .then(() => { BATCH.saved[ST.date] = { rows }; }).catch(() => {});
   }
@@ -3224,6 +3279,7 @@ function renderUpd(){
     <div class="row">
       <span class="lbl">全レース予想</span>
       <button class="btn ${SERVER.enabled ? "" : "primary"}" id="batchBtn" ${BATCH.running || job || !n ? "disabled" : ""}>${esc((ST.date || "").slice(5).replace("-", "/"))} の全${n}レースを一括シミュレーション</button>
+      <button class="btn" id="checkBtn" ${BATCH.running || job || !n ? "disabled" : ""}>答え合わせ</button>
       <div class="progress"><i id="updProg" style="width:${job ? (SERVER.cloud ? Math.min(95, Math.round((Date.now() - (SERVER.cloudWait?.since || Date.now())) / 60000 / (SERVER.cloudWait?.kind === "odds" ? 5 : 20) * 100)) : Math.round(100 * (job.done || 0) / Math.max(1, job.total || 1))) : 0}%"></i></div>
     </div>
     <div class="msg" id="updMsg">${SERVER.cloud ? (SERVER.lastMsg ? esc(SERVER.lastMsg) : `自動更新：金曜20時・土曜18時に全レース、土曜夜と日曜7〜16時は30分ごとにオッズ（PCの電源は不要）。${s?.error ? `<br><b>前回の取得でエラー：</b>${esc(s.error)}` : ""}`) : job ? `<b>${esc(job.step)}</b> ${job.done}/${job.total}　${esc(isoOf(job.date))} を取得中（PCで処理しています。画面を閉じても続きます）` : SERVER.lastMsg ? esc(SERVER.lastMsg) : (SERVER.enabled ? "「この日の全レースを取得」で1R〜12Rの全出走馬をDBに自動登録し、そのまま全レースを一括シミュレーションします（初回は15〜25分ほど）。" : "")}</div>
@@ -3232,7 +3288,8 @@ function renderUpd(){
   const dEl = $("#updDate"); if (dEl) dEl.onchange = e => { SERVER.updDate = e.target.value; };
   const u = $("#updBtn"); if (u) u.onclick = () => startJob("update");
   const o = $("#oddsBtn"); if (o) o.onclick = () => startJob("odds");
-  $("#batchBtn").onclick = () => runBatch();
+  $("#batchBtn").onclick = () => runBatch(true);
+  const ck = $("#checkBtn"); if (ck) ck.onclick = () => startCheck();
   const tc = $("#toCloud"); if (tc) tc.onclick = e => { e.preventDefault(); setTab("data"); };
 }
 async function startJob(kind){
@@ -3258,12 +3315,12 @@ function pollJob(now){
       let run = null;
       try { const cfg = await cloudConfig(); const j = await gh(`/repos/${cfg.owner}/${cfg.repo}/actions/runs?per_page=1&event=workflow_dispatch`); run = j.workflow_runs?.[0]; } catch (e) {}
       const mins = Math.round((Date.now() - w.since) / 60000);
-      SERVER.lastMsg = `クラウドで${w.kind === "odds" ? "オッズ" : "全レース"}を取得中（${run ? (run.status === "completed" ? "取得完了・公開待ち" : run.status === "in_progress" ? "実行中" : "順番待ち") : "依頼済み"}・${mins}分経過）。${w.kind === "odds" ? "通常2〜5分" : "初回は15〜25分"}で反映されます。この画面は閉じても大丈夫です。`;
+      SERVER.lastMsg = `クラウドで${w.kind === "odds" ? "オッズ" : w.kind === "results" ? "レース結果" : "全レース"}を取得中（${run ? (run.status === "completed" ? "取得完了・公開待ち" : run.status === "in_progress" ? "実行中" : "順番待ち") : "依頼済み"}・${mins}分経過）。${w.kind === "full" ? "初回は15〜25分" : "通常2〜5分"}で反映されます。この画面は閉じても大丈夫です。`;
       if (s.updated && s.updated !== w.prev){
         SERVER.cloudWait = null; SERVER.status = { ...s, running: false };
         SERVER.lastMsg = s.error ? "取得エラー：" + s.error : `クラウドの取得が完了（${s.updated.replace("T", " ").slice(0, 16)}）`;
         await loadServerDB(); const d = s.date ? isoOf(s.date) : null;
-        if (!s.error && d){ ST.date = d; BATCH.saved[d] = undefined; renderDays(); renderVenues(); runBatch(); }
+        if (!s.error && d){ ST.date = d; renderDays(); renderVenues(); if (SERVER.afterCheck){ SERVER.afterCheck = false; showCheck(d); } else { BATCH.saved[d] = undefined; await loadServerSummary(d); runBatch(); } }
         renderUpd(); return;
       }
       if (run && run.status === "completed" && run.conclusion === "failure"){ SERVER.cloudWait = null; SERVER.lastMsg = "クラウドの取得が失敗しました。GitHub の Actions 画面でログを確認できます。"; renderUpd(); return; }
@@ -3282,7 +3339,9 @@ function pollJob(now){
       await loadServerDB();
       const d = s.date ? isoOf(s.date) : SERVER.pendingDate;
       SERVER.pendingDate = null;
-      if (!s.error && d){ ST.date = d; renderDays(); renderVenues(); renderUpd(); if (SERVER.autoBatch){ SERVER.autoBatch = false; runBatch(); } }
+      if (!s.error && d){ ST.date = d; renderDays(); renderVenues(); renderUpd();
+        if (SERVER.afterCheck){ SERVER.afterCheck = false; SERVER.autoBatch = false; showCheck(d); }
+        else if (SERVER.autoBatch){ SERVER.autoBatch = false; runBatch(); } }
     }
   };
   SERVER.timer = setTimeout(tick, now ? 800 : 0);
@@ -3342,6 +3401,74 @@ async function serverInit(){
   renderUpd();
   if (!Object.keys(ST.sims).length) runSim(true);
 }
+// ===== 答え合わせ（発走前の買い目 × 実際の払戻） =====
+const CHECK = {};
+const PAY_KEY = { 単勝: "単勝", 複勝: "複勝", 馬連: "馬連", ワイド: "ワイド", 三連複: "三連複" };
+function parseTickets(list){
+  if (!list) return null;
+  if (typeof list[0] === "object") return list;
+  return list.map(t => { const m = /^(単勝|複勝|馬連|ワイド|三連複) ([\d-]+) (\d+)円/.exec(t); return m ? { type: m[1], nums: m[2].split("-").map(Number), stake: +m[3] } : null; }).filter(Boolean);
+}
+function payOf(t, res){
+  const tbl = res.pay?.[PAY_KEY[t.type]]; if (!tbl) return 0;
+  const key = t.type === "単勝" || t.type === "複勝" ? String(t.nums[0]) : t.nums.slice().sort((a, b) => a - b).join("-");
+  return tbl[key] ? t.stake / 100 * tbl[key] : 0;
+}
+function checkRows(d){
+  const saved = Object.fromEntries((BATCH.saved[d]?.rows || []).map(x => [x.id, x]));
+  return Object.values(DB.races).filter(r => r.date === d && r.entries?.length).sort((a, b) => a.venue.localeCompare(b.venue, "ja") || a.no - b.no)
+    .map(r => ({ r, row: (() => { const x = BATCH.rows[r.id] || saved[r.id]; return x ? (x.preRace || x) : null; })(), res: r.result || null }));
+}
+function computeCheck(d){
+  const items = checkRows(d).filter(x => x.res && x.row);
+  const plans = { "1000": { label: "1,000円（推奨）", key: "t1", alt: "bet" }, "5000": { label: "5,000円（推奨）", key: "t5", alt: "bet5" }, "e1000": { label: "期待値最大 1点（1,000円）", key: "te" }, "e5000": { label: "期待値最大 1点（5,000円）", key: "te5" } };
+  const tot = {};
+  Object.entries(plans).forEach(([k, p]) => tot[k] = { ...p, invest: 0, ret: 0, races: 0, hitRaces: 0 });
+  let fav1 = 0, fav3 = 0, tri = 0, dark3 = 0, darkN = 0, pre = 0;
+  const per = {};
+  items.forEach(({ r, row, res }) => {
+    const o = res.order, out = { order: o.slice(0, 3), plans: {} };
+    Object.entries(plans).forEach(([k, p]) => {
+      const t = parseTickets(row[p.key] || (p.alt ? row[p.alt] : null));
+      if (!t?.length) { out.plans[k] = null; return; }
+      const inv = t.reduce((a, x) => a + x.stake, 0), ret = t.reduce((a, x) => a + payOf(x, res), 0);
+      tot[k].invest += inv; tot[k].ret += ret; tot[k].races++; if (ret > 0) tot[k].hitRaces++;
+      out.plans[k] = { inv, ret, hits: t.filter(x => payOf(x, res) > 0).map(x => `${x.type}${x.nums.join("-")}`) };
+    });
+    const m0 = row.marks?.[0]?.num;
+    if (m0 === o[0]) fav1++; if (o.slice(0, 3).includes(m0)) fav3++;
+    if (row.tri && row.tri.nums.join("-") === o.slice(0, 3).join("-")) tri++;
+    if (row.dark){ darkN++; if (o.slice(0, 3).includes(row.dark.num)) dark3++; }
+    if (new Date(row.at) <= raceStart(r)) pre++;
+    out.favPos = o.indexOf(m0) + 1; out.marks = [...(row.marks || []), ...(row.subs || [])].map(x => x.num);
+    per[r.id] = out;
+  });
+  CHECK[d] = { n: items.length, total: checkRows(d).length, tot, fav1, fav3, tri, dark3, darkN, pre, per, at: new Date().toISOString() };
+  return CHECK[d];
+}
+async function startCheck(){
+  const d = ST.date, rows = checkRows(d);
+  if (!rows.some(x => x.row)){ toast("この日の予想（一括シミュレーション）がありません。先に一括シミュレーションしてください"); return; }
+  const need = rows.filter(x => !x.res).length;
+  if (!need || !SERVER.enabled){ showCheck(d); return; }
+  if (SERVER.cloud && !LS.get("keibaGhToken", "")){ showCheck(d); toast("結果は日曜16:50と17:40に自動で取得されます。すぐ見たいときはPCのアプリで「答え合わせ」を押してください"); return; }
+  if (!SERVER.on){ showCheck(d); toast("取得済みの結果だけで集計しました"); return; }
+  SERVER.afterCheck = true; SERVER.updDate = d;
+  await startJob("results");
+}
+function showCheck(d){ computeCheck(d); setTab("all"); renderAllTab(); window.scrollTo?.({ top: 0, behavior: "smooth" }); }
+function checkPanel(d){
+  const c = CHECK[d]; if (!c) return "";
+  const sgn = x => (x >= 0 ? "+" : "−") + Math.abs(Math.round(x)).toLocaleString() + "円";
+  const row = t => `<tr><td>${t.label}</td><td class="r num">${t.races}</td><td class="r num">${yen(t.invest)}</td><td class="r num">${yen(t.ret)}</td><td class="r num ${t.ret - t.invest >= 0 ? "pos" : "neg"}"><b>${sgn(t.ret - t.invest)}</b></td><td class="r num">${t.invest ? Math.round(t.ret / t.invest * 100) : 0}%</td><td class="r num">${t.hitRaces}/${t.races}</td></tr>`;
+  return `<div class="checkbox"><h3>答え合わせ <span class="small">${c.n}/${c.total}レース確定分</span></h3>
+    <div class="tbl-wrap"><table><thead><tr><th>買い方</th><th class="r">購入R</th><th class="r">投資</th><th class="r">払戻</th><th class="r">収支</th><th class="r">回収率</th><th class="r">的中R</th></tr></thead>
+    <tbody>${Object.values(c.tot).filter(t => t.races).map(row).join("")}</tbody></table></div>
+    <p class="small">◎の1着 <b>${c.fav1}</b>回・3着以内 <b>${c.fav3}</b>回（${c.n}レース）／最有力3連単の的中 <b>${c.tri}</b>回／注目穴馬の3着以内 <b>${c.dark3}</b>/${c.darkN}回。
+      ${c.pre < c.n ? `<br>注意：${c.n - c.pre}レースは発走前の予想が残っていなかったため、発走後に計算した予想（確定に近いオッズ）で集計しています。` : "すべて発走前の予想（買い目）で集計しています。"}
+      払戻はJRAの確定払戻（100円あたり）で計算。見送りのレースは投資0円です。</p></div>`;
+}
+
 const MARKS = ["◎", "○", "▲"];
 function renderAllTab(){
   const el = $("#p-all"); if (!el) return;
@@ -3360,13 +3487,16 @@ function renderAllTab(){
     return `<div class="rc">
       <div class="hd"><span class="no">${r.no}R</span><span class="nm">${esc(r.name)}</span></div>
       <div class="cond">${r.surface}${r.distance}m・${x.field}頭・発走 ${esc(r.postTime || "")}・馬場「${esc(x.going)}」想定${fromSaved ? "・保存済みの結果" : ""}</div>
-      <div class="marks">${x.marks.map((m, k) => `<span class="mk">${MARKS[k]}</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">1着${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}</div>
+      ${x.pace ? `<div class="line small">展開予想 <b>${PACE_JA[x.pace.best]}ペース ${pct(x.pace[x.pace.best])}%</b>（前に行く馬${x.pace.front}頭）</div>` : ""}
+      <div class="marks">${x.marks.map((m, k) => `<span class="mk">${MARKS[k]}</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">1着${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}${(x.subs || []).map(m => `<span class="mk">△</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気）</span>` : ""}</span><span class="wpct">1着${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}</div>
       ${x.tri ? `<div class="line">最有力の3連単 <b>${x.tri.nums.join("→")}</b> <span class="small">（${pct(x.tri.p)}%）</span></div>` : ""}
       ${x.dark ? `<div class="line">注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}3着内${pct(x.dark.top3)}%</span></div>` : ""}
       ${x.evTop?.length ? `<div class="line">期待値上位 ${x.evTop.map(e => `<span class="${evCls(e.ev)}">${e.kind}${e.num} <b>${e.ev.toFixed(2)}</b></span>`).join("・")}</div>` : ""}
       ${x.moves?.length ? `<div class="line small">人気の変動 ${x.moves.map(m => `${m.num}番 <span class="${m.ratio > 1 ? "neg" : ""}">${m.ratio > 1 ? "▲" : "▼"}${m.fromOdds}→${m.toOdds}倍${m.fromPop && m.toPop && m.fromPop !== m.toPop ? `（${m.fromPop}→${m.toPop}人気）` : ""}</span>`).join("・")}</div>` : ""}
       ${(x.hasOdds ?? !!x.marks[0]?.odds) ? `<div class="line small"><b>1,000円</b>${x.k1 ? `（期待払戻 ${Math.round(x.k1.exp).toLocaleString()}円・的中率${pct(x.k1.hit)}%）` : ""} ${x.bet ? esc(x.bet.join("／")) : "期待値1.1以上の買い目なし（見送り）"}</div><div class="line small"><b>5,000円</b>${x.k5 ? `（期待払戻 ${Math.round(x.k5.exp).toLocaleString()}円・的中率${pct(x.k5.hit)}%）` : ""} ${x.bet5 ? esc(x.bet5.join("／")) : "期待値1.1以上の買い目なし（見送り）"}</div>${x.evm1 ? `<div class="line small">期待値最大の1点：${esc(x.evm1.t)}（期待値${x.evm1.ev.toFixed(2)}・的中率${pct(x.evm1.hit)}%）</div>` : ""}` : `<div class="line small">オッズ未取得のため期待値・買い目は未計算（「オッズだけ更新」で取得）</div>`}
       ${x.oddsAsOf ? `<div class="cond">オッズ ${esc(x.oddsAsOf)} 時点</div>` : ""}
+      ${(() => { const c = CHECK[d]?.per?.[r.id]; if (!c) return r.result ? `<div class="resline">結果 <b>${r.result.order.slice(0, 3).join("→")}</b></div>` : ""; const pl = k => c.plans[k] ? `${c.plans[k].ret - c.plans[k].inv >= 0 ? "+" : "−"}${Math.abs(Math.round(c.plans[k].ret - c.plans[k].inv)).toLocaleString()}円` : "見送り";
+        return `<div class="resline">結果 <b>${c.order.join("→")}</b>　◎${c.favPos ? c.favPos + "着" : "着外"}<br>1,000円 <b class="${c.plans["1000"] && c.plans["1000"].ret >= c.plans["1000"].inv ? "pos" : "neg"}">${pl("1000")}</b>　5,000円 <b class="${c.plans["5000"] && c.plans["5000"].ret >= c.plans["5000"].inv ? "pos" : "neg"}">${pl("5000")}</b>${c.plans["1000"]?.hits.length || c.plans["5000"]?.hits.length ? `<span class="small">（的中 ${[...new Set([...(c.plans["1000"]?.hits || []), ...(c.plans["5000"]?.hits || [])])].join("・")}）</span>` : ""}</div>`; })()}
       <div class="foot"><button class="btn" data-open="${r.id}">詳しく見る・3D再生</button></div>
     </div>`;
   };
@@ -3382,6 +3512,7 @@ function renderAllTab(){
       <span class="small">参考：JRAでは1番人気の勝率はおよそ3割強、1〜3番人気のどれかが勝つのは全体のおよそ3分の2。上位人気が◎に多いのは自然です。もうけは◎ではなく、モデルと市場（オッズ）の見立てがずれる馬から出るので、買い方は◎ではなく期待値で選んでいます。</span></div>`;
   })();
   el.innerHTML = `
+    ${checkPanel(d)}
     ${diag}
     <div class="allhead"><h3>${esc(d.slice(5).replace("-", "/"))} 全レース予想</h3><span class="small">${doneN}/${list.length}レース計算済み${BATCH.running ? `（計算中 ${BATCH.done}/${BATCH.total}）` : ""}。一括計算は各条件 ${BATCH_RUNS.toLocaleString()}回×馬場4×ペース3。レースを開いて「シミュレーション実行」を押すと1万回で計算し直せます。</span></div>
     ${venues.map(v => `<h3 class="sec">${esc(v)}</h3><div class="allgrid">${list.filter(r => r.venue === v).map(card).join("")}</div>`).join("")}

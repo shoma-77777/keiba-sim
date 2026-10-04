@@ -62,6 +62,32 @@ def fetch_track(f, ymd, venues):
         log(f"馬場情報は取得できませんでした（アプリで手入力できます）: {ex}")
     return out
 
+def update_results(ymd):
+    """レース結果（着順・払戻）を取得してスナップショットに追加（答え合わせ用）"""
+    f = kc.Fetcher(delay=1.2)
+    with LOCK:
+        JOB.update(running=True, date=ymd, step="レース結果", done=0, total=0, error=None, kind="results", log=[])
+    try:
+        if not snapshot_path(ymd).exists(): raise RuntimeError("この日のデータがありません")
+        snap = json.loads(snapshot_path(ymd).read_text(encoding="utf-8"))
+        races = [r for r in snap["races"] if r.get("entries")]
+        with LOCK: JOB["total"] = len(races)
+        ok = 0
+        for i, r in enumerate(races):
+            if r.get("result") and r["result"].get("pay", {}).get("三連複"): ok += 1
+            elif kc.race_result(f, r): ok += 1
+            with LOCK: JOB["done"] = i + 1
+        if not ok: raise RuntimeError("結果をまだ取得できませんでした（確定前か、ネット接続の問題）")
+        snap["updated"] = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        snapshot_path(ymd).write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+        log(f"レース結果を取得しました（{ok}/{len(races)}レース）")
+        after_update(ymd)
+    except Exception as ex:
+        with LOCK: JOB["error"] = str(ex)
+        log("エラー: " + str(ex))
+    finally:
+        with LOCK: JOB.update(running=False, finished_at=dt.datetime.now().astimezone().isoformat(timespec="seconds"))
+
 def update_date(ymd, odds_only=False):
     """指定日の全レースを取得してDBとJSONに保存"""
     f = kc.Fetcher(delay=1.2)
@@ -238,11 +264,12 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
     def do_POST(self):
         u = urlparse(self.path); q = parse_qs(u.query)
-        if u.path in ("/api/update", "/api/odds"):
+        if u.path in ("/api/update", "/api/odds", "/api/results"):
             if JOB["running"]: return self._json({"ok": False, "message": "取得中です。終わるまでお待ちください"}, 409)
             ymd = re.sub(r"\D", "", (q.get("date") or [next_sunday().strftime("%Y%m%d")])[0])[:8]
             if len(ymd) != 8: return self._json({"ok": False, "message": "日付が正しくありません"}, 400)
-            threading.Thread(target=update_date, args=(ymd, u.path == "/api/odds"), daemon=True).start()
+            if u.path == "/api/results": threading.Thread(target=update_results, args=(ymd,), daemon=True).start()
+            else: threading.Thread(target=update_date, args=(ymd, u.path == "/api/odds"), daemon=True).start()
             return self._json({"ok": True, "date": ymd})
         if u.path.startswith("/api/cloud/"):
             cm = cloud_mod()
@@ -344,7 +371,10 @@ def main():
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--update", help="YYYYMMDD または next（次の日曜）。指定すると取得だけして終了")
     ap.add_argument("--odds", help="YYYYMMDD または next。オッズだけ更新して終了")
+    ap.add_argument("--results", help="YYYYMMDD または next。レース結果（答え合わせ用）を取得して終了")
     a = ap.parse_args()
+    if a.results:
+        update_results(next_sunday().strftime("%Y%m%d") if a.results == "next" else a.results); return
     if a.update or a.odds:
         v = a.update or a.odds
         ymd = next_sunday().strftime("%Y%m%d") if v == "next" else v

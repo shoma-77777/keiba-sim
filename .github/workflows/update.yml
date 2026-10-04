@@ -1,4 +1,4 @@
-# 競馬展開シミュレーター：日曜の全レースとオッズを自動で取得して docs/data に保存する。
+# 競馬展開シミュレーター：日曜の全レースとオッズを自動で取得して docs/data に保存する
 name: update
 on:
   schedule:
@@ -7,10 +7,12 @@ on:
     - cron: "40 12 * * 6"          # 土 21:40 前日オッズ
     - cron: "0,30 22,23 * * 6"     # 日 7:00〜8:30 オッズ
     - cron: "0,30 0-7 * * 0"       # 日 9:00〜16:30 30分ごとにオッズ
+    - cron: "50 7 * * 0"           # 日 16:50 レース結果（答え合わせ用）
+    - cron: "40 8 * * 0"           # 日 17:40 レース結果（確定の遅れ対策）
   workflow_dispatch:
     inputs:
       kind:
-        description: "auto / full（全レース取得） / odds（オッズだけ）"
+        description: "auto / full（全レース取得） / odds（オッズだけ） / results（レース結果）"
         default: "auto"
       date:
         description: "YYYYMMDD または next（次の日曜）"

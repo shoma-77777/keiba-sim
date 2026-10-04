@@ -259,6 +259,62 @@ def odds(f, race, ttl_hours=0.5):
     race["oddsAsOf"] = stamp; race["oddsSrc"] = src
     return len(got), src, None
 
+PAY_LABELS = {"単勝": ("単勝", 1), "複勝": ("複勝", 1), "枠連": ("枠連", 2), "馬連": ("馬連", 2), "ワイド": ("ワイド", 2),
+              "馬単": ("馬単", 2), "3連複": ("三連複", 3), "三連複": ("三連複", 3), "3連単": ("三連単", 3), "三連単": ("三連単", 3)}
+
+def _parse_payouts(sp):
+    """払戻表（単勝・複勝・馬連・ワイド・3連複…）を {券種: {"2-6": 払戻(100円あたり)}} に"""
+    pay = {}
+    for tr in sp.select("tr"):
+        th = tr.find("th")
+        if not th: continue
+        label = clean(th.get_text()).replace(" ", "")
+        if label not in PAY_LABELS: continue
+        name, k = PAY_LABELS[label]
+        tds = tr.find_all("td")
+        if len(tds) < 2: continue
+        nums = [int(x) for x in re.findall(r"\d+", tds[0].get_text(" "))]
+        pays = [int(x.replace(",", "")) for x in re.findall(r"([\d,]+)\s*円", tds[1].get_text(" "))]
+        if not pays:
+            pays = [int(x.replace(",", "")) for x in re.findall(r"[\d,]{3,}", tds[1].get_text(" "))]
+        if not pays or not nums: continue
+        size = len(nums) // len(pays) if len(nums) % len(pays) == 0 else k
+        out = pay.setdefault(name, {})
+        for i, amt in enumerate(pays):
+            combo = nums[i * size:(i + 1) * size]
+            if len(combo) != k: continue
+            key = "-".join(map(str, combo if name in ("馬単", "三連単") else sorted(combo)))
+            out[key] = amt
+    return pay
+
+def _parse_order(sp):
+    """着順表から [(着順, 馬番), ...]"""
+    for tbl in sp.select("table"):
+        heads = [clean(th.get_text()).replace(" ", "") for th in tbl.select("tr th")]
+        if "着順" not in heads or "馬番" not in heads: continue
+        ir, iu = heads.index("着順"), heads.index("馬番")
+        rows = []
+        for tr in tbl.select("tr"):
+            td = tr.find_all("td")
+            if len(td) <= max(ir, iu): continue
+            r, u = clean(td[ir].get_text()), clean(td[iu].get_text())
+            if r.isdigit() and u.isdigit(): rows.append((int(r), int(u)))
+        if rows: return sorted(rows)
+    return []
+
+def race_result(f, race):
+    """レース結果（着順と払戻）。race["result"] = {"order": [1着馬番, 2着, ...], "pay": {...}}"""
+    for url, enc in ((f"{BASE_RACE}/race/result.html?race_id={race['id']}", "EUC-JP"), (f"{BASE_DB}/race/{race['id']}/", "EUC-JP")):
+        try:
+            sp = soup(f.get(url, ttl_hours=1, encoding=enc))
+        except Exception:
+            continue
+        order = _parse_order(sp); pay = _parse_payouts(sp)
+        if order and pay.get("単勝"):
+            race["result"] = {"order": [u for _, u in order], "pay": pay, "at": dt.datetime.now().strftime("%Y-%m-%d %H:%M")}
+            return True
+    return False
+
 def training(f, race):
     try:
         html = f.get(f"{BASE_RACE}/race/oikiri.html?race_id={race['id']}", ttl_hours=12, encoding="EUC-JP")

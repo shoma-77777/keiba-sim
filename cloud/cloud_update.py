@@ -36,7 +36,7 @@ def snapshot_age_hours(ymd):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--kind", default="auto", choices=["auto", "full", "odds"])
+    ap.add_argument("--kind", default="auto", choices=["auto", "full", "odds", "results"])
     ap.add_argument("--date", default="next")
     a = ap.parse_args()
     ymd = S.next_sunday().strftime("%Y%m%d") if a.date in ("", "next") else a.date.replace("-", "")
@@ -47,8 +47,15 @@ def main():
         if age is None: kind = "full"
         elif wd in (4, 5) and age > 10: kind = "full"   # 金・土は出馬表の変更（取消など）も拾う
         else: kind = "odds"
+    if kind == "auto" or kind == "odds":
+        now = dt.datetime.now()
+        if now.weekday() == 6 and now.hour * 60 + now.minute >= 16 * 60 + 40 and ymd == now.strftime("%Y%m%d"):
+            kind = "results"            # 日曜の最終レース後は結果（答え合わせ用）
     print(f"対象 {ymd} / {kind}", flush=True)
-    S.update_date(ymd, odds_only=(kind == "odds"))
+    if kind == "results":
+        S.update_results(ymd)
+    else:
+        S.update_date(ymd, odds_only=(kind == "odds"))
     if kind == "odds" and S.JOB.get("error") and not S.snapshot_path(ymd).exists():
         print("スナップショットがないため全レース取得に切り替えます", flush=True)
         S.update_date(ymd, odds_only=False)
