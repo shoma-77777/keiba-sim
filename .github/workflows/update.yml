@@ -1,0 +1,56 @@
+# 競馬展開シミュレーター：日曜の全レースとオッズを自動で取得して docs/data に保存する
+name: update
+on:
+  schedule:
+    - cron: "10 11 * * 5"          # 金 20:10（日本時間）出馬表確定後の全レース取得
+    - cron: "10 9 * * 6"           # 土 18:10 全レース取得（取消などの反映）
+    - cron: "40 12 * * 6"          # 土 21:40 前日オッズ
+    - cron: "0,30 22,23 * * 6"     # 日 7:00〜8:30 オッズ
+    - cron: "0,30 0-7 * * 0"       # 日 9:00〜16:30 30分ごとにオッズ
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: "auto / full（全レース取得） / odds（オッズだけ）"
+        default: "auto"
+      date:
+        description: "YYYYMMDD または next（次の日曜）"
+        default: "next"
+permissions:
+  contents: write
+concurrency:
+  group: keiba-update
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TZ: Asia/Tokyo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cloud/requirements.txt
+      - name: 取得ページのキャッシュ
+        uses: actions/cache@v4
+        with:
+          path: cloud/cache
+          key: fetch-${{ github.run_id }}
+          restore-keys: fetch-
+      - run: pip install -r cloud/requirements.txt
+      - name: 取得
+        run: python cloud/cloud_update.py --kind "${{ github.event.inputs.kind || 'auto' }}" --date "${{ github.event.inputs.date || 'next' }}"
+      - name: 保存
+        run: |
+          git config user.name "keiba-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A docs/data
+          if git diff --cached --quiet; then echo "変更なし"; exit 0; fi
+          git commit -q -m "data: $(date +'%Y-%m-%d %H:%M')"
+          for i in 1 2 3 4; do
+            git pull -q --rebase -X theirs origin main && git push -q && exit 0
+            sleep $((i*5))
+          done
+          exit 1
