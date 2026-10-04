@@ -278,6 +278,8 @@ tr.darkrow{background:color-mix(in srgb,var(--gold) 9%,transparent)}
 .checkbox{background:var(--surface);border:2px solid var(--gold);border-radius:10px;padding:10px 14px;margin-bottom:12px}
 .checkbox h3{font-size:16px;margin-bottom:6px}
 .rc .resline{font-size:12.5px;border-top:1px dashed var(--line);padding-top:6px}
+.learnchip{border:1px solid #3b7fc4;color:#3b7fc4;background:var(--surface);border-radius:14px;padding:3px 10px;font-size:12px;font-weight:700;cursor:pointer}
+.checkmode{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 8px}
 .learnbox{background:var(--surface);border:1px solid var(--line);border-left:4px solid #3b7fc4;border-radius:8px;padding:10px 14px;margin-bottom:12px}
 .learnbox h3{font-size:15px;margin-bottom:4px}
 .learnbox .upsets{margin:4px 0 8px 1.2em;font-size:13px;line-height:1.8}
@@ -317,6 +319,7 @@ tr.darkrow{background:color-mix(in srgb,var(--gold) 9%,transparent)}
   <header class="top">
     <div class="brand">競馬展開シミュレーター<small>JRA 日曜開催対応</small></div>
     <div class="src" id="src"></div>
+    <button class="learnchip" id="learnChip" hidden></button>
   </header>
 
   <section class="updbar" id="updbar" aria-label="データ更新と一括予想"></section>
@@ -333,6 +336,7 @@ tr.darkrow{background:color-mix(in srgb,var(--gold) 9%,transparent)}
     <button class="tab" role="tab" data-tab="card" aria-selected="true">出馬表・補正</button>
     <button class="tab" role="tab" data-tab="result" aria-selected="false">シミュレーション結果</button>
     <button class="tab" role="tab" data-tab="replay" aria-selected="false">3Dレース再生</button>
+    <button class="tab" role="tab" data-tab="learn" aria-selected="false">学習・成績</button>
     <button class="tab" role="tab" data-tab="db" aria-selected="false">競走馬DB</button>
     <button class="tab" role="tab" data-tab="data" aria-selected="false">データ取込</button>
   </nav>
@@ -369,6 +373,7 @@ tr.darkrow{background:color-mix(in srgb,var(--gold) 9%,transparent)}
     <div class="legend3d small">見方：<b>黄色い輪</b>が注目馬。馬の上の数字は馬番（色は枠の色）。右上の<b>全体図</b>はコースを真上から見たもので、点が各馬の位置。下の<b>隊列</b>は先頭からどれだけ離れているか（1目盛り＝1馬身≒2.4m）。左下に実況が流れます。</div>
     <div class="passing" id="passing"></div>
   </section>
+  <section class="panel" id="p-learn" hidden></section>
   <section class="panel" id="p-db" hidden></section>
   <section class="panel" id="p-data" hidden></section>
 </div>
@@ -3721,6 +3726,38 @@ function applyLearn(m){
   Object.entries(m.weights || {}).forEach(([k, v]) => { w[k] = (w[k] ?? 1) * v; });
   Engine.setWeights(w);
   if (m.anaWeights && Object.keys(m.anaWeights).length) Engine.setAnaWeights(m.anaWeights);
+  updateLearnChip();
+}
+function updateLearnChip(){
+  const el = $("#learnChip"); if (!el) return;
+  const m = LEARN.model; if (!m){ el.hidden = true; return; }
+  const last = m.hist?.length ? m.hist[m.hist.length - 1].date : "";
+  el.hidden = false; el.textContent = `学習済み ${m.races}レース${last ? `（${last.slice(5).replace("-", "/")}まで）` : ""}`;
+  el.onclick = () => setTab("learn");
+}
+function renderLearnTab(){
+  const el = $("#p-learn"); if (!el) return;
+  const m = LEARN.model, d = ST.date;
+  const dates = m?.hist || [];
+  el.innerHTML = `
+    <div class="learnbox"><h3>蓄積しているデータ</h3>
+      ${m ? `<p>答え合わせ済み <b>${m.races}レース</b>（${dates.length}開催日）・最終更新 ${esc(new Date(m.updated).toLocaleString("ja-JP"))}</p>
+      <div class="tbl-wrap"><table><thead><tr><th>開催日</th><th class="r">記録したレース</th><th class="r">1着の当てやすさ：モデル</th><th class="r">オッズ</th><th class="r">統合</th></tr></thead>
+      <tbody>${dates.slice().reverse().map(h => `<tr><td>${esc(h.date)}</td><td class="r num">${h.races}</td><td class="r num">${h.model?.toFixed?.(3) ?? h.model}</td><td class="r num">${h.market?.toFixed?.(3) ?? h.market}</td><td class="r num"><b>${h.blend?.toFixed?.(3) ?? h.blend}</b></td></tr>`).join("")}</tbody></table></div>
+      <p class="small">1レースごとに、各馬のモデルの確率・確定オッズ・各要素の補正値・着順・タイム・通過順・上がり3F・穴パターンを記録しています。数字（対数損失）は小さいほど当たっていることを表します。</p>`
+      : `<p>まだ蓄積はありません。レース後に「答え合わせ」を押すと、その日の結果が記録され、ここに表示されます。</p>`}
+    </div>
+    ${m ? `<div class="learnbox"><h3>学習した内容（いまの予想に反映中）</h3>
+      <p class="small"><b>モデルとオッズの統合</b>：p ∝ モデル<sup>${m.calib.a}</sup> × オッズ<sup>${m.calib.b}</sup>（学習前は 0.5・0.55）</p>
+      <p class="small"><b>要素の重み</b>：${Object.keys(m.weights || {}).length ? Object.entries(m.weights).map(([k, v]) => `${esc(k)} ×${v}`).join("・") : "まだ変更なし（レースが少ないうちはほぼ動かしません）"}</p>
+      <p class="small"><b>穴パターンの加点</b>：${Object.entries(m.anaWeights || {}).map(([k, v]) => `${esc(k)} ${v.pts}`).join("・") || "初期値"}</p>
+      <p class="small"><b>馬場の偏り（直近14日）</b>：${Object.entries(m.bias || {}).map(([k, v]) => `${esc(k)} ${v.races}R 前残り度${v.front} 内枠度${v.inner}`).join("／") || "なし"}</p>
+      <div class="ctrls"><button class="btn primary" id="reBatch">学習を反映して ${esc(d.slice(5).replace("-", "/"))} の全レースを予想し直す</button></div>
+      <p class="small">予想し直したあと「答え合わせ」を「最新の予想」で行うと、学習の反映を確かめられます。<b>ただし、その日の結果で学習してから同じ日を予想し直すと、答えを少し知った状態になるので成績は実力より良く出ます。</b>本当の実力は、翌週以降の答え合わせ（発走前の予想）で測ります。</p>
+    </div>` : ""}
+    ${m ? upsetPanel(d) : ""}
+    ${m ? learnPanel() : ""}`;
+  const rb = $("#reBatch"); if (rb) rb.onclick = async () => { CHECK_MODE.v = "latest"; await runBatch(true); showCheck(ST.date); };
 }
 async function loadLearn(){
   try {
@@ -3748,6 +3785,7 @@ async function runLearn(d){
 }
 // 答え合わせの結果から、学習用の仮想収支 [投資, 払戻] を作る
 function betsForLearn(d, id){
+  if (CHECK_MODE.v !== "pre") return null;      // 仮想収支（実力の判定）には発走前の予想だけを使う
   const c = CHECK[d]?.per?.[id]; if (!c) return null;
   const pick = k => c.plans[k] ? [c.plans[k].inv, Math.round(c.plans[k].ret)] : [0, 0];
   return { t1: pick("1000"), t5: pick("5000"), te: pick("e1000") };
@@ -3781,6 +3819,7 @@ function learnPanel(){
 
 // ===== 答え合わせ（発走前の買い目 × 実際の払戻） =====
 const CHECK = {};
+const CHECK_MODE = { v: "pre" };   // pre=発走前の予想で集計 / latest=最新の予想で集計
 const PAY_KEY = { 単勝: "単勝", 複勝: "複勝", 馬連: "馬連", ワイド: "ワイド", 馬単: "馬単", 三連複: "三連複" };
 function parseTickets(list){
   if (!list) return null;
@@ -3795,7 +3834,7 @@ function payOf(t, res){
 function checkRows(d){
   const saved = Object.fromEntries((BATCH.saved[d]?.rows || []).map(x => [x.id, x]));
   return Object.values(DB.races).filter(r => r.date === d && r.entries?.length).sort((a, b) => a.venue.localeCompare(b.venue, "ja") || a.no - b.no)
-    .map(r => ({ r, row: (() => { const x = BATCH.rows[r.id] || saved[r.id]; return x ? (x.preRace || x) : null; })(), res: r.result || null }));
+    .map(r => ({ r, row: (() => { const x = BATCH.rows[r.id] || saved[r.id]; return x ? (CHECK_MODE.v === "latest" ? x : (x.preRace || x)) : null; })(), res: r.result || null }));
 }
 function computeCheck(d){
   const items = checkRows(d).filter(x => x.res && x.row);
@@ -3826,7 +3865,7 @@ function computeCheck(d){
 }
 async function startCheck(){
   const d = ST.date, rows = checkRows(d);
-  if (!rows.some(x => x.row)){ toast("この日の予想（一括シミュレーション）がありません。先に一括シミュレーションしてください"); return; }
+  if (!rows.some(x => x.row)) toast("この端末にはこの日の発走前の予想が残っていません。結果の取得と学習だけ行います（「学習・成績」タブから予想し直して答え合わせできます）");
   const need = rows.filter(x => !x.res).length;
   if (!need || !SERVER.enabled){ showCheck(d); return; }
   if (SERVER.cloud && !LS.get("keibaGhToken", "")){ showCheck(d); toast("結果は日曜16:50と17:40に自動で取得されます。すぐ見たいときはPCのアプリで「答え合わせ」を押してください"); return; }
@@ -3835,8 +3874,8 @@ async function startCheck(){
   await startJob("results");
 }
 function showCheck(d){ computeCheck(d); setTab("all"); renderAllTab(); window.scrollTo?.({ top: 0, behavior: "smooth" });
-  runLearn(d).then(m => { if (m){ renderAllTab(); toast(`答え合わせの結果を学習しました（累計${m.races}レース）`); } }).catch(e => console.error(e));
-  sendBetsToCloud(d); }
+  runLearn(d).then(m => { if (m){ renderAllTab(); if (ST.tab === "learn") renderLearnTab(); toast(`答え合わせの結果を学習しました（累計${m.races}レース）。「学習・成績」タブで内容を確認でき、予想し直すこともできます`); } }).catch(e => console.error(e));
+  if (CHECK_MODE.v === "pre") sendBetsToCloud(d); }
 // クラウド版：スマホの答え合わせ（発走前の推奨の仮想収支）をクラウドの学習に送る
 async function sendBetsToCloud(d){
   if (!SERVER.cloud || !LS.get("keibaGhToken", "") || LS.get("keibaBetsSent." + d, false)) return;
@@ -3852,6 +3891,7 @@ function checkPanel(d){
   const sgn = x => (x >= 0 ? "+" : "−") + Math.abs(Math.round(x)).toLocaleString() + "円";
   const row = t => `<tr><td>${t.label}</td><td class="r num">${t.races}</td><td class="r num">${yen(t.invest)}</td><td class="r num">${yen(t.ret)}</td><td class="r num ${t.ret - t.invest >= 0 ? "pos" : "neg"}"><b>${sgn(t.ret - t.invest)}</b></td><td class="r num">${t.invest ? Math.round(t.ret / t.invest * 100) : 0}%</td><td class="r num">${t.hitRaces}/${t.races}</td></tr>`;
   return `<div class="checkbox"><h3>答え合わせ <span class="small">${c.n}/${c.total}レース確定分</span></h3>
+    <div class="checkmode small">集計に使う予想：<button class="btn" data-cm="pre" aria-pressed="${CHECK_MODE.v === "pre"}">発走前の予想（実力の判定用）</button><button class="btn" data-cm="latest" aria-pressed="${CHECK_MODE.v === "latest"}">最新の予想（学習の反映を確認）</button></div>
     <div class="tbl-wrap"><table><thead><tr><th>買い方</th><th class="r">購入R</th><th class="r">投資</th><th class="r">払戻</th><th class="r">収支</th><th class="r">回収率</th><th class="r">的中R</th></tr></thead>
     <tbody>${Object.values(c.tot).filter(t => t.races).map(row).join("")}</tbody></table></div>
     <p class="small">◎の1着 <b>${c.fav1}</b>回・3着以内 <b>${c.fav3}</b>回（${c.n}レース）／最有力3連単の的中 <b>${c.tri}</b>回／注目穴馬の3着以内 <b>${c.dark3}</b>/${c.darkN}回。
@@ -3908,6 +3948,7 @@ function renderAllTab(){
     <div class="allhead"><h3>${esc(d.slice(5).replace("-", "/"))} 全レース予想</h3><span class="small">${doneN}/${list.length}レース計算済み${BATCH.running ? `（計算中 ${BATCH.done}/${BATCH.total}）` : ""}。一括計算は各条件 ${BATCH_RUNS.toLocaleString()}回×馬場4×ペース3。レースを開いて「シミュレーション実行」を押すと1万回で計算し直せます。</span></div>
     ${venues.map(v => `<h3 class="sec">${esc(v)}</h3><div class="allgrid">${list.filter(r => r.venue === v).map(card).join("")}</div>`).join("")}
     <div class="note">◎○▲は天気予報の馬場と脚質構成から起きやすいペースで重み付けした1着率の上位3頭。確率は過去データにもとづく推定で、的中を保証するものではありません。馬券は余裕資金の範囲で。</div>`;
+  el.querySelectorAll("[data-cm]").forEach(b => b.onclick = () => { CHECK_MODE.v = b.dataset.cm; computeCheck(d); renderAllTab(); });
   el.querySelectorAll("[data-open]").forEach(b => b.onclick = () => { ST.raceId = b.dataset.open; ST.venue = DB.races[ST.raceId]?.venue; renderVenues(); renderAll(); setTab(ST.sims[ST.raceId] ? "result" : "card"); window.scrollTo({ top: 0, behavior: "smooth" }); });
 }
 
@@ -3976,7 +4017,8 @@ function renderCloudPanel(){
 function setTab(t){
   ST.tab = t;
   $("#tabs").querySelectorAll(".tab").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === t));
-  ["all","card","result","replay","db","data"].forEach(k => $("#p-" + k).hidden = k !== t);
+  ["all","card","result","replay","learn","db","data"].forEach(k => $("#p-" + k).hidden = k !== t);
+  if (t === "learn") renderLearnTab();
   if (t === "all") renderAllTab();
   if (t !== "replay" && replayInited) Replay.stop();
   if (t === "replay") renderReplayPanel();
