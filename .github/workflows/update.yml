@@ -5,18 +5,21 @@ on:
     - cron: "10 11 * * 5"          # 金 20:10（日本時間）出馬表確定後の全レース取得
     - cron: "10 9 * * 6"           # 土 18:10 全レース取得（取消などの反映）
     - cron: "40 12 * * 6"          # 土 21:40 前日オッズ
-    - cron: "0,30 22,23 * * 6"     # 日 7:00〜8:30 オッズ
-    - cron: "0,30 0-7 * * 0"       # 日 9:00〜16:30 30分ごとにオッズ
+    - cron: "*/15 22,23 * * 6"     # 日 7:00〜8:45 15分ごとにオッズ
+    - cron: "*/15 0-7 * * 0"       # 日 9:00〜16:45 15分ごとにオッズ（16:40以降は結果の取得に切り替わる）
     - cron: "50 7 * * 0"           # 日 16:50 レース結果（答え合わせ用）
     - cron: "40 8 * * 0"           # 日 17:40 レース結果（確定の遅れ対策）
   workflow_dispatch:
     inputs:
       kind:
-        description: "auto / full（全レース取得） / odds（オッズだけ） / results（レース結果）"
+        description: "auto / full（全レース取得） / odds（オッズだけ） / results（レース結果） / learn（学習だけ）"
         default: "auto"
       date:
         description: "YYYYMMDD または next（次の日曜）"
         default: "next"
+      bets:
+        description: "（スマホの答え合わせから自動で送られる仮想収支）"
+        default: ""
 permissions:
   contents: write
 concurrency:
@@ -43,6 +46,8 @@ jobs:
           restore-keys: fetch-
       - run: pip install -r cloud/requirements.txt
       - name: 取得
+        env:
+          BETS_JSON: ${{ github.event.inputs.bets }}
         run: python cloud/cloud_update.py --kind "${{ github.event.inputs.kind || 'auto' }}" --date "${{ github.event.inputs.date || 'next' }}"
       - name: 学習（結果が出たレースから）
         run: node cloud/lib/learn_run.js docs/data || true

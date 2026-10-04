@@ -1,27 +1,27 @@
 // ===== 期待値ベースの馬券配分 =====
 const Bets = (() => {
-  const TAKE = { 単勝: 0.20, 複勝: 0.20, 馬連: 0.225, ワイド: 0.225, 三連複: 0.25 };
-  const MIN_P = { 単勝: 0.03, 複勝: 0.12, 馬連: 0.015, ワイド: 0.04, 三連複: 0.008 };
+  const TAKE = { 単勝: 0.20, 複勝: 0.20, 馬連: 0.225, ワイド: 0.225, 馬単: 0.25, 三連複: 0.25 };
+  const MIN_P = { 単勝: 0.02, 複勝: 0.08, 馬連: 0.01, ワイド: 0.03, 馬単: 0.006, 三連複: 0.006 };
   const EV_MIN = 1.10;   // モデル誤差を見込んだ購入ライン
 
   // シミュレーション結果から組合せ確率（モデル）を集計
   function modelProbs(res, N){
     N = N || res.stats.length; const R = res.runs, o = res.orders, W = res.w;
     const win = new Float64Array(N), place = new Float64Array(N);
-    const pair = new Float64Array(N * N), wide = new Float64Array(N * N), trio = new Float64Array(N * N * N);
+    const pair = new Float64Array(N * N), wide = new Float64Array(N * N), trio = new Float64Array(N * N * N), exacta = new Float64Array(N * N);
     const placeK = N <= 7 ? 2 : 3;
     let tw = 0;
     for (let r = 0; r < R; r++){
       const a = o[r*N], b = o[r*N+1], c = o[r*N+2], q = W ? W[r] : 1; tw += q;
       win[a] += q;
       place[a] += q; place[b] += q; if (placeK === 3) place[c] += q;
-      const [x, y] = a < b ? [a, b] : [b, a]; pair[x*N + y] += q;
+      const [x, y] = a < b ? [a, b] : [b, a]; pair[x*N + y] += q; exacta[a*N + b] += q;
       const t = [a, b, c].sort((m, n) => m - n);
       wide[t[0]*N + t[1]] += q; wide[t[0]*N + t[2]] += q; wide[t[1]*N + t[2]] += q;
       trio[(t[0]*N + t[1])*N + t[2]] += q;
     }
     const d = arr => arr.map(v => v / tw);
-    return { N, win: d(win), place: d(place), pair: d(pair), wide: d(wide), trio: d(trio), placeK };
+    return { N, win: d(win), place: d(place), pair: d(pair), wide: d(wide), trio: d(trio), exacta: d(exacta), placeK };
   }
 
   // 単勝オッズ → 市場確率 → Harville で組合せの市場確率
@@ -116,7 +116,7 @@ const Bets = (() => {
     const M = modelProbs(wres, N), K = marketProbs(odds);
     calibrateToPlace(K, f);
     const R = B.ess, CO = ctx.race?.comboOdds || {};
-    const real = { 馬連: !!CO.馬連, ワイド: !!CO.ワイド, 三連複: !!CO.三連複 };
+    const real = { 馬連: !!CO.馬連, ワイド: !!CO.ワイド, 馬単: !!CO.馬単, 三連複: !!CO.三連複 };
     const out = [];
     const push = (type, idx, p, odds, est, hi) => {
       if (p < MIN_P[type] || !(odds > 1)) return;
@@ -136,6 +136,11 @@ const Bets = (() => {
       // 組み合わせ馬券は実オッズがあるときだけ（推定配当は誤差が大きく、期待値を過大に見積もるため買わない）
       if (real.馬連){ const v = CO.馬連[k2]; if (v) push("馬連", [i, j], M.pair[i*N + j], v, false); }
       if (real.ワイド){ const v = CO.ワイド[k2]; if (v) push("ワイド", [i, j], M.wide[i*N + j], Array.isArray(v) ? v[0] : v, false, Array.isArray(v) ? v[1] : null); }
+      if (real.馬単){
+        const v1 = CO.馬単[`${f[i].num}-${f[j].num}`], v2 = CO.馬単[`${f[j].num}-${f[i].num}`];
+        if (v1) push("馬単", [i, j], M.exacta[i*N + j], v1, false);
+        if (v2) push("馬単", [j, i], M.exacta[j*N + i], v2, false);
+      }
       if (real.三連複) for (let k = j + 1; k < N; k++){ const v = CO.三連複[key([i, j, k])]; if (v) push("三連複", [i, j, k], M.trio[(i*N + j)*N + k], v, false); }
     }
     return { list: out.sort((a, b) => b.ev - a.ev), M, K, real, wres, blend: B };
@@ -150,6 +155,7 @@ const Bets = (() => {
       if (t.type === "単勝") ok = x === a0;
       else if (t.type === "複勝") ok = x === a0 || y === a0 || (placeK === 3 && z === a0);
       else if (t.type === "馬連") ok = (x === a0 && y === a1) || (x === a1 && y === a0);
+      else if (t.type === "馬単") ok = x === a0 && y === a1;
       else if (t.type === "ワイド") ok = (x === a0 || y === a0 || z === a0) && (x === a1 || y === a1 || z === a1);
       else if (t.type === "三連複") ok = (x === a0 || y === a0 || z === a0) && (x === a1 || y === a1 || z === a1) && (x === a2 || y === a2 || z === a2);
       if (ok) h.push(m);
@@ -226,6 +232,7 @@ const Bets = (() => {
         if (t.type === "単勝") ok = top[0] === h[0];
         else if (t.type === "複勝") ok = top.slice(0, placeK).includes(h[0]);
         else if (t.type === "馬連") ok = (top[0] === h[0] && top[1] === h[1]) || (top[0] === h[1] && top[1] === h[0]);
+        else if (t.type === "馬単") ok = top[0] === h[0] && top[1] === h[1];
         else if (t.type === "ワイド") ok = top.includes(h[0]) && top.includes(h[1]);
         else if (t.type === "三連複") ok = h.every(x => top.includes(x));
         if (ok) pay += t.stake * t.odds;

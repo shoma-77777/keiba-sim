@@ -374,6 +374,28 @@ def _push_after(ymd):
 if not os.environ.get("KEIBA_CLOUD_RUN"):
     AFTER_UPDATE.append(_push_after)
 
+def auto_odds_loop():
+    """PCのアプリが起動している間、開催当日は15分おきにオッズを更新し、最終レース後に結果を取得する"""
+    last = {}
+    while True:
+        time.sleep(60)
+        try:
+            ymd = dt.date.today().strftime("%Y%m%d"); p = snapshot_path(ymd)
+            if JOB["running"] or not p.exists(): continue
+            snap = json.loads(p.read_text(encoding="utf-8"))
+            posts = []
+            for r in snap.get("races", []):
+                m = re.match(r"(\d{1,2}):(\d{2})", r.get("postTime") or "")
+                if m and r.get("entries"): posts.append(dt.datetime.combine(dt.date.today(), dt.time(int(m.group(1)), int(m.group(2)))))
+            if not posts: continue
+            now = dt.datetime.now()
+            if min(posts) - dt.timedelta(minutes=90) <= now <= max(posts) and time.time() - last.get("odds", 0) >= 15 * 60:
+                last["odds"] = time.time(); log("自動オッズ更新（15分おき）"); update_date(ymd, odds_only=True)
+            elif now >= max(posts) + dt.timedelta(minutes=25) and not last.get("results_" + ymd) and now <= max(posts) + dt.timedelta(hours=6):
+                last["results_" + ymd] = True; log("最終レース後の結果取得（答え合わせ用）"); update_results(ymd)
+        except Exception as ex:
+            print("自動更新で警告:", ex)
+
 def lan_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]; s.close(); return ip
@@ -394,6 +416,7 @@ def main():
         ymd = next_sunday().strftime("%Y%m%d") if v == "next" else v
         update_date(ymd, odds_only=bool(a.odds)); return
     ensure_three()
+    threading.Thread(target=auto_odds_loop, daemon=True).start()
     cm = cloud_mod()
     if cm and cm.load_conf().get("token") and cm.load_conf().get("appVersion") != cm.app_version():
         threading.Thread(target=lambda: _safe(lambda: cm.republish(DATA, write_status)), daemon=True).start()   # アプリを新しくしたらクラウドも更新

@@ -204,7 +204,7 @@ def _odds_yahoo(f, race, ttl_hours):
         for i, (n, x) in enumerate(sorted(out.items(), key=lambda kv: kv[1]["odds"])): x["pop"] = i + 1
     return out, None
 
-COMBO_TYPES = {"4": ("馬連", 2), "5": ("ワイド", 2), "7": ("三連複", 3)}
+COMBO_TYPES = {"4": ("馬連", 2), "5": ("ワイド", 2), "6": ("馬単", 2), "7": ("三連複", 3)}   # 3連単は約5000通りでデータが大きすぎるため対象外
 def combo_odds(f, race, ttl_hours=0.5):
     """馬連・ワイド・3連複の実オッズ（期待値を推定配当でなく実際の配当で計算するため）。戻り値: 取れた券種数"""
     out = {}
@@ -221,7 +221,7 @@ def combo_odds(f, race, ttl_hours=0.5):
                 lo = to_float(v[0])
                 if not lo or lo <= 1: continue
                 hi = to_float(v[1]) if len(v) > 1 and v[1] else None
-                m["-".join(map(str, sorted(nums)))] = [lo, hi] if label == "ワイド" else lo
+                m["-".join(map(str, nums if label == "馬単" else sorted(nums)))] = [lo, hi] if label == "ワイド" else lo
             if m: out[label] = m
         except Exception as ex:
             print(f"  {label}オッズ取得スキップ ({race['id']}): {ex}")

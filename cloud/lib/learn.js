@@ -11,7 +11,7 @@ const Learn = (() => {
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
   // 1レース分の記録を作る（pm: モデルの1着確率、ctx: buildContext の結果、res: 結果）
-  function record(race, ctx, pm, res){
+  function record(race, ctx, pm, res, bets){
     const rows = res.rows || [];
     const fin = {}; rows.forEach(x => { if (/^\d+$/.test(String(x.pos))) fin[x.num] = x; });
     const order = res.order || rows.filter(x => /^\d+$/.test(String(x.pos))).sort((a, b) => a.pos - b.pos).map(x => x.num);
@@ -33,10 +33,89 @@ const Learn = (() => {
         num: f.num, pm: +Math.max(pm[i], 1e-4).toFixed(5), pk: +(inv[i] / s).toFixed(5), odds: odds[i], pop: fin[f.num]?.pop ?? f.pop ?? null,
         pos: fin[f.num] ? +fin[f.num].pos : null, time: fin[f.num]?.time || null, l3f: fin[f.num]?.l3f || null,
         l3rank: fin[f.num]?.l3f ? l3.indexOf(fin[f.num].l3f) + 1 : null, early: early[f.num] ?? null,
-        gate: +(((f.num - 1) / Math.max(1, N - 1))).toFixed(3), style: f.style,
+        gate: +(((f.num - 1) / Math.max(1, N - 1))).toFixed(3), style: f.style, ana: f.ana || [],
         z: FEATS.map(k => +(f.adj[k] || 0).toFixed(3))
-      }))
+      })),
+      bets: bets || null
     };
+  }
+
+  // ===== 穴決着の分析：なぜ人気薄が来たのかを、展開・枠・上がり・人気馬の凡走・モデル評価・穴パターンから説明 =====
+  const isLong = h => (h.pop || 99) >= 6 || (h.odds || 0) >= 15;
+  function analyzeUpsets(r){
+    const H = r.h.filter(h => h.pos), n = H.length; if (n < 5) return [];
+    const top3 = H.filter(h => h.pos <= 3);
+    const e3 = top3.filter(h => h.early != null).map(h => h.early);
+    const shape = e3.length ? (e3.reduce((a, b) => a + b, 0) / e3.length < 0.3 ? "前残り" : e3.reduce((a, b) => a + b, 0) / e3.length > 0.6 ? "差し・追込決着" : "平均的") : null;
+    const favFlop = H.filter(h => (h.pop || 99) <= 3 && h.pos >= 6).map(h => `${h.pop}番人気${h.num}番が${h.pos}着`);
+    const mean = FEATS.map((_, k) => H.reduce((a, h) => a + h.z[k], 0) / n);
+    return top3.filter(h => (h.pos === 1 && (h.pop || 99) >= 6) || (h.pop || 99) >= 9 || (h.odds || 0) >= 30).map(h => {
+      const why = [];
+      if (h.early != null && h.early <= 0.25) why.push("展開:前に行って粘った");
+      if (h.early != null && h.early >= 0.55 && h.l3rank && h.l3rank <= 3) why.push(`展開:後方から上がり${h.l3rank}位`);
+      else if (h.l3rank && h.l3rank <= 2) why.push(`末脚:上がり${h.l3rank}位`);
+      if (shape) why.push("決着:" + shape);
+      if (h.gate <= 0.2) why.push("枠:内枠"); else if (h.gate >= 0.8) why.push("枠:外枠");
+      if (favFlop.length) why.push("人気馬の凡走");
+      if (r.going && r.going !== "良") why.push("馬場:" + r.going);
+      if (h.pm >= h.pk * 1.3) why.push("モデル:市場より高評価"); else if (h.pm <= h.pk * 0.7) why.push("モデル:見落とし");
+      (h.ana || []).forEach(a => why.push("穴パターン:" + a));
+      const plus = FEATS.map((k, j) => [k, h.z[j] - mean[j]]).filter(([, d]) => d >= 0.6).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      plus.forEach(([k]) => why.push("強み:" + k));
+      return { id: r.id, date: r.date, venue: r.venue, num: h.num, pop: h.pop, odds: h.odds, pos: h.pos, pm: h.pm, pk: h.pk, why, favFlop };
+    });
+  }
+  // 穴馬（6番人気以下）の中で、各要因があったときの3着内率と、なかったときの比（リフト）
+  function upsetStats(recs){
+    const cnt = {}; let base = 0, baseHit = 0;
+    recs.forEach(r => {
+      const H = r.h.filter(h => h.pos); if (H.length < 5) return;
+      const top3 = H.filter(h => h.pos <= 3), e3 = top3.filter(h => h.early != null).map(h => h.early);
+      const sh = e3.length ? (e3.reduce((a, b) => a + b, 0) / e3.length < 0.3 ? "前残り" : e3.reduce((a, b) => a + b, 0) / e3.length > 0.6 ? "差し・追込決着" : "平均的") : null;
+      H.filter(isLong).forEach(h => {
+        base++; const hit = h.pos <= 3; if (hit) baseHit++;
+        const keys = [];
+        if (h.early != null && h.early <= 0.25) keys.push("展開:前に行った");
+        if (h.early != null && h.early >= 0.55) keys.push("展開:後方待機");
+        if (h.gate <= 0.2) keys.push("枠:内枠"); if (h.gate >= 0.8) keys.push("枠:外枠");
+        if (r.going && r.going !== "良") keys.push("馬場:道悪");
+        if (h.pm >= h.pk * 1.3) keys.push("モデル:市場より高評価");
+        (h.ana || []).forEach(a => keys.push("穴パターン:" + a));
+        keys.forEach(k => { const c = (cnt[k] ||= { n: 0, hit: 0 }); c.n++; if (hit) c.hit++; });
+      });
+    });
+    const p0 = base ? baseHit / base : 0;
+    return { longshots: base, top3Rate: +p0.toFixed(4), factors: Object.entries(cnt).map(([k, c]) => ({ k, n: c.n, hit: c.hit, rate: +(c.hit / c.n).toFixed(4),
+      lift: +(((c.hit + 2 * p0) / (c.n + 2)) / Math.max(p0, 1e-4)).toFixed(3) })).sort((a, b) => b.lift - a.lift) };
+  }
+  // 穴パターンの加点を、穴馬の3着内率のリフトから更新（件数が少ないうちは初期値のまま）
+  const ANA_PTS = { "前走度外視": 0.8, "G1からの格下げ": 0.6, "実績の割に人気薄": 0.7, "距離短縮": 0.4, "叩き2戦目": 0.5, "鞍上強化": 0.4, "内枠の先行馬": 0.4, "コース巧者": 0.5 };
+  function anaWeights(stats){
+    const out = {};
+    Object.entries(ANA_PTS).forEach(([k, pts]) => {
+      const f = stats.factors.find(x => x.k === "穴パターン:" + k); if (!f) return;
+      const t = f.n / (f.n + 300);                       // 300頭分で半分の重み（偶然の偏りに振り回されないように）
+      const learned = clamp(Math.log(Math.max(f.lift, 0.2)) * 2.5, -0.5, 2.5);  // リフト2倍 ≒ +1.7Pt
+      out[k] = { pts: +(pts * (1 - t) + learned * t).toFixed(3) };
+    });
+    return out;
+  }
+  // 仮想収支：毎レース、発走前の推奨どおりに買っていたらどうなったか（長期でプラスかを統計的に判定）
+  function paperStats(recs){
+    const out = {};
+    ["t1", "t5", "te"].forEach(k => {
+      const xs = recs.map(r => r.bets?.[k]).filter(Boolean).filter(b => b[0] > 0);
+      const inv = xs.reduce((a, b) => a + b[0], 0), ret = xs.reduce((a, b) => a + b[1], 0);
+      if (!xs.length){ out[k] = { races: 0 }; return; }
+      // 1円あたりの回収の平均と標準誤差（レースごとの比を投資額で重み付け）
+      const rr = xs.map(b => b[1] / b[0]), w = xs.map(b => b[0] / inv);
+      const m = rr.reduce((a, x, i) => a + w[i] * x, 0);
+      const v = rr.reduce((a, x, i) => a + w[i] * (x - m) ** 2, 0) * xs.length / Math.max(1, xs.length - 1);
+      const se = Math.sqrt(v / xs.length);
+      out[k] = { races: xs.length, invest: inv, ret: Math.round(ret), roi: +(ret / inv).toFixed(4), lo95: +(m - 1.96 * se).toFixed(4), hi95: +(m + 1.96 * se).toFixed(4),
+        need: se > 0 ? Math.ceil((1.96 * Math.sqrt(v) / Math.max(0.02, Math.abs(m - 1))) ** 2) : null };
+    });
+    return out;
   }
 
   // 上位3着の Plackett–Luce 対数尤度（パラメータ θ = [a, b, c_1..c_K]）
@@ -132,17 +211,19 @@ const Learn = (() => {
       calib: { a: +a.toFixed(3), b: +b.toFixed(3) },
       weights, featCoef: Object.fromEntries(FEATS.map((k, j) => [k, +th[2 + j].toFixed(4)])),
       metrics: { model: logloss(recs, h => h.pm), market: logloss(recs, h => h.pk), blend: logloss(recs, h => Math.pow(h.pm, a) * Math.pow(h.pk, b)) },
-      hist, bias: bias(recs, today || new Date().toISOString().slice(0, 10)), sens: +sens.toFixed(3)
+      hist, bias: bias(recs, today || new Date().toISOString().slice(0, 10)), sens: +sens.toFixed(3),
+      upsets: recs.slice(-400).flatMap(analyzeUpsets).slice(-60), upsetStats: (() => { const us = upsetStats(recs); return { ...us, factors: us.factors.slice(0, 16) }; })(),
+      anaWeights: anaWeights(upsetStats(recs)), paper: paperStats(recs)
     };
   }
 
   function merge(oldRecs, newRecs){
-    const m = new Map((oldRecs || []).map(r => [r.id, r])); (newRecs || []).forEach(r => m.set(r.id, r));
+    const m = new Map((oldRecs || []).map(r => [r.id, r])); (newRecs || []).forEach(r => { const o = m.get(r.id); m.set(r.id, o && !r.bets && o.bets ? { ...r, bets: o.bets } : r); });
     return [...m.values()].sort((x, y) => (x.date + x.id).localeCompare(y.date + y.id));
   }
 
   // 結果の出ているレースについて、モデルの1着確率を計算して記録を作る（ブラウザでもNodeでも同じ）
-  async function recordsForRaces(Engine, races, horses, trackOf, runs = 2500){
+  async function recordsForRaces(Engine, races, horses, trackOf, runs = 2500, betsOf){
     const out = [];
     for (const r of races){
       const res = r.result; if (!res || !r.entries?.length) continue;
@@ -159,11 +240,11 @@ const Learn = (() => {
         m.stats.forEach((s, i) => win[i] += w * s.win); tot += w;
       }
       const pm = Array.from(win, x => x / tot);
-      out.push(record(race, ctx, pm, res));
+      out.push(record(race, ctx, pm, res, betsOf ? betsOf(r) : null));
     }
     return out;
   }
 
-  return { FEATS, record, fit, build, merge, bias, logloss, recordsForRaces };
+  return { FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
 })();
 if (typeof module !== "undefined") module.exports = Learn;

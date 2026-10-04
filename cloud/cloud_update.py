@@ -36,7 +36,7 @@ def snapshot_age_hours(ymd):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--kind", default="auto", choices=["auto", "full", "odds", "results"])
+    ap.add_argument("--kind", default="auto", choices=["auto", "full", "odds", "results", "learn"])
     ap.add_argument("--date", default="next")
     a = ap.parse_args()
     ymd = S.next_sunday().strftime("%Y%m%d") if a.date in ("", "next") else a.date.replace("-", "")
@@ -52,6 +52,16 @@ def main():
         if now.weekday() == 6 and now.hour * 60 + now.minute >= 16 * 60 + 40 and ymd == now.strftime("%Y%m%d"):
             kind = "results"            # 日曜の最終レース後は結果（答え合わせ用）
     print(f"対象 {ymd} / {kind}", flush=True)
+    if kind == "learn":
+        # スマホの答え合わせ（発走前の推奨の仮想収支）を保存。学習は次のステップ（learn_run.js）で行う
+        raw = os.environ.get("BETS_JSON") or ""
+        if raw.strip():
+            bp = DATA / f"bets_{ymd}.json"
+            old = json.loads(bp.read_text(encoding="utf-8")) if bp.exists() else {}
+            old.update(json.loads(raw)); bp.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+            print(f"仮想収支を保存: {len(old)}レース")
+        S.write_status({"source": "GitHub Actions"})
+        return
     if kind == "results":
         S.update_results(ymd)
     else:

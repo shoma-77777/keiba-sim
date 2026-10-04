@@ -7,17 +7,22 @@ const DATA = process.argv[2] || path.join(__dirname, "..", "..", "docs", "data")
   const lp = path.join(DATA, "learn.json");
   const old = fs.existsSync(lp) ? JSON.parse(fs.readFileSync(lp, "utf8")) : { records: [] };
   const done = new Set((old.records || []).map(r => r.id));
+  // スマホ・PCの答え合わせで送られた仮想収支（発走前の推奨を買っていた場合の [投資, 払戻]）
+  const bets = {};
+  fs.readdirSync(DATA).filter(f => /^bets_\d{8}\.json$/.test(f)).forEach(f => Object.assign(bets, JSON.parse(fs.readFileSync(path.join(DATA, f), "utf8"))));
+  let attached = 0;
+  (old.records || []).forEach(r => { if (bets[r.id] && JSON.stringify(r.bets) !== JSON.stringify(bets[r.id])){ r.bets = bets[r.id]; attached++; } });
   let recs = [];
   for (const f of fs.readdirSync(DATA).filter(f => /^races_\d{8}\.json$/.test(f)).sort()){
     const snap = JSON.parse(fs.readFileSync(path.join(DATA, f), "utf8"));
     const races = (snap.races || []).filter(r => r.result?.rows?.length && r.entries?.length && !done.has(r.id));
     if (!races.length) continue;
     const horses = {}; Object.entries(snap.horses || {}).forEach(([id, h]) => horses[id] = { ...h, id });
-    const out = await Learn.recordsForRaces(Engine, races, horses, r => snap.track?.[r.date + "|" + r.venue] || null, 2500);
+    const out = await Learn.recordsForRaces(Engine, races, horses, r => snap.track?.[r.date + "|" + r.venue] || null, 2500, r => bets[r.id] || null);
     console.log(`${f}: ${out.length}レースを記録`);
     recs = recs.concat(out);
   }
-  if (!recs.length && old.model){ console.log("新しい結果なし"); return; }
+  if (!recs.length && !attached && old.model){ console.log("新しい結果なし"); return; }
   const all = Learn.merge(old.records, recs).slice(-3000);
   const model = Learn.build(all, new Date().toISOString().slice(0, 10));
   fs.writeFileSync(lp, JSON.stringify({ model, records: all }));
