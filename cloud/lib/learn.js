@@ -250,7 +250,7 @@ const Learn = (() => {
       const fin = {}; (res.rows || []).forEach(x => fin[x.num] = x);
       const ents = r.entries.filter(e => !res.rows?.length || fin[e.num]).map(e => ({ ...e, odds: fin[e.num]?.odds > 1 ? fin[e.num].odds : e.odds, pop: fin[e.num]?.pop || e.pop }));
       if (ents.length < 2) continue;
-      const race = { ...r, entries: ents, going: r.going || res.going || "良" };
+      const race = { ...r, entries: ents, going: res.going || r.going || "良" };   // 発走時点で発表されていた馬場（結果の馬場）を使う
       const ctx = Engine.buildContext(race, horses, { going: race.going, track: trackOf ? trackOf(r) : null });
       const pf = Engine.paceForecast ? Engine.paceForecast(ctx) : { slow: 1 / 3, mid: 1 / 3, high: 1 / 3 };
       const win = new Float64Array(ctx.N); let tot = 0;

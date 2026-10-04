@@ -87,11 +87,11 @@ const Bets = (() => {
     const comb = (pm, pk) => pm.map((x, i) => Math.pow(Math.max(x, 1e-5), EA) * Math.pow(Math.max(pk[i], 1e-5), EB));
     // シミュレーションで一度も1着にならなかった馬は重み付けで確率を作れないので0のまま（他の馬に配り直されて歪むのを防ぐ）
     const tWin = norm(comb(m0.win, mWin).map((x, i) => m0.win[i] > 1e-6 ? x : 0), 1);
-    let tPlace = null;
+    let tPlace = null, mPl = null;
     if (hasPlace){
       const mid = f.map((x, i) => x.placeLo > 0 ? (x.placeLo + (x.placeHi || x.placeLo)) / 2 : null);
       const mx = Math.max(...mid.filter(Boolean));
-      const mPl = norm(mid.map(v => 1 / (v || mx * 2)), placeK);
+      mPl = norm(mid.map(v => 1 / (v || mx * 2)), placeK);
       tPlace = norm(comb(m0.place, mPl).map((x, i) => m0.place[i] > 1e-6 ? x : 0), placeK).map(x => Math.min(0.97, x));
     }
     for (let it = 0; it < 6; it++){
@@ -105,7 +105,12 @@ const Bets = (() => {
     let s = 0; for (let r = 0; r < R; r++) s += w[r];
     for (let r = 0; r < R; r++) w[r] *= R / s;
     let s2 = 0; for (let r = 0; r < R; r++) s2 += w[r] * w[r];
-    return { w, ess: R * R / s2, modelWin: m0.win, marketWin: mWin, finalWin: tWin };
+    // 頑健性チェック用：モデルの信頼度（指数A）を半分にしたときの確率（A の推定誤差に対して買い目が崩れないかを見る）
+    const ha = EA / 2, hb = EB + EA / 2;
+    const combH = (pm, pk) => pm.map((x, i) => x > 1e-6 ? Math.pow(x, ha) * Math.pow(Math.max(pk[i], 1e-5), hb) : 0);
+    const halfWin = norm(combH(m0.win, mWin), 1);
+    const halfPlace = mPl ? norm(combH(m0.place, mPl), placeK).map(x => Math.min(0.97, x)) : null;
+    return { w, ess: R * R / s2, modelWin: m0.win, marketWin: mWin, finalWin: tWin, halfWin, halfPlace };
   }
 
   // 候補の買い目を列挙（期待値 = 統合確率 × 払戻倍率）
@@ -127,18 +132,20 @@ const Bets = (() => {
     const { a: EA, b: EB } = exps();
     // psim: 重み付けしたシミュレーション上の的中確率。組み合わせ馬券は確率をさらにオッズと統合するので、
     // 配分（ケリー）と期待払戻の計算では払戻を rho = p / psim 倍して、期待値を p × オッズ に合わせる
-    const push = (type, idx, p, odds, est, hi, psim) => {
+    const push = (type, idx, p, odds, est, hi, psim, ph) => {
       if (p < MIN_P[type] || !(odds > 1)) return;
       odds = Math.round(odds * 10) / 10;
       // シミュレーションの誤差は統合の指数 A 倍に縮んで確率に効く（p ∝ p_model^A）
       const se = Math.sqrt(p * (1 - p) / R) * Math.min(1, Math.max(EA, 0.1));
       const rho = psim > 1e-9 ? Math.max(0.2, Math.min(5, p / psim)) : 1;
-      out.push({ type, idx, nums: idx.map(i => f[i].num), p, odds, oddsHi: hi || null, est, ev: p * odds, evL: Math.max(0, p - se) * odds, kelly: (p * odds - 1) / (odds - 1), rho });
+      // 控えめな期待値 evL：①シミュレーションの誤差を1標準誤差見込む ②モデルの信頼度を半分にしても期待値が保てるか、の小さい方
+      const evL = Math.min(Math.max(0, p - se) * odds, ph != null ? ph * odds : Infinity);
+      out.push({ type, idx, nums: idx.map(i => f[i].num), p, odds, oddsHi: hi || null, est, ev: p * odds, evL, evHalf: ph != null ? ph * odds : null, kelly: (p * odds - 1) / (odds - 1), rho });
     };
     for (let i = 0; i < N; i++){
       if (!(f[i].odds > 1)) continue;          // オッズ不明の馬の単複は買わない
-      push("単勝", [i], M.win[i], f[i].odds, false, null, M.win[i]);
-      if (f[i].placeLo > 0) push("複勝", [i], M.place[i], f[i].placeLo, false, f[i].placeHi, M.place[i]);
+      push("単勝", [i], M.win[i], f[i].odds, false, null, M.win[i], B.halfWin[i]);
+      if (f[i].placeLo > 0) push("複勝", [i], M.place[i], f[i].placeLo, false, f[i].placeHi, M.place[i], B.halfPlace ? B.halfPlace[i] : null);
     }
     const key = idx => idx.map(i => f[i].num).sort((a, b) => a - b).join("-");
     // 組み合わせ馬券は実オッズがあるときだけ（推定配当は誤差が大きく、期待値を過大に見積もるため買わない）。
@@ -165,7 +172,9 @@ const Bets = (() => {
       const pmS = xs.reduce((a, x) => a + x.ps, 0);
       const t = xs.map((x, n) => Math.pow(Math.max(x.p, 1e-6), EA) * Math.pow(q[n] / qs, EB));
       const ts = t.reduce((a, b) => a + b, 0) || 1;
-      xs.forEach((x, n) => push(type, x.idx, Math.min(0.97, t[n] / ts * pmS), x.odds, false, x.hi || null, x.ps));
+      const th = xs.map((x, n) => Math.pow(Math.max(x.p, 1e-6), EA / 2) * Math.pow(q[n] / qs, EB + EA / 2));
+      const ths = th.reduce((a, b) => a + b, 0) || 1;
+      xs.forEach((x, n) => push(type, x.idx, Math.min(0.97, t[n] / ts * pmS), x.odds, false, x.hi || null, x.ps, Math.min(0.97, th[n] / ths * pmS)));
     });
     return { list: out.sort((a, b) => b.ev - a.ev), M, K, real, wres, blend: B };
   }
@@ -268,6 +277,6 @@ const Bets = (() => {
     return { expReturn: sum / tw, staked, hitRate: hit / tw, profitRate: profit / tw, avgHitPay: hit ? hitSum / hit : 0, maxPay };
   }
 
-  return { candidates, plan, EV_MIN, setMarketBeta, setCalibration, get BETA(){ return BETA; }, get CAL(){ return CAL; } };
+  return { candidates, plan, EV_MIN, setMarketBeta, setCalibration, get BETA(){ return BETA; }, get CAL(){ return CAL; }, get EXPS(){ return exps(); } };
 })();
 if (typeof module !== "undefined") module.exports = Bets;

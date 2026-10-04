@@ -1083,11 +1083,11 @@ const Bets = (() => {
     const comb = (pm, pk) => pm.map((x, i) => Math.pow(Math.max(x, 1e-5), EA) * Math.pow(Math.max(pk[i], 1e-5), EB));
     // シミュレーションで一度も1着にならなかった馬は重み付けで確率を作れないので0のまま（他の馬に配り直されて歪むのを防ぐ）
     const tWin = norm(comb(m0.win, mWin).map((x, i) => m0.win[i] > 1e-6 ? x : 0), 1);
-    let tPlace = null;
+    let tPlace = null, mPl = null;
     if (hasPlace){
       const mid = f.map((x, i) => x.placeLo > 0 ? (x.placeLo + (x.placeHi || x.placeLo)) / 2 : null);
       const mx = Math.max(...mid.filter(Boolean));
-      const mPl = norm(mid.map(v => 1 / (v || mx * 2)), placeK);
+      mPl = norm(mid.map(v => 1 / (v || mx * 2)), placeK);
       tPlace = norm(comb(m0.place, mPl).map((x, i) => m0.place[i] > 1e-6 ? x : 0), placeK).map(x => Math.min(0.97, x));
     }
     for (let it = 0; it < 6; it++){
@@ -1101,7 +1101,12 @@ const Bets = (() => {
     let s = 0; for (let r = 0; r < R; r++) s += w[r];
     for (let r = 0; r < R; r++) w[r] *= R / s;
     let s2 = 0; for (let r = 0; r < R; r++) s2 += w[r] * w[r];
-    return { w, ess: R * R / s2, modelWin: m0.win, marketWin: mWin, finalWin: tWin };
+    // 頑健性チェック用：モデルの信頼度（指数A）を半分にしたときの確率（A の推定誤差に対して買い目が崩れないかを見る）
+    const ha = EA / 2, hb = EB + EA / 2;
+    const combH = (pm, pk) => pm.map((x, i) => x > 1e-6 ? Math.pow(x, ha) * Math.pow(Math.max(pk[i], 1e-5), hb) : 0);
+    const halfWin = norm(combH(m0.win, mWin), 1);
+    const halfPlace = mPl ? norm(combH(m0.place, mPl), placeK).map(x => Math.min(0.97, x)) : null;
+    return { w, ess: R * R / s2, modelWin: m0.win, marketWin: mWin, finalWin: tWin, halfWin, halfPlace };
   }
 
   // 候補の買い目を列挙（期待値 = 統合確率 × 払戻倍率）
@@ -1123,18 +1128,20 @@ const Bets = (() => {
     const { a: EA, b: EB } = exps();
     // psim: 重み付けしたシミュレーション上の的中確率。組み合わせ馬券は確率をさらにオッズと統合するので、
     // 配分（ケリー）と期待払戻の計算では払戻を rho = p / psim 倍して、期待値を p × オッズ に合わせる
-    const push = (type, idx, p, odds, est, hi, psim) => {
+    const push = (type, idx, p, odds, est, hi, psim, ph) => {
       if (p < MIN_P[type] || !(odds > 1)) return;
       odds = Math.round(odds * 10) / 10;
       // シミュレーションの誤差は統合の指数 A 倍に縮んで確率に効く（p ∝ p_model^A）
       const se = Math.sqrt(p * (1 - p) / R) * Math.min(1, Math.max(EA, 0.1));
       const rho = psim > 1e-9 ? Math.max(0.2, Math.min(5, p / psim)) : 1;
-      out.push({ type, idx, nums: idx.map(i => f[i].num), p, odds, oddsHi: hi || null, est, ev: p * odds, evL: Math.max(0, p - se) * odds, kelly: (p * odds - 1) / (odds - 1), rho });
+      // 控えめな期待値 evL：①シミュレーションの誤差を1標準誤差見込む ②モデルの信頼度を半分にしても期待値が保てるか、の小さい方
+      const evL = Math.min(Math.max(0, p - se) * odds, ph != null ? ph * odds : Infinity);
+      out.push({ type, idx, nums: idx.map(i => f[i].num), p, odds, oddsHi: hi || null, est, ev: p * odds, evL, evHalf: ph != null ? ph * odds : null, kelly: (p * odds - 1) / (odds - 1), rho });
     };
     for (let i = 0; i < N; i++){
       if (!(f[i].odds > 1)) continue;          // オッズ不明の馬の単複は買わない
-      push("単勝", [i], M.win[i], f[i].odds, false, null, M.win[i]);
-      if (f[i].placeLo > 0) push("複勝", [i], M.place[i], f[i].placeLo, false, f[i].placeHi, M.place[i]);
+      push("単勝", [i], M.win[i], f[i].odds, false, null, M.win[i], B.halfWin[i]);
+      if (f[i].placeLo > 0) push("複勝", [i], M.place[i], f[i].placeLo, false, f[i].placeHi, M.place[i], B.halfPlace ? B.halfPlace[i] : null);
     }
     const key = idx => idx.map(i => f[i].num).sort((a, b) => a - b).join("-");
     // 組み合わせ馬券は実オッズがあるときだけ（推定配当は誤差が大きく、期待値を過大に見積もるため買わない）。
@@ -1161,7 +1168,9 @@ const Bets = (() => {
       const pmS = xs.reduce((a, x) => a + x.ps, 0);
       const t = xs.map((x, n) => Math.pow(Math.max(x.p, 1e-6), EA) * Math.pow(q[n] / qs, EB));
       const ts = t.reduce((a, b) => a + b, 0) || 1;
-      xs.forEach((x, n) => push(type, x.idx, Math.min(0.97, t[n] / ts * pmS), x.odds, false, x.hi || null, x.ps));
+      const th = xs.map((x, n) => Math.pow(Math.max(x.p, 1e-6), EA / 2) * Math.pow(q[n] / qs, EB + EA / 2));
+      const ths = th.reduce((a, b) => a + b, 0) || 1;
+      xs.forEach((x, n) => push(type, x.idx, Math.min(0.97, t[n] / ts * pmS), x.odds, false, x.hi || null, x.ps, Math.min(0.97, th[n] / ths * pmS)));
     });
     return { list: out.sort((a, b) => b.ev - a.ev), M, K, real, wres, blend: B };
   }
@@ -1264,7 +1273,7 @@ const Bets = (() => {
     return { expReturn: sum / tw, staked, hitRate: hit / tw, profitRate: profit / tw, avgHitPay: hit ? hitSum / hit : 0, maxPay };
   }
 
-  return { candidates, plan, EV_MIN, setMarketBeta, setCalibration, get BETA(){ return BETA; }, get CAL(){ return CAL; } };
+  return { candidates, plan, EV_MIN, setMarketBeta, setCalibration, get BETA(){ return BETA; }, get CAL(){ return CAL; }, get EXPS(){ return exps(); } };
 })();
 
 
@@ -2321,7 +2330,7 @@ const Learn = (() => {
       const fin = {}; (res.rows || []).forEach(x => fin[x.num] = x);
       const ents = r.entries.filter(e => !res.rows?.length || fin[e.num]).map(e => ({ ...e, odds: fin[e.num]?.odds > 1 ? fin[e.num].odds : e.odds, pop: fin[e.num]?.pop || e.pop }));
       if (ents.length < 2) continue;
-      const race = { ...r, entries: ents, going: r.going || res.going || "良" };
+      const race = { ...r, entries: ents, going: res.going || r.going || "良" };   // 発走時点で発表されていた馬場（結果の馬場）を使う
       const ctx = Engine.buildContext(race, horses, { going: race.going, track: trackOf ? trackOf(r) : null });
       const pf = Engine.paceForecast ? Engine.paceForecast(ctx) : { slow: 1 / 3, mid: 1 / 3, high: 1 / 3 };
       const win = new Float64Array(ctx.N); let tot = 0;
@@ -2775,7 +2784,8 @@ function persist(){
 }
 const SERVER = { on: false, status: null, timer: null, enabled: typeof APP_MODE !== "undefined" && (APP_MODE === "server" || APP_MODE === "cloud"), cloud: typeof APP_MODE !== "undefined" && APP_MODE === "cloud" };
 let imports = [], tweaks = {};
-try { const b = localStorage.getItem("keibaBeta"); if (b && b !== "auto") Bets.setMarketBeta(+b); } catch (e) {}
+// 「オッズを○%信じる」の手動設定は、起動し直すと学習値（自動）に戻す（気づかないまま古い手動設定で計算し続けないように）
+try { localStorage.removeItem("keibaBeta"); } catch (e) {}
 loadSeed();
 try { const s = JSON.parse(localStorage.getItem(STORE) || "null"); if (s){ (s.imports || []).forEach(j => { mergeImport(j); imports.push(j); }); tweaks = s.tweaks || {}; } } catch (e) {}
 
@@ -2982,7 +2992,12 @@ async function runSim(silent, opt = {}){
     const avgAll = averageStats(Object.values(matrix), ctx.field);
     // 予想条件で加重：馬場は当日の天気予報、ペースは出走馬の脚質構成から自然に起きる割合
     const t = trackOf(r), pd = res.paceDist;
-    const gW = t?.goingProb || Object.fromEntries(GOINGS.map(g => [g, g === goingOf(r) ? 1 : 0]));
+    // 馬場の重み：発表済みの馬場（結果の馬場＝発走時点の発表、または当日の発表）があればそれを優先。予報は発表前だけ使う
+    const g1 = x => (x || "").slice(0, 1);
+    const ann = ST.going[r.id] ? null : g1(r.result?.going) || (r.date <= iso(new Date()) ? g1(r.going) : "");
+    const gW = ST.going[r.id] ? Object.fromEntries(GOINGS.map(g => [g, g === g1(goingOf(r)) ? 1 : 0]))
+      : ann && GOINGS.includes(ann) ? Object.fromEntries(GOINGS.map(g => [g, g === ann ? 1 : 0]))
+      : t?.goingProb || Object.fromEntries(GOINGS.map(g => [g, g === g1(goingOf(r)) ? 1 : 0]));
     const pf = Engine.paceForecast(ctx);                      // 選んだペースに関係なく、脚質構成から自然に起きる割合
     const pW = { slow: pf.slow, mid: pf.mid, high: pf.high };
     const cells = []; Object.values(matrix).forEach(m => { const w = (gW[m.going] || 0) * (pW[m.pace] || 0); if (w > 0) cells.push({ m, w }); });
@@ -3202,7 +3217,7 @@ function renderResult(){
     ${sim.cands ? (() => { const B = sim.cands.blend, F = ctx.field;
       const gap = F.map((x, i) => ({ x, m: B.modelWin[i], k: B.marketWin[i], c: B.finalWin[i] })).sort((a, b) => b.m / b.k - a.m / a.k);
       const row = g => `<tr><td>${ub(g.x.num, g.x.waku)} ${esc(g.x.name)}</td><td class="r num">${pct(g.m)}%</td><td class="r num">${pct(g.k)}%</td><td class="r num"><b>${pct(g.c)}%</b></td><td class="r num">${g.x.odds ?? "—"}</td></tr>`;
-      return `<div class="blendbox"><div class="ctrls"><label class="small">モデルとオッズの統合 <select id="betaSel"><option value="auto" ${Bets.BETA == null ? "selected" : ""}>自動（答え合わせから学習：モデル${Bets.CAL.a}・オッズ${Bets.CAL.b}${Bets.CAL.learned ? `・${Bets.CAL.races}R` : "・初期値"}）</option>${[0.3, 0.5, 0.7, 0.9].map(b => `<option value="${b}" ${Bets.BETA != null && Math.abs(Bets.BETA - b) < 0.01 ? "selected" : ""}>オッズを${Math.round(b * 100)}%信じる</option>`).join("")}</select></label>
+      return `<div class="blendbox"><div class="ctrls"><label class="small">モデルとオッズの統合 <select id="betaSel"><option value="auto" ${Bets.BETA == null ? "selected" : ""}>自動（答え合わせから学習：モデル${Bets.CAL.a}・オッズ${Bets.CAL.b}${Bets.CAL.learned ? `・${Bets.CAL.races}R` : "・初期値"}）</option>${[0.3, 0.5, 0.7, 0.9].map(b => `<option value="${b}" ${Bets.BETA != null && Math.abs(Bets.BETA - b) < 0.01 ? "selected" : ""}>手動：オッズを${Math.round(b * 100)}%信じる（検証用・起動し直すと自動に戻る）</option>`).join("")}</select></label>
         <span class="small">${sim.cands.real.三連複 ? "馬連・ワイド・3連複は<b>実オッズ</b>で計算" : "馬連・ワイド・3連複は単勝オッズからの推定配当（<sup>推</sup>）。「オッズだけ更新」で実オッズになります"}</span></div>
         <p class="small">買い目の確率は、シミュレーションの確率とオッズが示す確率を統合したものです。モデルが市場とずれている馬ほどもうけの源ですが、ずれの一部はモデルの誤差なので、そのまま信じると期待値を過大に見積もります。下はモデルが市場より高く・低く見ている馬です。</p>
         <div class="tbl-wrap"><table><thead><tr><th>馬</th><th class="r">モデル1着率</th><th class="r">市場1着率</th><th class="r">統合1着率</th><th class="r">単勝</th></tr></thead><tbody>${gap.slice(0, 3).map(row).join("")}<tr><td colspan="5" class="small">…</td></tr>${gap.slice(-2).map(row).join("")}</tbody></table></div></div>`; })() : ""}
@@ -3211,7 +3226,7 @@ function renderResult(){
     <div class="ctrls"><button class="btn primary" id="toReplay">代表的な展開を3Dで見る</button></div>`;
   $("#toReplay").onclick = () => setTab("replay");
   const rr = $("#rerun"); if (rr) rr.onclick = () => runSim(false);
-  const bs = $("#betaSel"); if (bs) bs.onchange = e => { Bets.setMarketBeta(e.target.value === "auto" ? null : +e.target.value); try { localStorage.setItem("keibaBeta", e.target.value); } catch (x) {}
+  const bs = $("#betaSel"); if (bs) bs.onchange = e => { Bets.setMarketBeta(e.target.value === "auto" ? null : +e.target.value);
     Object.values(ST.sims).forEach(sm => { if (!sm.planRes) return; sm.cands = Bets.candidates(sm.ctx, sm.planRes); sm.plans = sm.cands ? { 1000: Bets.plan(sm.ctx, sm.planRes, 1000, sm.cands), 5000: Bets.plan(sm.ctx, sm.planRes, 5000, sm.cands) } : null; const rc = DB.races[sm.ctx.race.id]; if (rc) BATCH.rows[rc.id] = summarizeSim(rc, sm); });
     renderResult(); toast("買い方を計算し直しました"); };
   el.querySelectorAll("[data-cell]").forEach(b => b.onclick = () => { ST.cell[r.id] = b.dataset.cell; renderResult(); });
@@ -3532,7 +3547,7 @@ function summarizeSim(r, sim){
     bet: planTxt(sim.plans?.[1000]), bet5: planTxt(sim.plans?.[5000]), k1: kp(sim.plans?.[1000]), k5: kp(sim.plans?.[5000]), evm1: evm(sim.plans?.[1000]),
     anaTop: (() => { const L = sim.cands?.list; if (!L) return null; const pop = {}; f.forEach(x => pop[x.num] = x.pop || 99);
       return L.filter(c => c.nums.some(n => pop[n] >= 6) && c.ev >= 1.0).sort((a, b) => b.evL - a.evL).slice(0, 3).map(c => ({ t: `${c.type} ${c.nums.join("-")}`, odds: c.odds, ev: +c.ev.toFixed(2), evL: +c.evL.toFixed(2), p: c.p })); })(),
-    calc: { a: Bets.CAL.a, b: Bets.CAL.b, v: 3 },
+    calc: { a: +Bets.EXPS.a.toFixed(3), b: +Bets.EXPS.b.toFixed(3), manual: Bets.BETA != null, v: 4 },
     favPop: f[w[0].i].pop ?? null, mktFav: (f.filter(x => x.odds > 1).sort((a, b) => a.odds - b.odds)[0] || {}).num ?? null, hasOdds: !!sim.cands, oddsAsOf: r.oddsAsOf || null, evTop, moves };
 }
 // ===== クラウド版（GitHub Pages）：データは data/*.json、更新は GitHub Actions に依頼 =====
@@ -3974,8 +3989,9 @@ function computeCheck(d){
   });
   const all = checkRows(d);
   const preAvail = checkRows(d, "pre").filter(x => x.res && x.row).length;
-  const stale = CHECK_MODE.v === "latest" ? items.filter(({ row }) => !row.calc || row.calc.v < 3 || Math.abs(row.calc.a - Bets.CAL.a) > 0.005 || Math.abs(row.calc.b - Bets.CAL.b) > 0.005).length : 0;
-  CHECK[d] = { stale, n: items.length, total: all.length, done: all.filter(x => x.res).length, noRow: all.filter(x => x.res && !x.row).length, preAvail, mode: CHECK_MODE.v, tot, fav1, fav3, tri, dark3, darkN, pre, per, at: new Date().toISOString() };
+  const stale = CHECK_MODE.v === "latest" ? items.filter(({ row }) => !row.calc || row.calc.v < 4 || Math.abs(row.calc.a - Bets.CAL.a) > 0.005 || Math.abs(row.calc.b - Bets.CAL.b) > 0.005).length : 0;
+  const manual = items.filter(({ row }) => row.calc?.manual).length;
+  CHECK[d] = { stale, manual, n: items.length, total: all.length, done: all.filter(x => x.res).length, noRow: all.filter(x => x.res && !x.row).length, preAvail, mode: CHECK_MODE.v, tot, fav1, fav3, tri, dark3, darkN, pre, per, at: new Date().toISOString() };
   return CHECK[d];
 }
 async function startCheck(){
@@ -4009,7 +4025,8 @@ function checkPanel(d){
   return `<div class="checkbox"><h3>答え合わせ <span class="small">${c.n}/${c.total}レースで集計（${isPre ? "発走前の予想" : "最新の予想"}）</span></h3>
     <div class="checkmode small">集計に使う予想：<button class="btn" data-cm="pre" aria-pressed="${isPre}">発走前の予想（実力の判定用）</button><button class="btn" data-cm="latest" aria-pressed="${!isPre}">最新の予想（学習の反映を確認）</button></div>
     ${isPre && !c.preAvail ? `<p class="small neg"><b>この端末には、この日の発走前の予想が1レースも残っていません。</b>発走前に一括シミュレーションした端末（スマホなど）で答え合わせするか、「最新の予想」に切り替えてください。次回からはクラウドが発走前の予想を自動で記録します。</p>` : ""}
-    ${!isPre && c.stale ? `<p class="small neg"><b>この「最新の予想」のうち ${c.stale}レースは、修正前の版か古い学習の設定で計算されたものです。</b>「学習・成績」タブの「学習を反映して全レースを予想し直す」を押してから、もう一度確認してください。</p>` : ""}
+    ${c.manual ? `<p class="small neg"><b>${c.manual}レースは、学習値ではなく手動の「オッズを○%信じる」設定で計算された予想です。</b>手動でモデルを重くすると、大穴の単勝など期待値を過大に見積もった買い目が増えます。</p>` : ""}
+    ${!isPre && c.stale ? `<p class="small neg"><b>この「最新の予想」のうち ${c.stale}レースは、修正前の版・手動設定・古い学習の設定のどれかで計算されたものです。</b>「学習・成績」タブの「学習を反映して全レースを予想し直す」を押してから、もう一度確認してください。</p>` : ""}
     ${isPre && c.preAvail && c.noRow ? `<p class="small">発走前の予想がない ${c.noRow}レースは集計から除いています。</p>` : ""}
     ${c.n ? `<div class="tbl-wrap"><table><thead><tr><th>買い方</th><th class="r">購入R</th><th class="r">投資</th><th class="r">払戻</th><th class="r">収支</th><th class="r">回収率</th><th class="r">的中R</th></tr></thead>
     <tbody>${Object.values(c.tot).filter(t => t.races).map(row).join("") || `<tr><td colspan="7" class="small">買い目のあるレースはありませんでした（すべて見送り）</td></tr>`}</tbody></table></div>
