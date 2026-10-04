@@ -65,7 +65,7 @@ def clean(s): return re.sub(r"\s+", " ", s or "").strip()
 def to_int(s):
     m = re.search(r"-?\d+", s or ""); return int(m.group()) if m else None
 def to_float(s):
-    m = re.search(r"-?\d+(\.\d+)?", s or ""); return float(m.group()) if m else None
+    m = re.search(r"-?\d+(\.\d+)?", (s or "").replace(",", "")); return float(m.group()) if m else None   # 1,255.8 のようなカンマ付きも正しく
 
 # ---------- 開催日・番組 ----------
 def upcoming_sundays(n):
@@ -287,20 +287,39 @@ def _parse_payouts(sp):
             out[key] = amt
     return pay
 
-def _parse_order(sp):
-    """着順表から [(着順, 馬番), ...]"""
+RES_HEAD = {"着順": "pos", "馬番": "num", "タイム": "time", "着差": "margin", "人気": "pop", "単勝オッズ": "odds", "単勝": "odds",
+            "後3F": "l3f", "上り": "l3f", "コーナー通過順": "pass", "通過": "pass", "馬体重(増減)": "bw", "馬体重": "bw"}
+def _parse_rows(sp):
+    """着順表の全行：着順・馬番・タイム・着差・人気・確定単勝オッズ・上がり3F・通過順"""
     for tbl in sp.select("table"):
         heads = [clean(th.get_text()).replace(" ", "") for th in tbl.select("tr th")]
         if "着順" not in heads or "馬番" not in heads: continue
-        ir, iu = heads.index("着順"), heads.index("馬番")
+        idx = {RES_HEAD[h]: i for i, h in enumerate(heads) if h in RES_HEAD}
         rows = []
         for tr in tbl.select("tr"):
             td = tr.find_all("td")
-            if len(td) <= max(ir, iu): continue
-            r, u = clean(td[ir].get_text()), clean(td[iu].get_text())
-            if r.isdigit() and u.isdigit(): rows.append((int(r), int(u)))
-        if rows: return sorted(rows)
+            if len(td) <= max(idx["pos"], idx["num"]): continue
+            g = lambda k: clean(td[idx[k]].get_text()) if k in idx and idx[k] < len(td) else ""
+            pos, num = g("pos"), g("num")
+            if not num.isdigit(): continue
+            rows.append({"pos": int(pos) if pos.isdigit() else pos, "num": int(num), "time": g("time") or None, "margin": g("margin") or None,
+                         "pop": to_int(g("pop")), "odds": to_float(g("odds")), "l3f": to_float(g("l3f")), "pass": g("pass") or None, "bw": g("bw") or None})
+        if rows: return rows
     return []
+
+def _parse_order(sp):
+    """着順表から [(着順, 馬番), ...]"""
+    return sorted((r["pos"], r["num"]) for r in _parse_rows(sp) if isinstance(r["pos"], int))
+
+def _parse_corners(sp):
+    """コーナー通過順の表 → [[1角の馬番順], [2角], ...]（同じ位置の馬は並び順のまま）"""
+    out = []
+    for tr in sp.select("table.Corner_Num tr, table.result_table_02 tr"):
+        th = tr.find("th"); td = tr.find("td")
+        if th and td and "コーナー" in th.get_text():
+            nums = [int(x) for x in re.findall(r"\d+", td.get_text(" "))]
+            if nums: out.append(nums)
+    return out
 
 def race_result(f, race):
     """レース結果（着順と払戻）。race["result"] = {"order": [1着馬番, 2着, ...], "pay": {...}}"""
@@ -309,9 +328,13 @@ def race_result(f, race):
             sp = soup(f.get(url, ttl_hours=1, encoding=enc))
         except Exception:
             continue
-        order = _parse_order(sp); pay = _parse_payouts(sp)
+        rows = _parse_rows(sp); pay = _parse_payouts(sp)
+        order = sorted((r["pos"], r["num"]) for r in rows if isinstance(r["pos"], int))
         if order and pay.get("単勝"):
-            race["result"] = {"order": [u for _, u in order], "pay": pay, "at": dt.datetime.now().strftime("%Y-%m-%d %H:%M")}
+            rd = sp.select_one(".RaceData01") or sp.select_one(".data_intro")
+            gm = re.search(r"(?:馬場|芝|ダート)\s*:\s*(良|稍|重|不)", clean(rd.get_text(" ")) if rd else "")
+            race["result"] = {"order": [u for _, u in order], "rows": rows, "corners": _parse_corners(sp), "pay": pay,
+                              "going": gm.group(1) if gm else None, "at": dt.datetime.now().strftime("%Y-%m-%d %H:%M")}
             return True
     return False
 

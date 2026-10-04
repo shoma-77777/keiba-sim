@@ -278,6 +278,9 @@ tr.darkrow{background:color-mix(in srgb,var(--gold) 9%,transparent)}
 .checkbox{background:var(--surface);border:2px solid var(--gold);border-radius:10px;padding:10px 14px;margin-bottom:12px}
 .checkbox h3{font-size:16px;margin-bottom:6px}
 .rc .resline{font-size:12.5px;border-top:1px dashed var(--line);padding-top:6px}
+.learnbox{background:var(--surface);border:1px solid var(--line);border-left:4px solid #3b7fc4;border-radius:8px;padding:10px 14px;margin-bottom:12px}
+.learnbox h3{font-size:15px;margin-bottom:4px}
+.learnbox table{max-width:520px}
 .diag{background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--turf);border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:12px;line-height:1.8}
 .updbar{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0 10px;display:flex;flex-direction:column;gap:8px}
 .updbar .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
@@ -1047,25 +1050,30 @@ const Bets = (() => {
   // 単勝・複勝それぞれ「モデル確率^(1-β) × 市場確率^β」に統合し、シミュレーションの各回に重みを付けて
   // 1着・3着内の確率がこの統合確率に合うように調整する（着順の組み合わせ構造はシミュレーションのまま）。
   // 市場確率は大穴が過大評価されやすい（本命・大穴バイアス）ので、オッズの逆数を1.1乗して補正。
-  let BETA = 0.5;
-  function setMarketBeta(b){ if (b >= 0 && b <= 1) BETA = b; }
+  // 統合：目標確率 ∝ p_model^A × p_market^B（A, B は答え合わせの蓄積から学習。初期値は A=0.5, B=0.55）
+  let CAL = { a: 0.5, b: 0.55, learned: false, races: 0 };
+  let BETA = null;              // 手動で「市場を信じる割合」を選んだときだけ使う（null=学習値）
+  function setMarketBeta(b){ BETA = (b == null || b === "auto") ? null : (b >= 0 && b <= 1 ? +b : BETA); }
+  function setCalibration(c){ if (c && c.a >= 0 && c.b >= 0) CAL = { ...CAL, ...c, learned: true }; }
+  const exps = () => BETA == null ? { a: CAL.a, b: CAL.b } : { a: 1 - BETA, b: BETA * 1.1 };
   function blendWeights(ctx, res, odds){
     const N = ctx.N, R = res.runs, o = res.orders, f = ctx.field, placeK = N <= 7 ? 2 : 3;
     const norm = (a, tot) => { const s = a.reduce((x, y) => x + y, 0) || 1; return a.map(x => x / s * tot); };
-    const mWin = norm(odds.map(x => Math.pow(1 / x, 1.1)), 1);
+    const mWin = norm(odds.map(x => 1 / x), 1);
+    const { a: EA, b: EB } = exps();
     const hasPlace = f.filter(x => x.placeLo > 0).length >= N * 0.75;
     const w = new Float64Array(R).fill(1);
     const marg = () => { const W1 = new Float64Array(N), P1 = new Float64Array(N); let t = 0;
       for (let r = 0; r < R; r++){ const q = w[r]; t += q; W1[o[r*N]] += q; for (let k = 0; k < placeK; k++) P1[o[r*N+k]] += q; }
       return { win: Array.from(W1, x => x / t), place: Array.from(P1, x => x / t) }; };
     const m0 = marg();
-    const comb = (pm, pk) => pm.map((x, i) => Math.pow(Math.max(x, 1e-5), 1 - BETA) * Math.pow(Math.max(pk[i], 1e-5), BETA));
+    const comb = (pm, pk) => pm.map((x, i) => Math.pow(Math.max(x, 1e-5), EA) * Math.pow(Math.max(pk[i], 1e-5), EB));
     const tWin = norm(comb(m0.win, mWin), 1);
     let tPlace = null;
     if (hasPlace){
       const mid = f.map((x, i) => x.placeLo > 0 ? (x.placeLo + (x.placeHi || x.placeLo)) / 2 : null);
       const mx = Math.max(...mid.filter(Boolean));
-      const mPl = norm(mid.map(v => Math.pow(1 / (v || mx * 2), 1.1)), placeK);
+      const mPl = norm(mid.map(v => 1 / (v || mx * 2)), placeK);
       tPlace = norm(comb(m0.place, mPl), placeK).map(x => Math.min(0.97, x));
     }
     for (let it = 0; it < 6; it++){
@@ -1107,22 +1115,16 @@ const Bets = (() => {
     for (let i = 0; i < N; i++){
       if (!(f[i].odds > 1)) continue;          // オッズ不明の馬の単複は買わない
       push("単勝", [i], M.win[i], f[i].odds, false);
-      const po = f[i].placeLo > 0 ? f[i].placeLo : Math.max(1.1, (1 - TAKE.複勝) / K.place[i]);
-      push("複勝", [i], M.place[i], po, !(f[i].placeLo > 0), f[i].placeHi);
+      if (f[i].placeLo > 0) push("複勝", [i], M.place[i], f[i].placeLo, false, f[i].placeHi);
     }
     const est = (q, t) => Math.max(1.5, Math.round((1 - TAKE[t]) / q * 0.85 * 10) / 10);   // 推定配当は控えめに（×0.85）
     const key = idx => idx.map(i => f[i].num).sort((a, b) => a - b).join("-");
     for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++){
       const k2 = key([i, j]);
+      // 組み合わせ馬券は実オッズがあるときだけ（推定配当は誤差が大きく、期待値を過大に見積もるため買わない）
       if (real.馬連){ const v = CO.馬連[k2]; if (v) push("馬連", [i, j], M.pair[i*N + j], v, false); }
-      else push("馬連", [i, j], M.pair[i*N + j], est(K.pair[i*N + j], "馬連"), true);
       if (real.ワイド){ const v = CO.ワイド[k2]; if (v) push("ワイド", [i, j], M.wide[i*N + j], Array.isArray(v) ? v[0] : v, false, Array.isArray(v) ? v[1] : null); }
-      else push("ワイド", [i, j], M.wide[i*N + j], est(K.wide[i*N + j], "ワイド"), true);
-      for (let k = j + 1; k < N; k++){
-        const p3 = M.trio[(i*N + j)*N + k];
-        if (real.三連複){ const v = CO.三連複[key([i, j, k])]; if (v) push("三連複", [i, j, k], p3, v, false); }
-        else push("三連複", [i, j, k], p3, est(K.trio[(i*N + j)*N + k], "三連複"), true);
-      }
+      if (real.三連複) for (let k = j + 1; k < N; k++){ const v = CO.三連複[key([i, j, k])]; if (v) push("三連複", [i, j, k], M.trio[(i*N + j)*N + k], v, false); }
     }
     return { list: out.sort((a, b) => b.ev - a.ev), M, K, real, wres, blend: B };
   }
@@ -1165,16 +1167,20 @@ const Bets = (() => {
     const QW = new Float64Array(Msz); let qs = 0; for (let m = 0; m < Msz; m++){ QW[m] = RW[m * step]; qs += QW[m]; }
     const stake = new Int32Array(pool.length);
     let used = 0;
+    let tq = 0; for (let m = 0; m < Msz; m++) tq += QW[m];
     for (let u = 0; u < units; u++){
+      // 100円追加したときの「資金の対数の期待値」の増分 = 全体の減少分(base) + 当たった回の増加分
+      let base = 0; for (let m = 0; m < Msz; m++) base += QW[m] * Math.log((W[m] - 100) / W[m]); base /= tq;
       let best = -Infinity, bi = -1;
       for (let i = 0; i < pool.length; i++){
         if (!stake[i] && used >= maxBets) continue;
         const pay = 100 * pool[i].odds, h = H[i];
         let g = 0;
         for (let q = 0; q < h.length; q++){ const w = W[h[q]] - 100; g += QW[h[q]] * (Math.log(w + pay) - Math.log(w)); }
+        g = g / tq + base;
         if (g > best){ best = g; bi = i; }
       }
-      if (bi < 0) break;
+      if (bi < 0 || best <= 0) break;          // 得にならないなら、予算が残っても買わない（賭けすぎは資金の伸びを下げる）
       if (!stake[bi]) used++;
       stake[bi]++;
       for (let m = 0; m < Msz; m++) W[m] -= 100;
@@ -1182,6 +1188,7 @@ const Bets = (() => {
     }
     const tickets = pool.map((c, i) => ({ ...c, stake: stake[i] * 100 })).filter(t => t.stake > 0)
       .sort((a, b) => b.stake - a.stake || b.ev - a.ev);
+    if (!tickets.length){ const ref = cands.list.slice().sort((a, b) => b.ev - a.ev).slice(0, 3); return { none: true, ref, evmax }; }
     const growth = (() => { let s = 0; for (let m = 0; m < Msz; m++) s += QW[m] * Math.log(W[m] / (budget * BANK_MUL)); return s / qs; })();
     return { tickets, budget, growth, evmax, ...evaluate(res, tickets, N, budget) };
   }
@@ -1217,7 +1224,7 @@ const Bets = (() => {
     return { expReturn: sum / tw, hitRate: hit / tw, profitRate: profit / tw, avgHitPay: hit ? hitSum / hit : 0, maxPay };
   }
 
-  return { candidates, plan, EV_MIN, setMarketBeta, get BETA(){ return BETA; } };
+  return { candidates, plan, EV_MIN, setMarketBeta, setCalibration, get BETA(){ return BETA; }, get CAL(){ return CAL; } };
 })();
 
 
@@ -2022,6 +2029,176 @@ const SEED = {
   }
 };
 
+// ===== 結果から学習して精度を上げる仕組み =====
+// 毎週の答え合わせで、各レースについて「モデルの確率・市場（確定オッズ）の確率・各要素の補正値・実際の着順・通過順・上がり」を記録し、
+// 1) モデルと市場の統合の仕方（指数 a, b）  p ∝ p_model^a × p_market^b
+// 2) 各要素（スピード・騎手・枠…）の効き具合の補正
+// 3) 競馬場ごとの馬場の偏り（前残り・内枠有利）
+// を、上位3着までの着順の尤度（Plackett–Luce）を最大にするように推定する。
+// データが少ないうちは事前の値（a=0.5, b=0.55, 補正0）に強く引き寄せ、レースが増えるほどデータに従う。
+const Learn = (() => {
+  const FEATS = ["能力","スピード","レース傾向","当日馬場","血統","季節","調子","距離","芝ダ","馬場","競馬場","回り","枠","斤量","騎手","乗替","調教","ローテ","年齢","穴要素","人気変動"];
+  const PRIOR = { a: 0.5, b: 0.55, sa: 0.35, sb: 0.35, sc: 0.025 };
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+
+  // 1レース分の記録を作る（pm: モデルの1着確率、ctx: buildContext の結果、res: 結果）
+  function record(race, ctx, pm, res){
+    const rows = res.rows || [];
+    const fin = {}; rows.forEach(x => { if (/^\d+$/.test(String(x.pos))) fin[x.num] = x; });
+    const order = res.order || rows.filter(x => /^\d+$/.test(String(x.pos))).sort((a, b) => a.pos - b.pos).map(x => x.num);
+    const N = ctx.N;
+    const odds = ctx.field.map(f => (fin[f.num]?.odds > 1 ? fin[f.num].odds : f.odds) || null);
+    const mx = Math.max(...odds.filter(Boolean)); const inv = odds.map(o => 1 / (o || mx * 2)); const s = inv.reduce((a, b) => a + b, 0);
+    // モデルの感度：log p_model を総合Ptで回帰した傾き（要素補正を確率への効きに換算するため）
+    const P = ctx.field.map(f => f.P), lp = pm.map(p => Math.log(Math.max(p, 1e-4)));
+    const mP = P.reduce((a, b) => a + b, 0) / N, mL = lp.reduce((a, b) => a + b, 0) / N;
+    let sxy = 0, sxx = 0; P.forEach((x, i) => { sxy += (x - mP) * (lp[i] - mL); sxx += (x - mP) ** 2; });
+    const sens = sxx > 0 ? clamp(sxy / sxx, 0.05, 2) : 0.4;
+    const early = {};
+    if (res.corners?.length){ const c = res.corners[Math.min(1, res.corners.length - 1)]; c.forEach((num, k) => early[num] = k / Math.max(1, c.length - 1)); }
+    const l3 = rows.filter(x => x.l3f > 0).map(x => x.l3f).sort((a, b) => a - b);
+    return {
+      id: race.id, date: race.date, venue: race.venue, surface: race.surface, dist: race.distance, going: res.going || race.going || null, n: N, sens: +sens.toFixed(4),
+      order: order.slice(0, 5),
+      h: ctx.field.map((f, i) => ({
+        num: f.num, pm: +Math.max(pm[i], 1e-4).toFixed(5), pk: +(inv[i] / s).toFixed(5), odds: odds[i], pop: fin[f.num]?.pop ?? f.pop ?? null,
+        pos: fin[f.num] ? +fin[f.num].pos : null, time: fin[f.num]?.time || null, l3f: fin[f.num]?.l3f || null,
+        l3rank: fin[f.num]?.l3f ? l3.indexOf(fin[f.num].l3f) + 1 : null, early: early[f.num] ?? null,
+        gate: +(((f.num - 1) / Math.max(1, N - 1))).toFixed(3), style: f.style,
+        z: FEATS.map(k => +(f.adj[k] || 0).toFixed(3))
+      }))
+    };
+  }
+
+  // 上位3着の Plackett–Luce 対数尤度（パラメータ θ = [a, b, c_1..c_K]）
+  function nll(recs, th, grad){
+    const K = FEATS.length; let L = 0;
+    if (grad) grad.fill(0);
+    for (const r of recs){
+      const H = r.h, n = H.length; if (n < 2 || !r.order?.length) continue;
+      const u = H.map(h => th[0] * Math.log(h.pm) + th[1] * Math.log(h.pk) + h.z.reduce((a, z, k) => a + th[2 + k] * z, 0));
+      const used = new Array(n).fill(false);
+      for (const num of r.order.slice(0, 3)){
+        const wi = H.findIndex(h => h.num === num); if (wi < 0 || used[wi]) break;
+        let mx = -1e9; for (let i = 0; i < n; i++) if (!used[i]) mx = Math.max(mx, u[i]);
+        let Z = 0; const e = new Array(n).fill(0); for (let i = 0; i < n; i++) if (!used[i]){ e[i] = Math.exp(u[i] - mx); Z += e[i]; }
+        L -= u[wi] - mx - Math.log(Z);
+        if (grad){
+          const feat = i => [Math.log(H[i].pm), Math.log(H[i].pk), ...H[i].z];
+          const fw = feat(wi); for (let j = 0; j < 2 + K; j++) grad[j] -= fw[j];
+          for (let i = 0; i < n; i++) if (!used[i]){ const p = e[i] / Z, fi = feat(i); for (let j = 0; j < 2 + K; j++) grad[j] += p * fi[j]; }
+        }
+        used[wi] = true;
+      }
+    }
+    // 事前分布（データが少ないうちは事前の値に寄せる）
+    const pr = [[th[0] - PRIOR.a, PRIOR.sa], [th[1] - PRIOR.b, PRIOR.sb]];
+    pr.forEach(([d, s], j) => { L += d * d / (2 * s * s); if (grad) grad[j] += d / (s * s); });
+    for (let k = 0; k < K; k++){ const d = th[2 + k]; L += d * d / (2 * PRIOR.sc ** 2); if (grad) grad[2 + k] += d / PRIOR.sc ** 2; }
+    return L;
+  }
+
+  function fit(recs){
+    const K = FEATS.length, th = new Float64Array(2 + K); th[0] = PRIOR.a; th[1] = PRIOR.b;
+    const g = new Float64Array(2 + K), m = new Float64Array(2 + K), v = new Float64Array(2 + K);
+    const lr = 0.02;
+    for (let t = 1; t <= 600; t++){
+      nll(recs, th, g);
+      for (let j = 0; j < th.length; j++){
+        m[j] = 0.9 * m[j] + 0.1 * g[j]; v[j] = 0.999 * v[j] + 0.001 * g[j] * g[j];
+        th[j] -= lr * (m[j] / (1 - 0.9 ** t)) / (Math.sqrt(v[j] / (1 - 0.999 ** t)) + 1e-8);
+      }
+      th[0] = clamp(th[0], 0, 1.5); th[1] = clamp(th[1], 0, 1.5);
+    }
+    return th;
+  }
+
+  // 1着の対数損失（小さいほど良い）
+  function logloss(recs, fn){
+    let L = 0, n = 0;
+    for (const r of recs){ const w = r.h.find(h => h.num === r.order?.[0]); if (!w) continue; const q = r.h.map(fn); const s = q.reduce((a, b) => a + b, 0); L += -Math.log(fn(w) / s); n++; }
+    return n ? L / n : null;
+  }
+
+  // 競馬場・芝ダごとの偏り（直近14日）：前に行った馬・内枠の馬が上位に来たか
+  function bias(recs, today){
+    const out = {}, lim = new Date(new Date(today + "T12:00:00") - 14 * 864e5).toISOString().slice(0, 10);
+    const groups = {};
+    recs.filter(r => r.date >= lim).forEach(r => { (groups[r.venue + "|" + r.surface] ||= []).push(r); });
+    const corr = (xs, ys) => { const n = xs.length; if (n < 4) return null; const mx = xs.reduce((a, b) => a + b, 0) / n, my = ys.reduce((a, b) => a + b, 0) / n;
+      let sxy = 0, sx = 0, sy = 0; xs.forEach((x, i) => { sxy += (x - mx) * (ys[i] - my); sx += (x - mx) ** 2; sy += (ys[i] - my) ** 2; }); return sx && sy ? sxy / Math.sqrt(sx * sy) : null; };
+    Object.entries(groups).forEach(([k, rs]) => {
+      let fe = [], fg = [], n = 0;
+      rs.forEach(r => { const hs = r.h.filter(h => h.pos); if (hs.length < 5) return; n++;
+        const pr = h => (h.pos - 1) / (hs.length - 1);
+        const ce = corr(hs.filter(h => h.early != null).map(h => h.early), hs.filter(h => h.early != null).map(pr)); if (ce != null) fe.push(ce);
+        const cg = corr(hs.map(h => h.gate), hs.map(pr)); if (cg != null) fg.push(cg); });
+      const avg = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+      const e = avg(fe), gte = avg(fg);
+      // 相関（前ほど小さい値 × 着順が良いほど小さい値）が正なら「前残り」。レース数が少ないほど控えめに
+      const shrink = n / (n + 6);
+      out[k] = { races: n, front: e != null ? +clamp(e * 0.9 * shrink, -0.5, 0.6).toFixed(3) : null, inner: gte != null ? +clamp(gte * 0.8 * shrink, -0.4, 0.4).toFixed(3) : null,
+        corrEarly: e != null ? +e.toFixed(3) : null, corrGate: gte != null ? +gte.toFixed(3) : null };
+    });
+    return out;
+  }
+
+  // 学習結果をまとめる
+  function build(recs, today){
+    const th = fit(recs);
+    const K = FEATS.length;
+    const sens = recs.length ? recs.reduce((a, r) => a + (r.sens || 0.4), 0) / recs.length : 0.4;
+    const weights = {};
+    // 要素の補正はレースが十分たまるまで控えめに（200レースで半分、600レースで3/4の強さ）
+    const trust = recs.length / (recs.length + 200);
+    FEATS.forEach((k, j) => { const c = th[2 + j]; const mult = clamp(1 + c / (Math.max(0.3, th[0]) * sens) * trust, 0.6, 1.5); if (Math.abs(mult - 1) >= 0.02) weights[k] = +mult.toFixed(3); });
+    const a = th[0], b = th[1];
+    const byDate = {};
+    recs.forEach(r => (byDate[r.date] ||= []).push(r));
+    const hist = Object.keys(byDate).sort().map(d => ({ date: d, races: byDate[d].length,
+      model: +logloss(byDate[d], h => h.pm).toFixed(3), market: +logloss(byDate[d], h => h.pk).toFixed(3),
+      blend: +logloss(byDate[d], h => Math.pow(h.pm, a) * Math.pow(h.pk, b)).toFixed(3) }));
+    return {
+      version: 1, updated: new Date().toISOString(), races: recs.length,
+      calib: { a: +a.toFixed(3), b: +b.toFixed(3) },
+      weights, featCoef: Object.fromEntries(FEATS.map((k, j) => [k, +th[2 + j].toFixed(4)])),
+      metrics: { model: logloss(recs, h => h.pm), market: logloss(recs, h => h.pk), blend: logloss(recs, h => Math.pow(h.pm, a) * Math.pow(h.pk, b)) },
+      hist, bias: bias(recs, today || new Date().toISOString().slice(0, 10)), sens: +sens.toFixed(3)
+    };
+  }
+
+  function merge(oldRecs, newRecs){
+    const m = new Map((oldRecs || []).map(r => [r.id, r])); (newRecs || []).forEach(r => m.set(r.id, r));
+    return [...m.values()].sort((x, y) => (x.date + x.id).localeCompare(y.date + y.id));
+  }
+
+  // 結果の出ているレースについて、モデルの1着確率を計算して記録を作る（ブラウザでもNodeでも同じ）
+  async function recordsForRaces(Engine, races, horses, trackOf, runs = 2500){
+    const out = [];
+    for (const r of races){
+      const res = r.result; if (!res || !r.entries?.length) continue;
+      const fin = {}; (res.rows || []).forEach(x => fin[x.num] = x);
+      const ents = r.entries.filter(e => !res.rows?.length || fin[e.num]).map(e => ({ ...e, odds: fin[e.num]?.odds > 1 ? fin[e.num].odds : e.odds, pop: fin[e.num]?.pop || e.pop }));
+      if (ents.length < 2) continue;
+      const race = { ...r, entries: ents, going: r.going || res.going || "良" };
+      const ctx = Engine.buildContext(race, horses, { going: race.going, track: trackOf ? trackOf(r) : null });
+      const pf = Engine.paceForecast ? Engine.paceForecast(ctx) : { slow: 1 / 3, mid: 1 / 3, high: 1 / 3 };
+      const win = new Float64Array(ctx.N); let tot = 0;
+      for (const p of ["slow", "mid", "high"]){
+        const w = pf[p]; if (w <= 0.001) continue;
+        const m = await Engine.monteCarlo(ctx, runs, 7000 + out.length * 31, null, p);
+        m.stats.forEach((s, i) => win[i] += w * s.win); tot += w;
+      }
+      const pm = Array.from(win, x => x / tot);
+      out.push(record(race, ctx, pm, res));
+    }
+    return out;
+  }
+
+  return { FEATS, record, fit, build, merge, bias, logloss, recordsForRaces };
+})();
+
+
 // ===== 3Dレース再生 (three.js) =====
 const Replay = (() => {
   const WAKU = ["#ffffff","#1d1d1d","#d93535","#2a66cf","#f0cf2a","#25904a","#ee8420","#f294b8"];
@@ -2457,7 +2634,7 @@ function persist(){
 }
 const SERVER = { on: false, status: null, timer: null, enabled: typeof APP_MODE !== "undefined" && (APP_MODE === "server" || APP_MODE === "cloud"), cloud: typeof APP_MODE !== "undefined" && APP_MODE === "cloud" };
 let imports = [], tweaks = {};
-try { const b = localStorage.getItem("keibaBeta"); if (b) Bets.setMarketBeta(+b); } catch (e) {}
+try { const b = localStorage.getItem("keibaBeta"); if (b && b !== "auto") Bets.setMarketBeta(+b); } catch (e) {}
 loadSeed();
 try { const s = JSON.parse(localStorage.getItem(STORE) || "null"); if (s){ (s.imports || []).forEach(j => { mergeImport(j); imports.push(j); }); tweaks = s.tweaks || {}; } } catch (e) {}
 
@@ -2511,7 +2688,16 @@ function renderVenues(){
 function curRace(){ return DB.races[ST.raceId]; }
 // 条件変更時：結果は消さずに「条件変更あり・再実行してください」と表示
 function markStale(id){ if (ST.sims[id]) ST.sims[id].stale = true; }
-function trackOf(r){ const t = SEED.track?.[r.date + "|" + r.venue]; if (!t) return null; const c = ST.cushion[r.id]; return c != null ? { ...t, cushion: c } : t; }
+function trackOf(r){
+  let t = SEED.track?.[r.date + "|" + r.venue] || null;
+  // 答え合わせから学習した、この競馬場・芝ダの直近の偏り（前残り・内枠有利）を重ねる
+  const lb = LEARN.model?.bias?.[r.venue + "|" + r.surface];
+  if (lb && lb.races >= 2 && (lb.front != null || lb.inner != null)){
+    t = { ...(t || {}), frontBias: +(((t?.frontBias ?? 0) * 0.5) + (lb.front ?? 0)).toFixed(3), innerBias: +(((t?.innerBias ?? 0) * 0.5) + (lb.inner ?? 0)).toFixed(3),
+          learnedBias: lb, note: [t?.note, `直近${lb.races}Rの傾向：${lb.front > 0.08 ? "前残り" : lb.front < -0.08 ? "差し有利" : "脚質の偏り小"}・${lb.inner > 0.06 ? "内枠有利" : lb.inner < -0.06 ? "外枠有利" : "枠の偏り小"}`].filter(Boolean).join("／") };
+  }
+  if (!t) return null; const c = ST.cushion[r.id]; return c != null ? { ...t, cushion: c } : t;
+}
 function trendOf(r){ const k = Object.keys(SEED.trends || {}).find(k => (r.name || "").includes(k)); return k ? { key: k, ...SEED.trends[k] } : null; }
 function forecastGoing(r){ const t = trackOf(r); if (!t?.goingProb) return null; return Object.entries(t.goingProb).sort((a, b) => b[1] - a[1])[0][0]; }
 function goingOf(r){ return ST.going[r.id] || r.going || forecastGoing(r) || "良"; }
@@ -2535,7 +2721,7 @@ function renderBand(){
     <div class="no">${r.no}R</div>
     <div class="grow"><h2>${esc(r.name)}</h2>
       <div class="cond">${esc(r.date)} ${esc(r.venue)} <span class="surf ${r.surface}">${r.surface}</span>${r.distance}m（${c.dir}回り・直線${Math.round(c.str)}m）・${r.fieldSize || r.entries?.length || "?"}頭・発走 ${esc(r.postTime || "")}</div>
-      ${(() => { const t = trackOf(r); if (!t) return ""; const gp = t.goingProb ? Object.entries(t.goingProb).filter(([, v]) => v > 0).map(([k, v]) => `${k}${Math.round(v * 100)}%`).join("・") : ""; return `<div class="trackline"><span>クッション値 <b class="num">${t.cushion}</b>（${esc(t.cushionLabel || "")}）</span><span>含水率 ${esc(t.moisture)}</span><span>${esc(t.note)}</span><span>天気 ${esc(t.weather)}${gp ? `→ 馬場予想 ${gp}` : ""}</span></div>`; })()}
+      ${(() => { const t = trackOf(r); if (!t) return ""; const gp = t.goingProb ? Object.entries(t.goingProb).filter(([, v]) => v > 0).map(([k, v]) => `${k}${Math.round(v * 100)}%`).join("・") : ""; return `<div class="trackline">${t.cushion != null ? `<span>クッション値 <b class="num">${t.cushion}</b>（${esc(t.cushionLabel || "")}）</span>` : ""}${t.moisture ? `<span>含水率 ${esc(t.moisture)}</span>` : ""}${t.note ? `<span>${esc(t.note)}</span>` : ""}${t.weather || gp ? `<span>天気 ${esc(t.weather || "—")}${gp ? `→ 馬場予想 ${gp}` : ""}</span>` : ""}</div>`; })()}
       ${r.entries?.length ? (() => { const pf = Engine.paceForecast(sim?.ctx || makeCtx(r)); return `<div class="paceline">展開予想 ${paceLine(pf)}<span class="small">${esc(paceWhy(pf))}</span></div>`; })() : ""}</div>
     <div class="ctrls">
       <label>馬場 <select id="going">${GOINGS.map(g => `<option ${goingOf(r) === g ? "selected" : ""}>${g}</option>`).join("")}</select></label>
@@ -2747,10 +2933,11 @@ function planCard(budget, pl, ctx){
   const evm = pl.evmax ? `<div class="evmax"><h5>期待値最大（1点集中）<span class="small">払戻の平均が最も大きくなる買い方</span></h5>
       <div class="tbl-wrap"><table>${PLAN_HEAD}<tbody>${ticketRows(pl.evmax.tickets, ctx)}</tbody></table></div>
       <p class="small">期待払戻 <b>${yen(pl.evmax.expReturn)}</b>（回収率 ${Math.round(pl.evmax.expReturn / budget * 100)}%）・的中率 <b>${pct(pl.evmax.hitRate)}%</b>。数学的には期待値最大ですが、${pl.evmax.hitRate < 0.2 ? "外れる回が大半で、" : ""}結果のブレが最も大きい買い方です。</p></div>` : "";
-  if (pl.none) return `<div class="plan"><h4>${budget.toLocaleString()}円</h4><p><b>見送り推奨</b>：誤差を見込んでも期待値が ${Bets.EV_MIN.toFixed(2)} を超える買い目がありません。</p><p class="small">参考（期待値上位）：${pl.ref.map(c => `${c.type} ${c.nums.join("-")}（期待値 ${c.ev.toFixed(2)}・${c.odds}倍・100円→${yen(100 * c.odds)}）`).join("、")}</p>${evm}</div>`;
+  if (pl.none) return `<div class="plan"><h4>${budget.toLocaleString()}円</h4><p><b>見送り推奨</b>：モデルとオッズを統合した確率で、誤差を見込んでも期待値が ${Bets.EV_MIN.toFixed(2)} を超え、資金の伸びがプラスになる買い目がありません。</p><p class="small">参考（期待値上位）：${pl.ref.map(c => `${c.type} ${c.nums.join("-")}（期待値 ${c.ev.toFixed(2)}・${c.odds}倍・100円→${yen(100 * c.odds)}）`).join("、")}</p>${evm}</div>`;
   const total = pl.tickets.reduce((a, t) => a + t.stake, 0);
-  return `<div class="plan"><h4>${budget.toLocaleString()}円の配分</h4>
+  return `<div class="plan"><h4>${budget.toLocaleString()}円の配分 <span class="small">使うのは <b>${yen(total)}</b>${total < budget ? `・残り ${yen(budget - total)} は見送り` : ""}</span></h4>
     <h5>推奨（ケリー基準・資金の成長率が最大）</h5>
+    ${total < budget ? `<p class="small">得になる分だけ賭けるのが数学的に最適です。予算を使い切ると賭けすぎになり、長い目で見て資金の伸びが下がります。</p>` : ""}
     <div class="tbl-wrap"><table>${PLAN_HEAD}<tbody>${ticketRows(pl.tickets, ctx)}</tbody>
       <tfoot><tr><td colspan="2" class="r small">合計</td><td class="r num"><b>${yen(total)}</b></td><td colspan="4"></td></tr></tfoot></table></div>
     ${planKpis(pl, budget)}
@@ -2830,11 +3017,11 @@ function renderResult(){
     ${statsTable(avgAll, ctx, { dark: darkF?.num })}
 
     <h3 class="sec">推奨の買い方（期待値ベース） <span class="small">${esc(sim.planBasis || "")}の着順 ${(sim.planRuns || res.runs).toLocaleString()}回分で計算</span></h3>
-    <p class="small">期待値＝シミュレーションの的中率×オッズ。${Bets.EV_MIN.toFixed(2)} 以上の買い目から的中率と期待値のバランスで選び、1/4ケリーの比率で100円単位に配分。単勝・複勝は${r.oddsAsOf ? ` ${esc(r.oddsAsOf)} 時点の` : "入力された"}オッズ、<sup>推</sup>印は単勝・複勝オッズから推定した配当（控えめに見積もり）です。</p>
+    <p class="small">確率は「シミュレーション」と「オッズ」を、答え合わせの蓄積から学習した割合で統合したもの。期待値＝その確率×オッズ。誤差を見込んでも期待値が ${Bets.EV_MIN.toFixed(2)} を超える買い目から、資金の伸び（対数の期待値）が最大になる配分を100円単位で計算します（資金は予算の10倍と想定。得にならない分は買わない）。単勝・複勝は${r.oddsAsOf ? ` ${esc(r.oddsAsOf)} 時点の` : "入力された"}オッズ、馬連・ワイド・3連複は実オッズがあるときだけ対象にします。</p>
     ${sim.cands ? (() => { const B = sim.cands.blend, F = ctx.field;
       const gap = F.map((x, i) => ({ x, m: B.modelWin[i], k: B.marketWin[i], c: B.finalWin[i] })).sort((a, b) => b.m / b.k - a.m / a.k);
       const row = g => `<tr><td>${ub(g.x.num, g.x.waku)} ${esc(g.x.name)}</td><td class="r num">${pct(g.m)}%</td><td class="r num">${pct(g.k)}%</td><td class="r num"><b>${pct(g.c)}%</b></td><td class="r num">${g.x.odds ?? "—"}</td></tr>`;
-      return `<div class="blendbox"><div class="ctrls"><label class="small">オッズ（市場）を信じる割合 <select id="betaSel">${[0.3, 0.5, 0.7].map(b => `<option value="${b}" ${Math.abs(Bets.BETA - b) < 0.01 ? "selected" : ""}>${Math.round(b * 100)}%${b === 0.5 ? "（標準）" : b < 0.5 ? "（モデル重視）" : "（市場重視）"}</option>`).join("")}</select></label>
+      return `<div class="blendbox"><div class="ctrls"><label class="small">モデルとオッズの統合 <select id="betaSel"><option value="auto" ${Bets.BETA == null ? "selected" : ""}>自動（答え合わせから学習：モデル${Bets.CAL.a}・オッズ${Bets.CAL.b}${Bets.CAL.learned ? `・${Bets.CAL.races}R` : "・初期値"}）</option>${[0.3, 0.5, 0.7, 0.9].map(b => `<option value="${b}" ${Bets.BETA != null && Math.abs(Bets.BETA - b) < 0.01 ? "selected" : ""}>オッズを${Math.round(b * 100)}%信じる</option>`).join("")}</select></label>
         <span class="small">${sim.cands.real.三連複 ? "馬連・ワイド・3連複は<b>実オッズ</b>で計算" : "馬連・ワイド・3連複は単勝オッズからの推定配当（<sup>推</sup>）。「オッズだけ更新」で実オッズになります"}</span></div>
         <p class="small">買い目の確率は、シミュレーションの確率とオッズが示す確率を統合したものです。モデルが市場とずれている馬ほどもうけの源ですが、ずれの一部はモデルの誤差なので、そのまま信じると期待値を過大に見積もります。下はモデルが市場より高く・低く見ている馬です。</p>
         <div class="tbl-wrap"><table><thead><tr><th>馬</th><th class="r">モデル1着率</th><th class="r">市場1着率</th><th class="r">統合1着率</th><th class="r">単勝</th></tr></thead><tbody>${gap.slice(0, 3).map(row).join("")}<tr><td colspan="5" class="small">…</td></tr>${gap.slice(-2).map(row).join("")}</tbody></table></div></div>`; })() : ""}
@@ -2843,7 +3030,7 @@ function renderResult(){
     <div class="ctrls"><button class="btn primary" id="toReplay">代表的な展開を3Dで見る</button></div>`;
   $("#toReplay").onclick = () => setTab("replay");
   const rr = $("#rerun"); if (rr) rr.onclick = () => runSim(false);
-  const bs = $("#betaSel"); if (bs) bs.onchange = e => { Bets.setMarketBeta(+e.target.value); try { localStorage.setItem("keibaBeta", e.target.value); } catch (x) {}
+  const bs = $("#betaSel"); if (bs) bs.onchange = e => { Bets.setMarketBeta(e.target.value === "auto" ? null : +e.target.value); try { localStorage.setItem("keibaBeta", e.target.value); } catch (x) {}
     Object.values(ST.sims).forEach(sm => { if (!sm.planRes) return; sm.cands = Bets.candidates(sm.ctx, sm.planRes); sm.plans = sm.cands ? { 1000: Bets.plan(sm.ctx, sm.planRes, 1000, sm.cands), 5000: Bets.plan(sm.ctx, sm.planRes, 5000, sm.cands) } : null; const rc = DB.races[sm.ctx.race.id]; if (rc) BATCH.rows[rc.id] = summarizeSim(rc, sm); });
     renderResult(); toast("買い方を計算し直しました"); };
   el.querySelectorAll("[data-cell]").forEach(b => b.onclick = () => { ST.cell[r.id] = b.dataset.cell; renderResult(); });
@@ -3377,6 +3564,18 @@ function pickInitialDate(j){
   else if (!racesOfDay(ST.date).length){ const ds = (j?.dates || []).map(d => isoOf(d.date)).filter(d => racesOfDay(d).length).sort(); if (ds.length) ST.date = ds[ds.length - 1]; }
   if (!DB.races[ST.raceId]?.entries || DB.races[ST.raceId].date !== ST.date){ const r = DB.races["202605040211"]?.date === ST.date && DB.races["202605040211"].entries ? DB.races["202605040211"] : racesOfDay(ST.date)[0]; if (r) ST.raceId = r.id; }
 }
+// クラウド版：開催当日の発走前に、オッズが35分以上古ければ自動で更新を依頼（スマホ用の鍵を登録している場合）
+function autoOddsRefresh(){
+  if (!SERVER.cloud || !LS.get("keibaGhToken", "")) return;
+  const today = iso(new Date()), rs = racesOfDay(today); if (!rs.length) return;
+  const now = new Date(), last = Math.max(...rs.map(raceStart).map(Number));
+  if (now.getHours() < 8 || now > new Date(last)) return;
+  const asof = rs.map(r => r.oddsAsOf || "").sort().pop();
+  const age = asof ? (now - new Date(asof.replace(" ", "T") + "+09:00")) / 60000 : 999;
+  if (age < 35 || Date.now() - LS.get("keibaAutoOdds", 0) < 30 * 60000 || SERVER.cloudWait) return;
+  LS.set("keibaAutoOdds", Date.now()); SERVER.updDate = today;
+  startJob("odds").then(() => toast(`オッズが${Math.round(age)}分前のものだったので、自動で更新を依頼しました`));
+}
 async function serverInit(){
   if (!SERVER.enabled){ renderUpd(); return; }
   try { SERVER.status = await api("/api/status", { timeout: 5000 }); SERVER.on = true; } catch (e) { SERVER.on = false; }
@@ -3388,7 +3587,9 @@ async function serverInit(){
   if (SERVER.on){
     try { const tw = await api("/api/tweaks"); if (tw && typeof tw === "object" && Object.keys(tw).length) tweaks = tw; } catch (e) {}
     const j = await loadServerDB();
+    await loadLearn();
     refreshCloudInfo().then(() => renderUpd());
+    autoOddsRefresh();
     pickInitialDate(j);
     renderDays(); renderVenues(); renderAll();
     if (SERVER.status.running){ pollJob(); renderUpd(); return; }
@@ -3401,6 +3602,53 @@ async function serverInit(){
   renderUpd();
   if (!Object.keys(ST.sims).length) runSim(true);
 }
+// ===== 学習（答え合わせの蓄積から、統合の仕方・要素の効き・馬場の偏りを更新） =====
+const LEARN = { model: null, base: null };
+function applyLearn(m){
+  if (!m || !m.calib) return;
+  LEARN.model = m;
+  Bets.setCalibration({ ...m.calib, races: m.races });
+  if (!LEARN.base) LEARN.base = { ...Engine.WEIGHTS };
+  const w = { ...LEARN.base };
+  Object.entries(m.weights || {}).forEach(([k, v]) => { w[k] = (w[k] ?? 1) * v; });
+  Engine.setWeights(w);
+}
+async function loadLearn(){
+  try {
+    const m = SERVER.cloud ? await staticJson("learn_model.json") : SERVER.enabled ? await api("/api/learn") : null;
+    if (m && m.calib){ applyLearn(m); Object.keys(ST.sims).forEach(markStale); }
+  } catch (e) {}
+}
+async function runLearn(d){
+  if (!SERVER.enabled || SERVER.cloud || !SERVER.on) return null;
+  const races = Object.values(DB.races).filter(r => r.date === d && r.result?.rows?.length && r.entries?.length);
+  if (!races.length) return null;
+  setUpdProgress(0.5, "結果を学習中…（各レースのモデル確率を計算）");
+  const full = await api("/api/learn?full=1").catch(() => ({}));
+  const done = new Set((full.records || []).map(x => x.id));
+  const recs = await Learn.recordsForRaces(Engine, races.filter(r => !done.has(r.id)), DB.horses, trackOf, 2000);
+  const all = Learn.merge(full.records, recs);
+  const model = Learn.build(all, d);
+  await api("/api/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, records: all }) });
+  applyLearn(model);
+  setUpdProgress(1, `学習を更新しました（累計${model.races}レース）`);
+  return model;
+}
+function learnPanel(){
+  const m = LEARN.model;
+  if (!m) return `<div class="learnbox"><h3>学習状況</h3><p class="small">まだ学習データがありません。レース後に「答え合わせ」を押すと、その日の結果（着順・タイム・通過順・上がり・確定オッズ）を記録して学習します。</p></div>`;
+  const f = x => x == null ? "—" : x.toFixed(3);
+  const W = Object.entries(m.weights || {}).sort((a, b) => Math.abs(b[1] - 1) - Math.abs(a[1] - 1));
+  const bias = Object.entries(m.bias || {}).filter(([, v]) => v.races >= 2);
+  return `<div class="learnbox"><h3>学習状況 <span class="small">累計 ${m.races}レース・${esc(m.updated ? new Date(m.updated).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "")} 更新</span></h3>
+    <p class="small">1着の当てやすさ（対数損失・小さいほど良い）：モデル <b>${f(m.metrics?.model)}</b>／オッズ <b>${f(m.metrics?.market)}</b>／統合 <b>${f(m.metrics?.blend)}</b>。
+      統合の仕方 p ∝ モデル<sup>${m.calib.a}</sup> × オッズ<sup>${m.calib.b}</sup>。${m.calib.a < 0.15 ? "<b>現状、モデルはオッズ以上の情報を示せていないため、買い目はほぼオッズどおりの確率で判断し、期待値1を超える買い目が少なくなります（見送りが増えるのは正常です）。</b>" : m.calib.a > 0.5 ? "モデルの見立てがオッズに対して有効に働いています。" : "モデルとオッズを組み合わせると最もよく当たっています。"}</p>
+    ${m.hist?.length ? `<div class="tbl-wrap"><table><thead><tr><th>開催日</th><th class="r">レース</th><th class="r">モデル</th><th class="r">オッズ</th><th class="r">統合</th></tr></thead><tbody>${m.hist.slice(-8).reverse().map(h => `<tr><td>${esc(h.date)}</td><td class="r num">${h.races}</td><td class="r num">${f(h.model)}</td><td class="r num">${f(h.market)}</td><td class="r num"><b>${f(h.blend)}</b></td></tr>`).join("")}</tbody></table></div>` : ""}
+    <p class="small">要素の効きの補正（${m.races < 200 ? "レースが少ないうちは控えめ" : "蓄積にもとづく"}）：${W.length ? W.slice(0, 8).map(([k, v]) => `${esc(k)} ×${v}`).join("・") : "まだ変更なし"}</p>
+    ${bias.length ? `<p class="small">直近の馬場の偏り：${bias.map(([k, v]) => `${esc(k)}（${v.races}R）${v.front > 0.08 ? "前残り" : v.front < -0.08 ? "差し有利" : "脚質差小"}・${v.inner > 0.06 ? "内有利" : v.inner < -0.06 ? "外有利" : "枠差小"}`).join("／")}。同じ競馬場の次の開催の予想に反映します。</p>` : ""}
+  </div>`;
+}
+
 // ===== 答え合わせ（発走前の買い目 × 実際の払戻） =====
 const CHECK = {};
 const PAY_KEY = { 単勝: "単勝", 複勝: "複勝", 馬連: "馬連", ワイド: "ワイド", 三連複: "三連複" };
@@ -3456,7 +3704,8 @@ async function startCheck(){
   SERVER.afterCheck = true; SERVER.updDate = d;
   await startJob("results");
 }
-function showCheck(d){ computeCheck(d); setTab("all"); renderAllTab(); window.scrollTo?.({ top: 0, behavior: "smooth" }); }
+function showCheck(d){ computeCheck(d); setTab("all"); renderAllTab(); window.scrollTo?.({ top: 0, behavior: "smooth" });
+  runLearn(d).then(m => { if (m){ renderAllTab(); toast(`答え合わせの結果を学習しました（累計${m.races}レース）`); } }).catch(e => console.error(e)); }
 function checkPanel(d){
   const c = CHECK[d]; if (!c) return "";
   const sgn = x => (x >= 0 ? "+" : "−") + Math.abs(Math.round(x)).toLocaleString() + "円";
@@ -3513,6 +3762,7 @@ function renderAllTab(){
   })();
   el.innerHTML = `
     ${checkPanel(d)}
+    ${CHECK[d] || LEARN.model ? learnPanel() : ""}
     ${diag}
     <div class="allhead"><h3>${esc(d.slice(5).replace("-", "/"))} 全レース予想</h3><span class="small">${doneN}/${list.length}レース計算済み${BATCH.running ? `（計算中 ${BATCH.done}/${BATCH.total}）` : ""}。一括計算は各条件 ${BATCH_RUNS.toLocaleString()}回×馬場4×ペース3。レースを開いて「シミュレーション実行」を押すと1万回で計算し直せます。</span></div>
     ${venues.map(v => `<h3 class="sec">${esc(v)}</h3><div class="allgrid">${list.filter(r => r.venue === v).map(card).join("")}</div>`).join("")}

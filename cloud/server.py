@@ -74,7 +74,7 @@ def update_results(ymd):
         with LOCK: JOB["total"] = len(races)
         ok = 0
         for i, r in enumerate(races):
-            if r.get("result") and r["result"].get("pay", {}).get("三連複"): ok += 1
+            if r.get("result") and r["result"].get("rows") and r["result"].get("pay", {}).get("三連複"): ok += 1
             elif kc.race_result(f, r): ok += 1
             with LOCK: JOB["done"] = i + 1
         if not ok: raise RuntimeError("結果をまだ取得できませんでした（確定前か、ネット接続の問題）")
@@ -245,6 +245,9 @@ class Handler(SimpleHTTPRequestHandler):
             s["nextSunday"] = next_sunday().strftime("%Y%m%d"); s["dates"] = [d["date"] for d in collect_db()["dates"]]
             return self._json(s)
         if u.path == "/api/db": return self._json(collect_db())
+        if u.path == "/api/learn":
+            fp = DATA / ("learn.json" if q.get("full") else "learn_model.json")
+            return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {})
         if u.path == "/api/cloud": return self._json(cloud_mod().public_conf() if cloud_mod() else {"available": False})
         if u.path == "/api/cloud/qr.svg":
             c = cloud_mod().load_conf() if cloud_mod() else {}
@@ -299,6 +302,17 @@ class Handler(SimpleHTTPRequestHandler):
                 except Exception: pass
                 return self._json({"ok": True})
             return self._json({"ok": False}, 404)
+        if u.path == "/api/learn":
+            n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8")
+            try:
+                j = json.loads(body)
+                (DATA / "learn.json").write_text(json.dumps({"model": j["model"], "records": j["records"]}, ensure_ascii=False), encoding="utf-8")
+                (DATA / "learn_model.json").write_text(json.dumps(j["model"], ensure_ascii=False), encoding="utf-8")
+                log(f"学習を更新しました（{len(j['records'])}レース分）")
+                threading.Thread(target=lambda: _safe(lambda: _push_after(None)), daemon=True).start()
+                return self._json({"ok": True})
+            except Exception as ex:
+                return self._json({"ok": False, "message": str(ex)}, 400)
         if u.path in ("/api/tweaks", "/api/summary"):
             n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8")
             if u.path == "/api/tweaks": target = TWEAKS

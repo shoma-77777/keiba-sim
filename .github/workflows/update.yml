@@ -44,6 +44,8 @@ jobs:
       - run: pip install -r cloud/requirements.txt
       - name: 取得
         run: python cloud/cloud_update.py --kind "${{ github.event.inputs.kind || 'auto' }}" --date "${{ github.event.inputs.date || 'next' }}"
+      - name: 学習（結果が出たレースから）
+        run: node cloud/lib/learn_run.js docs/data || true
       - name: 保存
         run: |
           git config user.name "keiba-bot"
