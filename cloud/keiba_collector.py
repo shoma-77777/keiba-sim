@@ -105,6 +105,26 @@ def parse_racedata(text):
     m = re.search(r"(\d{1,2}:\d{2})発走", text); out["postTime"] = m.group(1) if m else None
     return out
 
+def parse_bw(t):
+    """馬体重「480(+2)」→ {"bodyWeight": "480(+2)", "bw": 480, "bwDiff": 2}（前走計不・初出走は増減なし）"""
+    m = re.search(r"(\d{3})\s*\(\s*([+-]?\d+|前計不|計不|---)?\s*\)", clean(t or ""))
+    if not m: return None
+    d = m.group(2)
+    return {"bodyWeight": f"{m.group(1)}({d})" if d else m.group(1), "bw": int(m.group(1)), "bwDiff": int(d) if d and re.fullmatch(r"[+-]?\d+", d) else None}
+
+def body_weights(f, race, ttl_hours=0.1):
+    """当日の馬体重（発走の約70分前に発表）を出馬表から取る。戻り値: 取れた頭数"""
+    html = f.get(f"{BASE_RACE}/race/shutuba.html?race_id={race['id']}", ttl_hours=ttl_hours, encoding="EUC-JP")
+    got = {}
+    for tr in soup(html).select("tr.HorseList"):
+        uma = tr.select_one("td[class^=Umaban]"); bwt = tr.select_one("td.Weight")
+        if not (uma and bwt): continue
+        bw = parse_bw(bwt.get_text())
+        if bw: got[to_int(uma.get_text())] = bw
+    for e in race.get("entries") or []:
+        if e["num"] in got: e.update(got[e["num"]])
+    return len(got)
+
 def shutuba(f, race):
     html = f.get(f"{BASE_RACE}/race/shutuba.html?race_id={race['id']}", ttl_hours=6, encoding="EUC-JP")
     sp = soup(html)
@@ -134,6 +154,7 @@ def shutuba(f, race):
         barei = tr.select_one("td.Barei")
         weight = None
         if barei and barei.find_next_sibling("td"): weight = to_float(barei.find_next_sibling("td").get_text())
+        bwt = tr.select_one("td.Weight"); bw = parse_bw(bwt.get_text()) if bwt else None
         ents.append({
             "num": to_int(uma.get_text()) if uma else len(ents) + 1,
             "waku": to_int(waku.get_text()) if waku else None,
@@ -143,6 +164,7 @@ def shutuba(f, race):
             "weight": weight or 57.0,
             "jockey": clean(jk.get_text()) if jk else "",
             "trainer": clean(trn.get_text()).replace(" ", "・", 1) if trn else "",
+            **(bw or {}),
         })
     race["entries"] = ents; race["fieldSize"] = len(ents)
     return race

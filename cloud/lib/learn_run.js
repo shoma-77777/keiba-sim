@@ -6,7 +6,8 @@ const DATA = process.argv[2] || path.join(__dirname, "..", "..", "docs", "data")
 (async () => {
   const lp = path.join(DATA, "learn.json");
   const old = fs.existsSync(lp) ? JSON.parse(fs.readFileSync(lp, "utf8")) : { records: [] };
-  const done = new Set((old.records || []).map(r => r.id));
+  // 作り方が古い記録は、その日のデータが残っていれば作り直す
+  const done = new Set((old.records || []).filter(r => (r.rv || 0) >= Learn.RV).map(r => r.id));
   // スマホ・PCの答え合わせで送られた仮想収支（発走前の推奨を買っていた場合の [投資, 払戻]）
   const bets = {};
   fs.readdirSync(DATA).filter(f => /^bets_\d{8}\.json$/.test(f)).forEach(f => Object.assign(bets, JSON.parse(fs.readFileSync(path.join(DATA, f), "utf8"))));
@@ -19,7 +20,7 @@ const DATA = process.argv[2] || path.join(__dirname, "..", "..", "docs", "data")
     const pre = JSON.parse(fs.readFileSync(path.join(DATA, f), "utf8"));
     Object.entries(pre.rows || {}).forEach(([id, x]) => { const res = resOf[id]; if (!res) return;
       const pick = ts => ts?.length ? [ts.reduce((a, t) => a + t.stake, 0), Math.round(ts.reduce((a, t) => a + payOf(t, res.pay), 0))] : [0, 0];
-      bets[id] = { t1: pick(x.t1), t5: pick(x.t5), te: pick(x.te), src: "pre" }; });
+      bets[id] = { t1: pick(x.t1), t5: pick(x.t5), te: pick(x.te), t1s: pick(x.t1s || x.t1), src: "pre" }; });
   });
   let attached = 0;
   (old.records || []).forEach(r => { if (bets[r.id] && JSON.stringify(r.bets) !== JSON.stringify(bets[r.id])){ r.bets = bets[r.id]; attached++; } });
@@ -34,7 +35,7 @@ const DATA = process.argv[2] || path.join(__dirname, "..", "..", "docs", "data")
     recs = recs.concat(out);
   }
   if (!recs.length && !attached && (old.model?.version || 1) >= 2){ console.log("新しい結果なし"); return; }
-  const all = Learn.merge(old.records, recs).slice(-3000);
+  const all = Learn.merge(old.records, recs).slice(-6000);   // クラウドのファイルが大きくなりすぎないよう直近6000レースまで（PCは全件）
   const model = Learn.build(all, new Date().toISOString().slice(0, 10));
   fs.writeFileSync(lp, JSON.stringify({ model, records: all }));
   fs.writeFileSync(path.join(DATA, "learn_model.json"), JSON.stringify(model));

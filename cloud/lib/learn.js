@@ -11,6 +11,7 @@ const Learn = (() => {
   // 2着・3着の選ばれ方は1着より「まぎれ」が大きいので、段階ごとに確率の鋭さを割り引く（ベンターの方法）。
   // これをしないと、統合の指数 a+b が 1 より小さく推定され、大穴の確率を過大に見積もってしまう（10/4 で実際に発生）。
   const LAM = [1, 0.75, 0.6];
+  const RV = 3;   // 記録の作り方の版（3: その日より前の出走歴だけでモデル確率を計算）
   const AB_MIN = 1.0;   // a+b の下限：統合後の確率がオッズより「平ら」（＝大穴を過大評価）にならないように
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
@@ -34,7 +35,7 @@ const Learn = (() => {
     if (res.corners?.length){ const c = res.corners[Math.min(1, res.corners.length - 1)]; c.forEach((num, k) => early[num] = k / Math.max(1, c.length - 1)); }
     const l3 = rows.filter(x => x.l3f > 0).map(x => x.l3f).sort((a, b) => a - b);
     return {
-      id: race.id, date: race.date, post: race.postTime || null, kai: race.kai || null, venue: race.venue, surface: race.surface, dist: race.distance, going: res.going || race.going || null, n: N, sens: +sens.toFixed(4),
+      rv: RV, id: race.id, date: race.date, post: race.postTime || null, kai: race.kai || null, venue: race.venue, surface: race.surface, dist: race.distance, going: res.going || race.going || null, n: N, sens: +sens.toFixed(4),
       order: order.slice(0, 5),
       h: ctx.field.map((f, i) => ({
         num: f.num, pm: +Math.max(pm[i], 1e-4).toFixed(5), pk: +(inv[i] / s).toFixed(5), odds: odds[i], pop: fin[f.num]?.pop ?? f.pop ?? null,
@@ -111,7 +112,7 @@ const Learn = (() => {
   // 仮想収支：毎レース、発走前の推奨どおりに買っていたらどうなったか（長期でプラスかを統計的に判定）
   function paperStats(recs){
     const out = {};
-    ["t1", "t5", "te"].forEach(k => {
+    ["t1", "t5", "t1s", "te"].forEach(k => {
       const xs = recs.map(r => r.bets?.[k]).filter(Boolean).filter(b => b[0] > 0);
       const inv = xs.reduce((a, b) => a + b[0], 0), ret = xs.reduce((a, b) => a + b[1], 0);
       if (!xs.length){ out[k] = { races: 0 }; return; }
@@ -265,6 +266,67 @@ const Learn = (() => {
     return out;
   }
 
-  return { FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
+  // ===== 馬体重（増減）の効き：過去の全出走から推定 =====
+  // オッズ（人気）で説明できる分を差し引いたうえで、馬体重の増減が「1着」「3着内」にどれだけ効くかをロジスティック回帰で推定。
+  // 馬体重は発走前に発表されオッズにも織り込まれるので、ここで測るのは「オッズが見落としている分」だけ。
+  // 偶然の偏りを反映しないよう、|z|<2 は0、それ以上も (1−(2/z)²) 倍に縮めて使う。
+  // 増減の意味は「前走からの間隔」と「馬齢」で変わる（休み明けの増加は成長・仕上がり途上、若い馬の増加は成長など）ので、
+  // その組み合わせも項目にする。「休み明け」「2〜3歳」単独は比較のための調整項目（予想への反映はしない）。
+  const REST = 70;   // 休み明け＝前走から70日（10週）以上
+  const BW_FEATS = [
+    ["+10kg以上", (bw, d) => d != null && d >= 10], ["+4〜+9kg", (bw, d) => d != null && d >= 4 && d <= 9],
+    ["−4〜−9kg", (bw, d) => d != null && d <= -4 && d >= -9], ["−10kg以下", (bw, d) => d != null && d <= -10],
+    ["430kg未満", bw => bw < 430], ["520kg以上", bw => bw >= 520],
+    ["増加×休み明け", (bw, d, rest) => d != null && d >= 4 && rest != null && rest >= REST], ["減少×休み明け", (bw, d, rest) => d != null && d <= -4 && rest != null && rest >= REST],
+    ["増加×2〜3歳", (bw, d, rest, age) => d != null && d >= 4 && age != null && age <= 3], ["減少×2〜3歳", (bw, d, rest, age) => d != null && d <= -4 && age != null && age <= 3],
+    ["休み明け（調整用）", (bw, d, rest) => rest != null && rest >= REST, true], ["2〜3歳（調整用）", (bw, d, rest, age) => age != null && age <= 3, true]];
+  function bwFeatures(bw, d, rest, age){ return BW_FEATS.filter(([, fn]) => fn(bw, d, rest, age)).map(([k]) => k); }
+  const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 864e5);
+  const birthYear = (h, hid) => { const m = /^(\d{4})\d{6}$/.exec(String(h.nkId || hid || "")); return m ? +m[1] : null; };
+  function logit(F, y){
+    const K = F[0].length; let b = new Array(K).fill(0), H = null;
+    for (let it = 0; it < 30; it++){
+      const g = new Array(K).fill(0); H = Array.from({ length: K }, () => new Array(K).fill(0));
+      for (let n = 0; n < F.length; n++){
+        const x = F[n]; let z = 0; for (let k = 0; k < K; k++) z += b[k] * x[k];
+        const p = 1 / (1 + Math.exp(-z)), w = p * (1 - p);
+        for (let k = 0; k < K; k++){ g[k] += (y[n] - p) * x[k]; for (let l = 0; l < K; l++) H[k][l] += w * x[k] * x[l]; }
+      }
+      for (let k = 0; k < K; k++) H[k][k] += 1e-6;
+      const st = solve(H, g); b = b.map((v, k) => v + st[k]);
+      if (Math.max(...st.map(Math.abs)) < 1e-8) break;
+    }
+    const inv = invert(H);
+    return { b, se: inv.map((r, k) => Math.sqrt(Math.max(r[k], 0))) };
+  }
+  function solve(A, y){ const n = y.length, M = A.map((r, i) => [...r, y[i]]);
+    for (let c = 0; c < n; c++){ let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r; [M[c], M[p]] = [M[p], M[c]];
+      for (let r = 0; r < n; r++) if (r !== c){ const f = M[r][c] / M[c][c]; for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k]; } }
+    return M.map((r, i) => r[n] / r[i]); }
+  function invert(A){ const n = A.length; return A.map((_, j) => solve(A, A.map((__, i) => i === j ? 1 : 0))).map((col, j, cols) => cols.map(c => c[j])); }
+  function bodyWeightEffects(horses){
+    const seen = new Set(), F = [], yW = [], y3 = [];
+    Object.entries(horses || {}).forEach(([hid, h]) => { const by = birthYear(h, hid);
+      const runs = (h.runs || []).filter(r => r.date).slice().sort((a, b) => String(a.date).localeCompare(String(b.date)));
+      runs.forEach((r, i) => {
+      const key = (h.name || hid) + "|" + (r.raceId || r.date + (r.race || "")); if (seen.has(key)) return; seen.add(key);   // 同じ馬が馬名とIDの両方で入っていても1回だけ数える
+      const m = /(\d{3})\(([+-]?\d+)\)/.exec(r.bodyWeight || "");
+      if (!m || !(r.odds > 1) || !(r.pos > 0)) return;
+      const rest = i > 0 ? daysBetween(runs[i - 1].date, r.date) : null, age = by ? +String(r.date).slice(0, 4) - by : null;
+      const fs = bwFeatures(+m[1], +m[2], rest, age);
+      F.push([1, Math.log(r.odds), ...BW_FEATS.map(([k]) => fs.includes(k) ? 1 : 0)]); yW.push(r.pos === 1 ? 1 : 0); y3.push(r.pos <= 3 ? 1 : 0);
+    }); });
+    if (F.length < 300) return { n: F.length, win: {}, top3: {} };
+    const out = { n: F.length, win: {}, top3: {} };
+    [["win", yW], ["top3", y3]].forEach(([nm, y]) => {
+      const { b, se } = logit(F, y);
+      BW_FEATS.forEach(([k, , ctrl], j) => { const bb = b[2 + j], s = se[2 + j], z = s > 0 ? bb / s : 0, cnt = F.reduce((a, x) => a + x[2 + j], 0);
+        // 件数30未満は推定が不安定なので反映しない。調整用の項目も反映しない
+        out[nm][k] = { b: +bb.toFixed(3), se: +s.toFixed(3), z: +z.toFixed(2), n: cnt, control: !!ctrl, applied: +(!ctrl && cnt >= 30 && Math.abs(z) >= 2 ? bb * (1 - (2 / z) ** 2) : 0).toFixed(3) }; });
+    });
+    return out;
+  }
+
+  return { RV, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
 })();
 if (typeof module !== "undefined") module.exports = Learn;

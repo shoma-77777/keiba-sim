@@ -177,7 +177,8 @@ const Engine = (() => {
 
   // --- 馬プロファイル（DBに保持する派生指標） ---
   function profile(horse, race, entry, model){
-    const runs = (horse.runs || []).map(parseRun).filter(r => r.pos > 0 && r.field > 0)
+    // そのレースより前の出走だけを使う（過去の開催日を予想し直すときに、未来の結果が混ざらないように）
+    const runs = (horse.runs || []).map(parseRun).filter(r => r.pos > 0 && r.field > 0 && (!race.date || !r.date || r.date < race.date))
       .sort((a,b) => b.date.localeCompare(a.date));
     // 取り込んだレース後コメント・SNSの反応（馬ごとに 日付→テキスト）
     runs.forEach(r => { const c = horse.notes?.[r.date]; if (c) r.note = (r.note ? r.note + "／" : "") + c; });

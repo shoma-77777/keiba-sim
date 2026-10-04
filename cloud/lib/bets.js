@@ -73,6 +73,30 @@ const Bets = (() => {
     CAL = { ...CAL, ...c, a: +a.toFixed(3), b: +b.toFixed(3), learned: true };
   }
   const exps = () => BETA == null ? { a: CAL.a, b: CAL.b } : { a: 1 - BETA, b: BETA * 1.1 };
+  // 馬体重の効き（Learn.bodyWeightEffects の applied。オッズで説明できない分の対数オッズ）
+  let BWE = null;
+  function setBodyWeightEffects(e){ BWE = e && (e.win || e.top3) ? e : null; }
+  // 項目の定義は Learn.bwFeatures と同じ（調整用の項目は applied=0 なので効かない）
+  const BW_RULES = [["+10kg以上", (bw, d) => d != null && d >= 10], ["+4〜+9kg", (bw, d) => d != null && d >= 4 && d <= 9],
+    ["−4〜−9kg", (bw, d) => d != null && d <= -4 && d >= -9], ["−10kg以下", (bw, d) => d != null && d <= -10], ["430kg未満", bw => bw < 430], ["520kg以上", bw => bw >= 520],
+    ["増加×休み明け", (bw, d, rest) => d != null && d >= 4 && rest != null && rest >= 70], ["減少×休み明け", (bw, d, rest) => d != null && d <= -4 && rest != null && rest >= 70],
+    ["増加×2〜3歳", (bw, d, rest, age) => d != null && d >= 4 && age != null && age <= 3], ["減少×2〜3歳", (bw, d, rest, age) => d != null && d <= -4 && age != null && age <= 3]];
+  // 発表済みの馬体重（出走表、なければ結果表＝発走前に発表された値）
+  function bwOf(race, num){
+    const e = (race?.entries || []).find(x => x.num === num);
+    if (e && e.bw) return { bw: e.bw, d: e.bwDiff ?? null };
+    const x = (race?.result?.rows || []).find(x => x.num === num), m = x && /(\d{3})\(([+-]?\d+)\)/.exec(x.bw || "");
+    return m ? { bw: +m[1], d: +m[2] } : null;
+  }
+  function bwShift(ctx){
+    if (!BWE) return null;
+    const sh = ctx.field.map(f => { const b = bwOf(ctx.race, f.num); if (!b) return { win: 0, top3: 0, keys: [] };
+      const rest = f.prof?.daysOff ?? null, age = parseInt(String(f.sexAge || "").slice(1), 10) || null;
+      const keys = BW_RULES.filter(([, fn]) => fn(b.bw, b.d, rest, age)).map(([k]) => k);
+      return { win: keys.reduce((a, k) => a + (BWE.win?.[k]?.applied || 0), 0), top3: keys.reduce((a, k) => a + (BWE.top3?.[k]?.applied || 0), 0), keys }; });
+    return sh.some(x => x.win || x.top3) ? sh : null;
+  }
+  const shiftLogit = (p, d) => { if (!d) return p; const q = Math.min(0.999, Math.max(1e-6, p)); const z = Math.log(q / (1 - q)) + d; return 1 / (1 + Math.exp(-z)); };
   function blendWeights(ctx, res, odds){
     const N = ctx.N, R = res.runs, o = res.orders, f = ctx.field, placeK = N <= 7 ? 2 : 3;
     const norm = (a, tot) => { const s = a.reduce((x, y) => x + y, 0) || 1; return a.map(x => x / s * tot); };
@@ -86,13 +110,17 @@ const Bets = (() => {
     const m0 = marg();
     const comb = (pm, pk) => pm.map((x, i) => Math.pow(Math.max(x, 1e-5), EA) * Math.pow(Math.max(pk[i], 1e-5), EB));
     // シミュレーションで一度も1着にならなかった馬は重み付けで確率を作れないので0のまま（他の馬に配り直されて歪むのを防ぐ）
-    const tWin = norm(comb(m0.win, mWin).map((x, i) => m0.win[i] > 1e-6 ? x : 0), 1);
+    const BS = bwShift(ctx);
+    const adjW = arr => BS ? arr.map((x, i) => shiftLogit(x, BS[i].win)) : arr;
+    const adjP = arr => BS ? arr.map((x, i) => shiftLogit(x, BS[i].top3)) : arr;
+    // 統合した確率に、馬体重の効き（オッズの見落とし分）を対数オッズで上乗せしてから正規化
+    const tWin = norm(adjW(norm(comb(m0.win, mWin).map((x, i) => m0.win[i] > 1e-6 ? x : 0), 1)), 1);
     let tPlace = null, mPl = null;
     if (hasPlace){
       const mid = f.map((x, i) => x.placeLo > 0 ? (x.placeLo + (x.placeHi || x.placeLo)) / 2 : null);
       const mx = Math.max(...mid.filter(Boolean));
       mPl = norm(mid.map(v => 1 / (v || mx * 2)), placeK);
-      tPlace = norm(comb(m0.place, mPl).map((x, i) => m0.place[i] > 1e-6 ? x : 0), placeK).map(x => Math.min(0.97, x));
+      tPlace = norm(adjP(norm(comb(m0.place, mPl).map((x, i) => m0.place[i] > 1e-6 ? x : 0), placeK)), placeK).map(x => Math.min(0.97, x));
     }
     for (let it = 0; it < 6; it++){
       if (tPlace){
@@ -108,9 +136,9 @@ const Bets = (() => {
     // 頑健性チェック用：モデルの信頼度（指数A）を半分にしたときの確率（A の推定誤差に対して買い目が崩れないかを見る）
     const ha = EA / 2, hb = EB + EA / 2;
     const combH = (pm, pk) => pm.map((x, i) => x > 1e-6 ? Math.pow(x, ha) * Math.pow(Math.max(pk[i], 1e-5), hb) : 0);
-    const halfWin = norm(combH(m0.win, mWin), 1);
-    const halfPlace = mPl ? norm(combH(m0.place, mPl), placeK).map(x => Math.min(0.97, x)) : null;
-    return { w, ess: R * R / s2, modelWin: m0.win, marketWin: mWin, finalWin: tWin, halfWin, halfPlace };
+    const halfWin = norm(adjW(norm(combH(m0.win, mWin), 1)), 1);
+    const halfPlace = mPl ? norm(adjP(norm(combH(m0.place, mPl), placeK)), placeK).map(x => Math.min(0.97, x)) : null;
+    return { w, ess: R * R / s2, modelWin: m0.win, marketWin: mWin, finalWin: tWin, halfWin, halfPlace, bw: BS };
   }
 
   // 候補の買い目を列挙（期待値 = 統合確率 × 払戻倍率）
@@ -200,25 +228,18 @@ const Bets = (() => {
   // ケリー基準を、券種どうしの相関（同じレースで同時に当たる・外れる）も含めて100円単位の貪欲法で（近似的に）解く。
   // 資金は予算の10倍（1レースに資金の1割を使う）と仮定。
   const BANK_MUL = 10;
-  function plan(ctx, res, budget, cands){
-    if (!cands) return { noOdds: true };
-    res = cands.wres; const RW = res.w;
-    const units = Math.floor(budget / 100), N = ctx.N, R = res.runs, placeK = N <= 7 ? 2 : 3;
+  // 100円ずつ、資金の対数の期待値（＝長期の資金成長率）が最も上がる買い目に足していく。
+  // force=false：得にならなくなったら止める（ケリー基準）。force=true：予算を必ず使い切る（見送り推奨のレースで、損の見込みが最も小さい買い方）
+  function allocate(ctx, res, budget, pool, force){
+    const RW = res.w, units = Math.floor(budget / 100), N = ctx.N, R = res.runs, placeK = N <= 7 ? 2 : 3;
     const maxBets = budget <= 1000 ? 5 : 10;
-    const good = cands.list.filter(c => c.ev >= EV_MIN && c.evL >= 1.0);
-    const evmax = planEVMax(cands, budget, cands.wres, N);
-    if (!good.length){
-      const ref = cands.list.slice().sort((a, b) => b.ev - a.ev).slice(0, 3);
-      return { none: true, ref, evmax };
-    }
-    const pool = good.sort((a, b) => b.evL - a.evL).slice(0, 40);
     const step = Math.max(1, Math.floor(R / 6000)), Msz = Math.ceil(R / step);
     const H = pool.map(c => hits(c, res.orders, N, R, placeK, step));
     const W = new Float64Array(Msz).fill(budget * BANK_MUL);
     const QW = new Float64Array(Msz); let qs = 0; for (let m = 0; m < Msz; m++){ QW[m] = RW[m * step]; qs += QW[m]; }
     const stake = new Int32Array(pool.length);
     let used = 0;
-    let tq = 0; for (let m = 0; m < Msz; m++) tq += QW[m];
+    const tq = qs;
     for (let u = 0; u < units; u++){
       // 100円追加したときの「資金の対数の期待値」の増分 = 全体の減少分(base) + 当たった回の増加分
       let base = 0; for (let m = 0; m < Msz; m++) base += QW[m] * Math.log((W[m] - 100) / W[m]); base /= tq;
@@ -231,7 +252,7 @@ const Bets = (() => {
         g = g / tq + base;
         if (g > best){ best = g; bi = i; }
       }
-      if (bi < 0 || best <= 0) break;          // 得にならないなら、予算が残っても買わない（賭けすぎは資金の伸びを下げる）
+      if (bi < 0 || (!force && best <= 0)) break;          // 得にならないなら、予算が残っても買わない（賭けすぎは資金の伸びを下げる）
       if (!stake[bi]) used++;
       stake[bi]++;
       for (let m = 0; m < Msz; m++) W[m] -= 100;
@@ -239,9 +260,23 @@ const Bets = (() => {
     }
     const tickets = pool.map((c, i) => ({ ...c, stake: stake[i] * 100 })).filter(t => t.stake > 0)
       .sort((a, b) => b.stake - a.stake || b.ev - a.ev);
-    if (!tickets.length){ const ref = cands.list.slice().sort((a, b) => b.ev - a.ev).slice(0, 3); return { none: true, ref, evmax }; }
+    if (!tickets.length) return null;
     const growth = (() => { let s = 0; for (let m = 0; m < Msz; m++) s += QW[m] * Math.log(W[m] / (budget * BANK_MUL)); return s / qs; })();
-    return { tickets, budget, growth, evmax, ...evaluate(res, tickets, N, budget) };
+    return { tickets, budget, growth, ...evaluate(res, tickets, N, budget) };
+  }
+  function plan(ctx, res, budget, cands){
+    if (!cands) return { noOdds: true };
+    res = cands.wres;
+    const good = cands.list.filter(c => c.ev >= EV_MIN && c.evL >= 1.0);
+    const evmax = planEVMax(cands, budget, cands.wres, ctx.N);
+    const kelly = good.length ? allocate(ctx, res, budget, good.sort((a, b) => b.evL - a.evL).slice(0, 40), false) : null;
+    if (kelly) return { ...kelly, mode: "勝負", evmax };
+    // 勝負できる買い目がないレースでも、1レース分の予算で「損の見込みが最も小さい買い方」を出す（見送り推奨）。
+    // 的中率5%未満の大穴は除き（結果のぶれが大きすぎるため）、期待値の高い順の候補から選ぶ
+    const pool = cands.list.filter(c => c.p >= 0.05).sort((a, b) => b.ev - a.ev).slice(0, 30);
+    const skip = pool.length ? allocate(ctx, res, budget, pool, true) : null;
+    const ref = cands.list.slice().sort((a, b) => b.ev - a.ev).slice(0, 3);
+    return { none: true, ref, evmax, skip: skip ? { ...skip, mode: "見送り推奨" } : null };
   }
 
   // 期待値（払戻の平均）だけを最大にする買い方＝期待値が最も高い1点に全額。
@@ -277,6 +312,6 @@ const Bets = (() => {
     return { expReturn: sum / tw, staked, hitRate: hit / tw, profitRate: profit / tw, avgHitPay: hit ? hitSum / hit : 0, maxPay };
   }
 
-  return { candidates, plan, EV_MIN, setMarketBeta, setCalibration, get BETA(){ return BETA; }, get CAL(){ return CAL; }, get EXPS(){ return exps(); } };
+  return { candidates, plan, EV_MIN, setMarketBeta, setCalibration, get BETA(){ return BETA; }, get CAL(){ return CAL; }, get EXPS(){ return exps(); }, setBodyWeightEffects, get BWE(){ return BWE; }, bwOf };
 })();
 if (typeof module !== "undefined") module.exports = Bets;

@@ -42,24 +42,47 @@ def next_sunday(today=None):
 
 def snapshot_path(ymd): return DATA / f"races_{ymd}.json"
 
-def fetch_track(f, ymd, venues):
-    """JRA馬場情報ページからクッション値・含水率を拾う（取れない場合は空。アプリで手入力可）"""
-    out = {}
+CUSHION_FILE = DATA / "cushion.json"
+def cushion_label(c):
+    # JRAの区分：12以上 硬め／10〜12 やや硬め／8〜10 標準／7〜8 やや軟らかめ／7以下 軟らかめ
+    return "硬め" if c >= 12 else "やや硬め" if c >= 10 else "標準" if c >= 8 else "やや軟らかめ" if c > 7 else "軟らかめ"
+
+def fetch_cushion(f):
+    """JRA馬場情報の芝クッション値（各競馬場・測定日ごと）を取得して cushion.json に蓄積する。
+    当日の朝（7時ごろ）に発表される値を、その日のレースに使う。戻り値: 蓄積済みの {"obs": {"YYYY-MM-DD|競馬場": {...}}}"""
+    store = json.loads(CUSHION_FILE.read_text(encoding="utf-8")) if CUSHION_FILE.exists() else {"obs": {}}
     try:
-        html = f.get("https://www.jra.go.jp/keiba/baba/", ttl_hours=3)
-        txt = kc.clean(kc.soup(html).get_text(" "))
-        for v in venues:
-            i = txt.find(v)
-            if i < 0: continue
-            seg = txt[i:i + 1500]
-            m = re.search(r"クッション値[^0-9]{0,20}(\d{1,2}\.\d)", seg)
-            mo = re.search(r"含水率[^。]{0,120}", seg)
-            if m:
-                c = float(m.group(1))
-                out[f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}|{v}"] = {"cushion": c, "cushionLabel": "硬め" if c >= 10.3 else "やや硬め" if c >= 9.8 else "標準" if c >= 9.0 else "やや軟らかめ" if c >= 8.5 else "軟らかめ",
-                    "moisture": mo.group(0)[:80] if mo else "", "note": "JRA馬場情報より自動取得", "frontBias": 0.2 if c >= 9.8 else 0.1, "innerBias": 0.15, "src": "JRA 馬場情報"}
+        html = f.get("https://www.jra.go.jp/keiba/baba/_data_cushion.html", ttl_hours=0.5, encoding="shift_jis")
+        sp = kc.soup(html); today = dt.date.today()
+        for blk in sp.select("div[id^=rc]"):
+            venue = (blk.get("title") or "").strip()
+            for u in blk.select("div.unit"):
+                t = kc.clean(u.select_one(".time").get_text()) if u.select_one(".time") else ""
+                v = kc.to_float(u.select_one(".cushion").get_text()) if u.select_one(".cushion") else None
+                m = re.match(r"(\d{1,2})月(\d{1,2})日.*?(\d{1,2})時(\d{2})分", t)
+                if not (venue and v and m): continue
+                y = today.year - (1 if int(m.group(1)) > today.month + 1 else 0)   # 年をまたぐ表示（1月に12月の値）への対応
+                d = dt.date(y, int(m.group(1)), int(m.group(2))).isoformat()
+                store["obs"][f"{d}|{venue}"] = {"cushion": v, "time": f"{int(m.group(3))}:{m.group(4)}", "measured": t}
+        CUSHION_FILE.write_text(json.dumps(store, ensure_ascii=False), encoding="utf-8")
     except Exception as ex:
-        log(f"馬場情報は取得できませんでした（アプリで手入力できます）: {ex}")
+        log(f"クッション値は取得できませんでした（平均値を使います）: {ex}")
+    return store
+
+def cushion_avg(store):
+    """競馬場ごとの平均（その日の値が出ていない日のシミュレーションに使う）"""
+    by = {}
+    for k, o in (store.get("obs") or {}).items(): by.setdefault(k.split("|")[1], []).append(o["cushion"])
+    allv = [v for vs in by.values() for v in vs]
+    return {"venue": {k: round(sum(v) / len(v), 2) for k, v in by.items()}, "n": {k: len(v) for k, v in by.items()},
+            "all": round(sum(allv) / len(allv), 2) if allv else None}
+
+def fetch_track(f, ymd, venues):
+    """その日に測定されたクッション値だけを track に入れる（推測の偏り値などは入れない）"""
+    store = fetch_cushion(f); d = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}"; out = {}
+    for v in venues:
+        o = store["obs"].get(f"{d}|{v}")
+        if o: out[f"{d}|{v}"] = {"cushion": o["cushion"], "cushionLabel": cushion_label(o["cushion"]), "note": f"JRA発表 {o['measured']}", "src": "JRA 馬場情報"}
     return out
 
 def race_started(ymd, r, minutes=0):
@@ -73,6 +96,10 @@ def finalize_race(f, r):
     確定オッズは、発走後に予想し直したときの答え合わせ（組み合わせ馬券を含む）と学習に使う"""
     has = r.get("result") and r["result"].get("rows") and r["result"].get("pay", {}).get("三連複")
     if not has and not kc.race_result(f, r): return False
+    # 結果表の馬体重（＝発走前に発表された馬体重）を出走馬に写す（発走後に予想し直すときに使う）
+    bwr = {x.get("num"): kc.parse_bw(x.get("bw")) for x in r["result"].get("rows") or []}
+    for e in r.get("entries") or []:
+        if not e.get("bw") and bwr.get(e["num"]): e.update(bwr[e["num"]])
     if not r.get("oddsFinal"):
         try:
             n, _, _ = kc.odds(f, r, ttl_hours=0.02)
@@ -119,6 +146,11 @@ def update_date(ymd, odds_only=False):
             races = snap["races"]
             with LOCK: JOB.update(step="オッズ更新", total=len(races))
             ok, errs = 0, []
+            # 当日朝に発表されるクッション値を取り込む（発表前は平均値で計算）
+            try:
+                tr = fetch_track(f, ymd, sorted({r["venue"] for r in races if r.get("entries")}))
+                if tr: snap.setdefault("track", {}); [snap["track"].setdefault(k, {}).update(v) for k, v in tr.items()]
+            except Exception as ex: log(f"クッション値の取り込みをスキップ: {ex}")
             fin = 0
             for i, r in enumerate(races):
                 if r.get("entries") and race_started(ymd, r, 15):
@@ -127,6 +159,10 @@ def update_date(ymd, odds_only=False):
                     with LOCK: JOB["done"] = i + 1
                     continue
                 if r.get("entries"):
+                    # 馬体重は発走の約70分前に発表。発表後は一度取れば十分
+                    if race_started(ymd, r, -80) and not all(e.get("bw") for e in r["entries"]):
+                        try: kc.body_weights(f, r)
+                        except Exception as ex: print(f"  馬体重取得スキップ ({r['id']}): {ex}")
                     n, src, err = kc.odds(f, r, ttl_hours=0.02)
                     if n: ok += 1; kc.combo_odds(f, r, ttl_hours=0.02)
                     else: errs.append(f"{r['venue']}{r['no']}R: {err}")
@@ -230,14 +266,22 @@ def write_status(extra=None):
 def collect_db():
     """保存済みスナップショット（直近と今後）をまとめてアプリに渡す"""
     out = {"version": 1, "source": "ローカルDB", "races": [], "horses": {}, "track": {}, "dates": []}
-    cutoff = (dt.date.today() - dt.timedelta(days=8)).strftime("%Y%m%d")
+    cutoff = (dt.date.today() - dt.timedelta(days=120)).strftime("%Y%m%d")   # 取得済みの開催日は約4か月分まで画面に出す（学習の記録はすべて残る）
+    key = lambda x: (x.get("raceId") or "") + "|" + str(x.get("date")) + "|" + (x.get("race") or "")
     for p in sorted(DATA.glob("races_*.json")):
         ymd = p.stem.split("_")[1]
         if ymd < cutoff: continue
         try: j = json.loads(p.read_text(encoding="utf-8"))
         except Exception: continue
-        out["races"] += j.get("races", []); out["horses"].update(j.get("horses", {})); out["track"].update(j.get("track", {}))
+        out["races"] += j.get("races", []); out["track"].update(j.get("track", {}))
+        for hid, h in (j.get("horses") or {}).items():   # 出走歴は上書きせず合わせる
+            o = out["horses"].get(hid)
+            if not o: out["horses"][hid] = h; continue
+            m = {key(x): x for x in o.get("runs") or []}; m.update({key(x): x for x in h.get("runs") or []})
+            out["horses"][hid] = {**o, **h, "runs": sorted(m.values(), key=lambda x: str(x.get("date")), reverse=True)}
         out["dates"].append({"date": ymd, "updated": j.get("updated"), "races": len(j.get("races", []))})
+    try: out["cushion"] = cushion_avg(json.loads(CUSHION_FILE.read_text(encoding="utf-8")) if CUSHION_FILE.exists() else {})
+    except Exception: pass
     for fn, key in (("model_weights.json", "modelWeights"), ("upset_weights.json", "anaWeights")):
         p = HERE / fn
         if p.exists():
