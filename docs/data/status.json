@@ -1,1 +1,1 @@
-{"running": false, "date": null, "step": "", "done": 0, "total": 0, "log": ["20:04:24 学習を更新しました（24レース分）"], "error": null, "finished_at": null, "kind": null, "nextSunday": "20261004", "dates": ["20261004"], "updated": "2026-10-04T20:04:26+09:00", "source": "PC"}
+{"running": false, "date": "20261004", "step": "レース結果", "done": 24, "total": 24, "log": ["20:04:35 レース結果を取得しました（24/24レース）"], "error": null, "finished_at": null, "kind": "results", "nextSunday": "20261004", "dates": ["20261004"], "updated": "2026-10-04T20:04:37+09:00", "source": "PC"}
