@@ -51,6 +51,8 @@ jobs:
         run: python cloud/cloud_update.py --kind "${{ github.event.inputs.kind || 'auto' }}" --date "${{ github.event.inputs.date || 'next' }}"
       - name: 学習（結果が出たレースから）
         run: node cloud/lib/learn_run.js docs/data || true
+      - name: 発走前の予想を記録（答え合わせ用）
+        run: node cloud/lib/predict_run.js docs || true
       - name: 保存
         run: |
           git config user.name "keiba-bot"

@@ -62,6 +62,25 @@ def fetch_track(f, ymd, venues):
         log(f"馬場情報は取得できませんでした（アプリで手入力できます）: {ex}")
     return out
 
+def race_started(ymd, r, minutes=0):
+    m = re.match(r"(\d{1,2}):(\d{2})", r.get("postTime") or "")
+    if not m: return False
+    t = dt.datetime(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:]), int(m.group(1)), int(m.group(2)))
+    return dt.datetime.now() >= t + dt.timedelta(minutes=minutes)
+
+def finalize_race(f, r):
+    """発走後のレース：結果（着順・通過順・上がり・払戻）と確定オッズ（単複・馬連・ワイド・馬単・3連複）を取る。
+    確定オッズは、発走後に予想し直したときの答え合わせ（組み合わせ馬券を含む）と学習に使う"""
+    has = r.get("result") and r["result"].get("rows") and r["result"].get("pay", {}).get("三連複")
+    if not has and not kc.race_result(f, r): return False
+    if not r.get("oddsFinal"):
+        try:
+            n, _, _ = kc.odds(f, r, ttl_hours=0.02)
+            if n: kc.combo_odds(f, r, ttl_hours=0.02); r["oddsFinal"] = True
+        except Exception as ex:
+            print(f"  確定オッズ取得スキップ ({r.get('id')}): {ex}")
+    return True
+
 def update_results(ymd):
     """レース結果（着順・払戻）を取得してスナップショットに追加（答え合わせ用）"""
     f = kc.Fetcher(delay=1.2)
@@ -74,8 +93,7 @@ def update_results(ymd):
         with LOCK: JOB["total"] = len(races)
         ok = 0
         for i, r in enumerate(races):
-            if r.get("result") and r["result"].get("rows") and r["result"].get("pay", {}).get("三連複"): ok += 1
-            elif kc.race_result(f, r): ok += 1
+            if finalize_race(f, r): ok += 1
             with LOCK: JOB["done"] = i + 1
         if not ok: raise RuntimeError("結果をまだ取得できませんでした（確定前か、ネット接続の問題）")
         snap["updated"] = dt.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -101,7 +119,13 @@ def update_date(ymd, odds_only=False):
             races = snap["races"]
             with LOCK: JOB.update(step="オッズ更新", total=len(races))
             ok, errs = 0, []
+            fin = 0
             for i, r in enumerate(races):
+                if r.get("entries") and race_started(ymd, r, 15):
+                    # 発走済み：結果と確定オッズを一度だけ取る（その日のあとのレースの「当日の馬場の偏り」に使う）
+                    if r.get("oddsFinal") or finalize_race(f, r): fin += 1; ok += 1
+                    with LOCK: JOB["done"] = i + 1
+                    continue
                 if r.get("entries"):
                     n, src, err = kc.odds(f, r, ttl_hours=0.02)
                     if n: ok += 1; kc.combo_odds(f, r, ttl_hours=0.02)
@@ -112,7 +136,7 @@ def update_date(ymd, odds_only=False):
             snap["updated"] = dt.datetime.now().astimezone().isoformat(timespec="seconds")
             snapshot_path(ymd).write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
             srcs = sorted({r.get("oddsSrc") for r in races if r.get("oddsSrc")})
-            log(f"オッズを更新しました（{ok}/{len(races)}レース・{'/'.join(srcs)}・{max((r.get('oddsAsOf') or '') for r in races)}時点）")
+            log(f"オッズを更新しました（{ok}/{len(races)}レース・{'/'.join(srcs)}・{max((r.get('oddsAsOf') or '') for r in races)}時点）" + (f"・結果確定{fin}レース" if fin else ""))
             after_update(ymd)
             return
         races = kc.race_list(f, date)
@@ -259,6 +283,9 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception:
                 return self._json({"ok": False}, 404)
         if u.path == "/api/tweaks": return self._json(json.loads(TWEAKS.read_text(encoding="utf-8")) if TWEAKS.exists() else {})
+        if u.path == "/api/pre":
+            ymd = re.sub(r"\D", "", (q.get("date") or [""])[0])[:8]
+            return self._json(get_pre(ymd) if len(ymd) == 8 else {})
         if u.path == "/api/summary":
             ymd = re.sub(r"\D", "", (q.get("date") or [""])[0])[:8]
             p = DATA / f"summary_{ymd}.json"
@@ -320,9 +347,62 @@ class Handler(SimpleHTTPRequestHandler):
                 ymd = re.sub(r"\D", "", (q.get("date") or [""])[0])[:8]
                 if len(ymd) != 8: return self._json({"ok": False, "message": "date"}, 400)
                 target = DATA / f"summary_{ymd}.json"
-            try: json.loads(body); target.write_text(body, encoding="utf-8"); return self._json({"ok": True})
+            try:
+                j = json.loads(body); target.write_text(body, encoding="utf-8")
+                if u.path == "/api/summary": _safe(lambda: save_pre_from_summary(ymd, j))
+                return self._json({"ok": True})
             except Exception as ex: return self._json({"ok": False, "message": str(ex)}, 400)
         return self._json({"ok": False}, 404)
+
+# ===== 発走前の予想の記録（答え合わせを「発走前の買い目」で正しく行うため） =====
+def _start_of(ymd, post):
+    m = re.match(r"(\d{1,2}):(\d{2})", post or "")
+    if not m: return None
+    return dt.datetime(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:]), int(m.group(1)), int(m.group(2))).astimezone()
+
+def _at(x):
+    try:
+        t = dt.datetime.fromisoformat(str(x.get("at")).replace("Z", "+00:00"))
+        return t if t.tzinfo else t.astimezone()
+    except Exception: return None
+
+def save_pre_from_summary(ymd, summ):
+    """一括予想の保存のたびに、発走前に計算した行を pre_YYYYMMDD.json に残す（あとで計算し直しても消えない）"""
+    p = DATA / f"pre_{ymd}.json"
+    pre = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {"date": summ.get("date"), "rows": {}}
+    n = 0
+    for x in summ.get("rows") or []:
+        cand = [y for y in (x, x.get("preRace")) if y]
+        for y in cand:
+            st, at = _start_of(ymd, y.get("postTime")), _at(y)
+            if not (st and at and at <= st): continue
+            old = pre["rows"].get(y["id"])
+            if not old or (_at(old) or at) < at:
+                row = {k: v for k, v in y.items() if k != "preRace"}; pre["rows"][y["id"]] = row; n += 1
+            break
+    if n:
+        pre["updated"] = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        p.write_text(json.dumps(pre, ensure_ascii=False), encoding="utf-8")
+
+PRE_CACHE = {}
+def get_pre(ymd):
+    """PCの記録とクラウドの記録（クラウドが自動で計算した発走前の予想）を合わせて返す"""
+    p = DATA / f"pre_{ymd}.json"
+    pre = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {"rows": {}}
+    c = PRE_CACHE.get(ymd)
+    if not c or time.time() - c[0] > 300:
+        remote = None
+        try:
+            import cloud
+            remote = cloud.fetch_remote_json(f"pre_{ymd}.json")
+        except Exception: remote = None
+        PRE_CACHE[ymd] = c = (time.time(), remote)
+    remote = c[1]
+    if remote and remote.get("rows"):
+        for k, v in remote["rows"].items():
+            o = pre["rows"].get(k)
+            if not o or (_at(o) and _at(v) and _at(o) < _at(v)): pre["rows"][k] = v
+    return pre
 
 def _safe(fn):
     try: fn()
@@ -416,7 +496,7 @@ def main():
         ymd = next_sunday().strftime("%Y%m%d") if v == "next" else v
         update_date(ymd, odds_only=bool(a.odds)); return
     ensure_three()
-    threading.Thread(target=auto_odds_loop, daemon=True).start()
+    if not os.environ.get("KEIBA_NO_AUTO"): threading.Thread(target=auto_odds_loop, daemon=True).start()
     cm = cloud_mod()
     if cm and cm.load_conf().get("token") and cm.load_conf().get("appVersion") != cm.app_version():
         threading.Thread(target=lambda: _safe(lambda: cm.republish(DATA, write_status)), daemon=True).start()   # アプリを新しくしたらクラウドも更新

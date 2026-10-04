@@ -280,6 +280,8 @@ tr.darkrow{background:color-mix(in srgb,var(--gold) 9%,transparent)}
 .rc .resline{font-size:12.5px;border-top:1px dashed var(--line);padding-top:6px}
 .learnchip{border:1px solid #3b7fc4;color:#3b7fc4;background:var(--surface);border-radius:14px;padding:3px 10px;font-size:12px;font-weight:700;cursor:pointer}
 .checkmode{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 8px}
+.checkmode .btn[aria-pressed="true"]{background:var(--turf);color:var(--turf-ink);border-color:var(--turf);font-weight:700}
+.checkmode .btn[aria-pressed="true"]::before{content:"✓ "}
 .learnbox{background:var(--surface);border:1px solid var(--line);border-left:4px solid #3b7fc4;border-radius:8px;padding:10px 14px;margin-bottom:12px}
 .learnbox h3{font-size:15px;margin-bottom:4px}
 .learnbox .upsets{margin:4px 0 8px 1.2em;font-size:13px;line-height:1.8}
@@ -1056,11 +1058,16 @@ const Bets = (() => {
   // 単勝・複勝それぞれ「モデル確率^(1-β) × 市場確率^β」に統合し、シミュレーションの各回に重みを付けて
   // 1着・3着内の確率がこの統合確率に合うように調整する（着順の組み合わせ構造はシミュレーションのまま）。
   // 市場確率は大穴が過大評価されやすい（本命・大穴バイアス）ので、オッズの逆数を1.1乗して補正。
-  // 統合：目標確率 ∝ p_model^A × p_market^B（A, B は答え合わせの蓄積から学習。初期値は A=0.5, B=0.55）
-  let CAL = { a: 0.5, b: 0.55, learned: false, races: 0 };
+  // 統合：目標確率 ∝ p_model^A × p_market^B（A, B は答え合わせの蓄積から学習。初期値は A=0.3, B=0.85）
+  // A+B が1未満だと確率が平らになり大穴を過大評価する（＝大穴の単勝ばかり買う）ので、A+B≧1 を必ず守る。
+  let CAL = { a: 0.3, b: 0.85, learned: false, races: 0 };
   let BETA = null;              // 手動で「市場を信じる割合」を選んだときだけ使う（null=学習値）
   function setMarketBeta(b){ BETA = (b == null || b === "auto") ? null : (b >= 0 && b <= 1 ? +b : BETA); }
-  function setCalibration(c){ if (c && c.a >= 0 && c.b >= 0) CAL = { ...CAL, ...c, learned: true }; }
+  function setCalibration(c){
+    if (!(c && c.a >= 0 && c.b >= 0)) return;
+    let { a, b } = c; if (a + b < 1){ const d = (1 - a - b) / 2; a += d; b += d; }
+    CAL = { ...CAL, ...c, a: +a.toFixed(3), b: +b.toFixed(3), learned: true };
+  }
   const exps = () => BETA == null ? { a: CAL.a, b: CAL.b } : { a: 1 - BETA, b: BETA * 1.1 };
   function blendWeights(ctx, res, odds){
     const N = ctx.N, R = res.runs, o = res.orders, f = ctx.field, placeK = N <= 7 ? 2 : 3;
@@ -1074,13 +1081,14 @@ const Bets = (() => {
       return { win: Array.from(W1, x => x / t), place: Array.from(P1, x => x / t) }; };
     const m0 = marg();
     const comb = (pm, pk) => pm.map((x, i) => Math.pow(Math.max(x, 1e-5), EA) * Math.pow(Math.max(pk[i], 1e-5), EB));
-    const tWin = norm(comb(m0.win, mWin), 1);
+    // シミュレーションで一度も1着にならなかった馬は重み付けで確率を作れないので0のまま（他の馬に配り直されて歪むのを防ぐ）
+    const tWin = norm(comb(m0.win, mWin).map((x, i) => m0.win[i] > 1e-6 ? x : 0), 1);
     let tPlace = null;
     if (hasPlace){
       const mid = f.map((x, i) => x.placeLo > 0 ? (x.placeLo + (x.placeHi || x.placeLo)) / 2 : null);
       const mx = Math.max(...mid.filter(Boolean));
       const mPl = norm(mid.map(v => 1 / (v || mx * 2)), placeK);
-      tPlace = norm(comb(m0.place, mPl), placeK).map(x => Math.min(0.97, x));
+      tPlace = norm(comb(m0.place, mPl).map((x, i) => m0.place[i] > 1e-6 ? x : 0), placeK).map(x => Math.min(0.97, x));
     }
     for (let it = 0; it < 6; it++){
       if (tPlace){
@@ -1112,31 +1120,49 @@ const Bets = (() => {
     const R = B.ess, CO = ctx.race?.comboOdds || {};
     const real = { 馬連: !!CO.馬連, ワイド: !!CO.ワイド, 馬単: !!CO.馬単, 三連複: !!CO.三連複 };
     const out = [];
-    const push = (type, idx, p, odds, est, hi) => {
+    const { a: EA, b: EB } = exps();
+    // psim: 重み付けしたシミュレーション上の的中確率。組み合わせ馬券は確率をさらにオッズと統合するので、
+    // 配分（ケリー）と期待払戻の計算では払戻を rho = p / psim 倍して、期待値を p × オッズ に合わせる
+    const push = (type, idx, p, odds, est, hi, psim) => {
       if (p < MIN_P[type] || !(odds > 1)) return;
       odds = Math.round(odds * 10) / 10;
-      const se = Math.sqrt(p * (1 - p) / R);
-      out.push({ type, idx, nums: idx.map(i => f[i].num), p, odds, oddsHi: hi || null, est, ev: p * odds, evL: Math.max(0, p - se) * odds, kelly: (p * odds - 1) / (odds - 1) });
+      // シミュレーションの誤差は統合の指数 A 倍に縮んで確率に効く（p ∝ p_model^A）
+      const se = Math.sqrt(p * (1 - p) / R) * Math.min(1, Math.max(EA, 0.1));
+      const rho = psim > 1e-9 ? Math.max(0.2, Math.min(5, p / psim)) : 1;
+      out.push({ type, idx, nums: idx.map(i => f[i].num), p, odds, oddsHi: hi || null, est, ev: p * odds, evL: Math.max(0, p - se) * odds, kelly: (p * odds - 1) / (odds - 1), rho });
     };
     for (let i = 0; i < N; i++){
       if (!(f[i].odds > 1)) continue;          // オッズ不明の馬の単複は買わない
-      push("単勝", [i], M.win[i], f[i].odds, false);
-      if (f[i].placeLo > 0) push("複勝", [i], M.place[i], f[i].placeLo, false, f[i].placeHi);
+      push("単勝", [i], M.win[i], f[i].odds, false, null, M.win[i]);
+      if (f[i].placeLo > 0) push("複勝", [i], M.place[i], f[i].placeLo, false, f[i].placeHi, M.place[i]);
     }
-    const est = (q, t) => Math.max(1.5, Math.round((1 - TAKE[t]) / q * 0.85 * 10) / 10);   // 推定配当は控えめに（×0.85）
     const key = idx => idx.map(i => f[i].num).sort((a, b) => a - b).join("-");
+    // 組み合わせ馬券は実オッズがあるときだけ（推定配当は誤差が大きく、期待値を過大に見積もるため買わない）。
+    // シミュレーションの組み合わせ確率は、上位馬どうしの同時入着を強めに見積もりやすい（10/4の検証で、期待払戻175%に対し実際143%）。
+    // そこで単勝と同じく「モデル^A × 市場^B」で、組み合わせごとのオッズが示す確率とも統合してから期待値を計算する。
+    // モデル側は重み付け前のシミュレーションの確率を使う（重み付け後は既に市場が混ざっているので、二重に混ぜない）。
+    const M0 = modelProbs({ orders: res.orders, runs: res.runs }, N);
+    const items = { 馬連: [], ワイド: [], 馬単: [], 三連複: [] };
     for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++){
       const k2 = key([i, j]);
-      // 組み合わせ馬券は実オッズがあるときだけ（推定配当は誤差が大きく、期待値を過大に見積もるため買わない）
-      if (real.馬連){ const v = CO.馬連[k2]; if (v) push("馬連", [i, j], M.pair[i*N + j], v, false); }
-      if (real.ワイド){ const v = CO.ワイド[k2]; if (v) push("ワイド", [i, j], M.wide[i*N + j], Array.isArray(v) ? v[0] : v, false, Array.isArray(v) ? v[1] : null); }
+      if (real.馬連){ const v = CO.馬連[k2]; if (v) items.馬連.push({ idx: [i, j], p: M0.pair[i*N + j], ps: M.pair[i*N + j], odds: v, mk: v }); }
+      if (real.ワイド){ const v = CO.ワイド[k2]; if (v){ const lo = Array.isArray(v) ? v[0] : v, hi = Array.isArray(v) ? v[1] : null; items.ワイド.push({ idx: [i, j], p: M0.wide[i*N + j], ps: M.wide[i*N + j], odds: lo, hi, mk: hi ? (lo + hi) / 2 : lo }); } }
       if (real.馬単){
         const v1 = CO.馬単[`${f[i].num}-${f[j].num}`], v2 = CO.馬単[`${f[j].num}-${f[i].num}`];
-        if (v1) push("馬単", [i, j], M.exacta[i*N + j], v1, false);
-        if (v2) push("馬単", [j, i], M.exacta[j*N + i], v2, false);
+        if (v1) items.馬単.push({ idx: [i, j], p: M0.exacta[i*N + j], ps: M.exacta[i*N + j], odds: v1, mk: v1 });
+        if (v2) items.馬単.push({ idx: [j, i], p: M0.exacta[j*N + i], ps: M.exacta[j*N + i], odds: v2, mk: v2 });
       }
-      if (real.三連複) for (let k = j + 1; k < N; k++){ const v = CO.三連複[key([i, j, k])]; if (v) push("三連複", [i, j, k], M.trio[(i*N + j)*N + k], v, false); }
+      if (real.三連複) for (let k = j + 1; k < N; k++){ const v = CO.三連複[key([i, j, k])]; if (v) items.三連複.push({ idx: [i, j, k], p: M0.trio[(i*N + j)*N + k], ps: M.trio[(i*N + j)*N + k], odds: v, mk: v }); }
     }
+    Object.entries(items).forEach(([type, xs]) => {
+      if (!xs.length) return;
+      // 統合後の確率の合計は、重み付け後のシミュレーションでこれらの組み合わせが占める確率に合わせる
+      const q = xs.map(x => 1 / x.mk), qs = q.reduce((a, b) => a + b, 0);
+      const pmS = xs.reduce((a, x) => a + x.ps, 0);
+      const t = xs.map((x, n) => Math.pow(Math.max(x.p, 1e-6), EA) * Math.pow(q[n] / qs, EB));
+      const ts = t.reduce((a, b) => a + b, 0) || 1;
+      xs.forEach((x, n) => push(type, x.idx, Math.min(0.97, t[n] / ts * pmS), x.odds, false, x.hi || null, x.ps));
+    });
     return { list: out.sort((a, b) => b.ev - a.ev), M, K, real, wres, blend: B };
   }
 
@@ -1158,7 +1184,7 @@ const Bets = (() => {
   }
 
   // 予算の配分：シミュレーションの着順（数千〜1万レース分）の上で、資金の対数の期待値（＝長期の資金成長率）を最大にする
-  // ケリー基準を、券種どうしの相関（同じレースで同時に当たる・外れる）も含めて100円単位の貪欲法で厳密に解く。
+  // ケリー基準を、券種どうしの相関（同じレースで同時に当たる・外れる）も含めて100円単位の貪欲法で（近似的に）解く。
   // 資金は予算の10倍（1レースに資金の1割を使う）と仮定。
   const BANK_MUL = 10;
   function plan(ctx, res, budget, cands){
@@ -1186,7 +1212,7 @@ const Bets = (() => {
       let best = -Infinity, bi = -1;
       for (let i = 0; i < pool.length; i++){
         if (!stake[i] && used >= maxBets) continue;
-        const pay = 100 * pool[i].odds, h = H[i];
+        const pay = 100 * pool[i].odds * (pool[i].rho || 1), h = H[i];
         let g = 0;
         for (let q = 0; q < h.length; q++){ const w = W[h[q]] - 100; g += QW[h[q]] * (Math.log(w + pay) - Math.log(w)); }
         g = g / tq + base;
@@ -1196,7 +1222,7 @@ const Bets = (() => {
       if (!stake[bi]) used++;
       stake[bi]++;
       for (let m = 0; m < Msz; m++) W[m] -= 100;
-      const pay = 100 * pool[bi].odds; H[bi].forEach(m => W[m] += pay);
+      const pay = 100 * pool[bi].odds * (pool[bi].rho || 1); H[bi].forEach(m => W[m] += pay);
     }
     const tickets = pool.map((c, i) => ({ ...c, stake: stake[i] * 100 })).filter(t => t.stake > 0)
       .sort((a, b) => b.stake - a.stake || b.ev - a.ev);
@@ -1218,6 +1244,7 @@ const Bets = (() => {
   function evaluate(res, tickets, N, budget){
     const R = res.runs, o = res.orders, placeK = N <= 7 ? 2 : 3, Wt = res.w;
     let sum = 0, hit = 0, profit = 0, hitSum = 0, maxPay = 0, tw = 0;
+    const staked = tickets.reduce((a, t) => a + t.stake, 0);   // 実際に使う額（予算を使い切らないことがある）
     for (let r = 0; r < R; r++){
       const top = [o[r*N], o[r*N+1], o[r*N+2]];
       let pay = 0;
@@ -1229,12 +1256,12 @@ const Bets = (() => {
         else if (t.type === "馬単") ok = top[0] === h[0] && top[1] === h[1];
         else if (t.type === "ワイド") ok = top.includes(h[0]) && top.includes(h[1]);
         else if (t.type === "三連複") ok = h.every(x => top.includes(x));
-        if (ok) pay += t.stake * t.odds;
+        if (ok) pay += t.stake * t.odds * (t.rho || 1);
       }
       const q = Wt ? Wt[r] : 1; tw += q;
-      sum += q * pay; if (pay > 0){ hit += q; hitSum += q * pay; } if (pay > budget) profit += q; if (pay > maxPay) maxPay = pay;
+      sum += q * pay; if (pay > 0){ hit += q; hitSum += q * pay; } if (pay > staked) profit += q; if (pay > maxPay) maxPay = pay;
     }
-    return { expReturn: sum / tw, hitRate: hit / tw, profitRate: profit / tw, avgHitPay: hit ? hitSum / hit : 0, maxPay };
+    return { expReturn: sum / tw, staked, hitRate: hit / tw, profitRate: profit / tw, avgHitPay: hit ? hitSum / hit : 0, maxPay };
   }
 
   return { candidates, plan, EV_MIN, setMarketBeta, setCalibration, get BETA(){ return BETA; }, get CAL(){ return CAL; } };
@@ -2048,14 +2075,21 @@ const SEED = {
 // 2) 各要素（スピード・騎手・枠…）の効き具合の補正
 // 3) 競馬場ごとの馬場の偏り（前残り・内枠有利）
 // を、上位3着までの着順の尤度（Plackett–Luce）を最大にするように推定する。
-// データが少ないうちは事前の値（a=0.5, b=0.55, 補正0）に強く引き寄せ、レースが増えるほどデータに従う。
+// データが少ないうちは事前の値（a=0.3, b=0.85, 補正0）に強く引き寄せ、レースが増えるほどデータに従う。
 const Learn = (() => {
   const FEATS = ["能力","スピード","レース傾向","当日馬場","血統","季節","調子","距離","芝ダ","馬場","競馬場","回り","枠","斤量","騎手","乗替","調教","ローテ","年齢","穴要素","人気変動"];
-  const PRIOR = { a: 0.5, b: 0.55, sa: 0.35, sb: 0.35, sc: 0.025 };
+  const PRIOR = { a: 0.3, b: 0.85, sa: 0.2, sb: 0.2, sc: 0.025 };
+  // 2着・3着の選ばれ方は1着より「まぎれ」が大きいので、段階ごとに確率の鋭さを割り引く（ベンターの方法）。
+  // これをしないと、統合の指数 a+b が 1 より小さく推定され、大穴の確率を過大に見積もってしまう（10/4 で実際に発生）。
+  const LAM = [1, 0.75, 0.6];
+  const AB_MIN = 1.0;   // a+b の下限：統合後の確率がオッズより「平ら」（＝大穴を過大評価）にならないように
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
   // 1レース分の記録を作る（pm: モデルの1着確率、ctx: buildContext の結果、res: 結果）
-  function record(race, ctx, pm, res, bets){
+  // wcur: 記録時に効いていた要素の重み、wbase: 学習前の基準の重み（要素の値を基準の単位に直して記録する）
+  function record(race, ctx, pm, res, bets, wcur, wbase){
+    wcur = wcur || {}; wbase = wbase || {};
+    const wc = k => (k === "能力" ? 1 : (wcur[k] ?? 1)), wb = k => (k === "能力" ? 1 : (wbase[k] ?? 1));
     const rows = res.rows || [];
     const fin = {}; rows.forEach(x => { if (/^\d+$/.test(String(x.pos))) fin[x.num] = x; });
     const order = res.order || rows.filter(x => /^\d+$/.test(String(x.pos))).sort((a, b) => a.pos - b.pos).map(x => x.num);
@@ -2071,15 +2105,16 @@ const Learn = (() => {
     if (res.corners?.length){ const c = res.corners[Math.min(1, res.corners.length - 1)]; c.forEach((num, k) => early[num] = k / Math.max(1, c.length - 1)); }
     const l3 = rows.filter(x => x.l3f > 0).map(x => x.l3f).sort((a, b) => a - b);
     return {
-      id: race.id, date: race.date, venue: race.venue, surface: race.surface, dist: race.distance, going: res.going || race.going || null, n: N, sens: +sens.toFixed(4),
+      id: race.id, date: race.date, post: race.postTime || null, kai: race.kai || null, venue: race.venue, surface: race.surface, dist: race.distance, going: res.going || race.going || null, n: N, sens: +sens.toFixed(4),
       order: order.slice(0, 5),
       h: ctx.field.map((f, i) => ({
         num: f.num, pm: +Math.max(pm[i], 1e-4).toFixed(5), pk: +(inv[i] / s).toFixed(5), odds: odds[i], pop: fin[f.num]?.pop ?? f.pop ?? null,
         pos: fin[f.num] ? +fin[f.num].pos : null, time: fin[f.num]?.time || null, l3f: fin[f.num]?.l3f || null,
         l3rank: fin[f.num]?.l3f ? l3.indexOf(fin[f.num].l3f) + 1 : null, early: early[f.num] ?? null,
         gate: +(((f.num - 1) / Math.max(1, N - 1))).toFixed(3), style: f.style, ana: f.ana || [],
-        z: FEATS.map(k => +(f.adj[k] || 0).toFixed(3))
+        z: FEATS.map(k => +((f.adj[k] || 0) / (Math.abs(wc(k)) > 1e-6 ? wc(k) : 1)).toFixed(3))
       })),
+      wr: FEATS.map(k => +(wc(k) / (Math.abs(wb(k)) > 1e-6 ? wb(k) : 1)).toFixed(3)),
       bets: bets || null
     };
   }
@@ -2154,9 +2189,11 @@ const Learn = (() => {
       // 1円あたりの回収の平均と標準誤差（レースごとの比を投資額で重み付け）
       const rr = xs.map(b => b[1] / b[0]), w = xs.map(b => b[0] / inv);
       const m = rr.reduce((a, x, i) => a + w[i] * x, 0);
-      const v = rr.reduce((a, x, i) => a + w[i] * (x - m) ** 2, 0) * xs.length / Math.max(1, xs.length - 1);
-      const se = Math.sqrt(v / xs.length);
-      out[k] = { races: xs.length, invest: inv, ret: Math.round(ret), roi: +(ret / inv).toFixed(4), lo95: +(m - 1.96 * se).toFixed(4), hi95: +(m + 1.96 * se).toFixed(4),
+      // 投資額で重み付けした平均の標準誤差（賭け額が不ぞろいでも正しい形）: se² = Σ w_i² (r_i − m)² × n/(n−1)
+      const n = xs.length;
+      const se = Math.sqrt(rr.reduce((a, x, i) => a + w[i] * w[i] * (x - m) ** 2, 0) * n / Math.max(1, n - 1));
+      const v = se * se * n;   // 1レースあたりの分散（必要レース数の見積もり用）
+      out[k] = { races: xs.length, invest: inv, ret: Math.round(ret), roi: +(ret / inv).toFixed(4), lo95: +Math.max(0, m - 1.96 * se).toFixed(4), hi95: +(m + 1.96 * se).toFixed(4),
         need: se > 0 ? Math.ceil((1.96 * Math.sqrt(v) / Math.max(0.02, Math.abs(m - 1))) ** 2) : null };
     });
     return out;
@@ -2170,15 +2207,17 @@ const Learn = (() => {
       const H = r.h, n = H.length; if (n < 2 || !r.order?.length) continue;
       const u = H.map(h => th[0] * Math.log(h.pm) + th[1] * Math.log(h.pk) + h.z.reduce((a, z, k) => a + th[2 + k] * z, 0));
       const used = new Array(n).fill(false);
-      for (const num of r.order.slice(0, 3)){
+      const top = r.order.slice(0, 3);
+      for (let st = 0; st < top.length; st++){
+        const num = top[st], lam = LAM[st];
         const wi = H.findIndex(h => h.num === num); if (wi < 0 || used[wi]) break;
-        let mx = -1e9; for (let i = 0; i < n; i++) if (!used[i]) mx = Math.max(mx, u[i]);
-        let Z = 0; const e = new Array(n).fill(0); for (let i = 0; i < n; i++) if (!used[i]){ e[i] = Math.exp(u[i] - mx); Z += e[i]; }
-        L -= u[wi] - mx - Math.log(Z);
+        let mx = -1e9; for (let i = 0; i < n; i++) if (!used[i]) mx = Math.max(mx, lam * u[i]);
+        let Z = 0; const e = new Array(n).fill(0); for (let i = 0; i < n; i++) if (!used[i]){ e[i] = Math.exp(lam * u[i] - mx); Z += e[i]; }
+        L -= lam * u[wi] - mx - Math.log(Z);
         if (grad){
           const feat = i => [Math.log(H[i].pm), Math.log(H[i].pk), ...H[i].z];
-          const fw = feat(wi); for (let j = 0; j < 2 + K; j++) grad[j] -= fw[j];
-          for (let i = 0; i < n; i++) if (!used[i]){ const p = e[i] / Z, fi = feat(i); for (let j = 0; j < 2 + K; j++) grad[j] += p * fi[j]; }
+          const fw = feat(wi); for (let j = 0; j < 2 + K; j++) grad[j] -= lam * fw[j];
+          for (let i = 0; i < n; i++) if (!used[i]){ const p = e[i] / Z, fi = feat(i); for (let j = 0; j < 2 + K; j++) grad[j] += lam * p * fi[j]; }
         }
         used[wi] = true;
       }
@@ -2201,6 +2240,7 @@ const Learn = (() => {
         th[j] -= lr * (m[j] / (1 - 0.9 ** t)) / (Math.sqrt(v[j] / (1 - 0.999 ** t)) + 1e-8);
       }
       th[0] = clamp(th[0], 0, 1.5); th[1] = clamp(th[1], 0, 1.5);
+      if (th[0] + th[1] < AB_MIN){ const d = (AB_MIN - th[0] - th[1]) / 2; th[0] += d; th[1] += d; }
     }
     return th;
   }
@@ -2243,7 +2283,14 @@ const Learn = (() => {
     const weights = {};
     // 要素の補正はレースが十分たまるまで控えめに（200レースで半分、600レースで3/4の強さ）
     const trust = recs.length / (recs.length + 200);
-    FEATS.forEach((k, j) => { const c = th[2 + j]; const mult = clamp(1 + c / (Math.max(0.3, th[0]) * sens) * trust, 0.6, 1.5); if (Math.abs(mult - 1) >= 0.02) weights[k] = +mult.toFixed(3); });
+    // 記録時に効いていた重み（基準に対する倍率）の平均に、残差の係数 c を上乗せする。
+    // 要素の効きは、オッズとの混合（市場の重み0.4）で確率への効きが0.6倍になっている分を戻して換算
+    FEATS.forEach((k, j) => {
+      const c = th[2 + j];
+      const rel = recs.length ? recs.reduce((a, r) => a + (r.wr ? r.wr[j] : 1), 0) / recs.length : 1;
+      const mult = clamp(rel + c / (Math.max(0.3, th[0]) * sens * 0.6) * trust, 0.6, 1.5);
+      if (Math.abs(mult - 1) >= 0.02) weights[k] = +mult.toFixed(3);
+    });
     const a = th[0], b = th[1];
     const byDate = {};
     recs.forEach(r => (byDate[r.date] ||= []).push(r));
@@ -2251,7 +2298,7 @@ const Learn = (() => {
       model: +logloss(byDate[d], h => h.pm).toFixed(3), market: +logloss(byDate[d], h => h.pk).toFixed(3),
       blend: +logloss(byDate[d], h => Math.pow(h.pm, a) * Math.pow(h.pk, b)).toFixed(3) }));
     return {
-      version: 1, updated: new Date().toISOString(), races: recs.length,
+      version: 2, updated: new Date().toISOString(), races: recs.length,
       calib: { a: +a.toFixed(3), b: +b.toFixed(3) },
       weights, featCoef: Object.fromEntries(FEATS.map((k, j) => [k, +th[2 + j].toFixed(4)])),
       metrics: { model: logloss(recs, h => h.pm), market: logloss(recs, h => h.pk), blend: logloss(recs, h => Math.pow(h.pm, a) * Math.pow(h.pk, b)) },
@@ -2267,7 +2314,7 @@ const Learn = (() => {
   }
 
   // 結果の出ているレースについて、モデルの1着確率を計算して記録を作る（ブラウザでもNodeでも同じ）
-  async function recordsForRaces(Engine, races, horses, trackOf, runs = 2500, betsOf){
+  async function recordsForRaces(Engine, races, horses, trackOf, runs = 2500, betsOf, baseW){
     const out = [];
     for (const r of races){
       const res = r.result; if (!res || !r.entries?.length) continue;
@@ -2284,7 +2331,7 @@ const Learn = (() => {
         m.stats.forEach((s, i) => win[i] += w * s.win); tot += w;
       }
       const pm = Array.from(win, x => x / tot);
-      out.push(record(race, ctx, pm, res, betsOf ? betsOf(r) : null));
+      out.push(record(race, ctx, pm, res, betsOf ? betsOf(r) : null, Engine.WEIGHTS, baseW || Engine.WEIGHTS));
     }
     return out;
   }
@@ -2784,13 +2831,49 @@ function curRace(){ return DB.races[ST.raceId]; }
 function markStale(id){ if (ST.sims[id]) ST.sims[id].stale = true; }
 function trackOf(r){
   let t = SEED.track?.[r.date + "|" + r.venue] || null;
-  // 答え合わせから学習した、この競馬場・芝ダの直近の偏り（前残り・内枠有利）を重ねる
-  const lb = LEARN.model?.bias?.[r.venue + "|" + r.surface];
-  if (lb && lb.races >= 2 && (lb.front != null || lb.inner != null)){
-    t = { ...(t || {}), frontBias: +(((t?.frontBias ?? 0) * 0.5) + (lb.front ?? 0)).toFixed(3), innerBias: +(((t?.innerBias ?? 0) * 0.5) + (lb.inner ?? 0)).toFixed(3),
-          learnedBias: lb, note: [t?.note, `直近${lb.races}Rの傾向：${lb.front > 0.08 ? "前残り" : lb.front < -0.08 ? "差し有利" : "脚質の偏り小"}・${lb.inner > 0.06 ? "内枠有利" : lb.inner < -0.06 ? "外枠有利" : "枠の偏り小"}`].filter(Boolean).join("／") };
+  // 当日（同じ開催・同じ週末）に先に終わったレースの結果から、前残り・内枠有利の偏りを重ねる。
+  // 条件：同じ競馬場・同じ芝/ダート・同じ馬場の区分（良〜稍重／重〜不良）・このレースより前に発走・4レース以上・偏りが統計的にはっきりしている（95%で有意）
+  const lb = LS.get("keibaBiasMode", "auto") === "off" ? null : dayBias(r);
+  if (lb && (lb.front || lb.inner)){
+    t = { ...(t || {}), frontBias: +(((t?.frontBias ?? 0) * 0.5) + lb.front).toFixed(3), innerBias: +(((t?.innerBias ?? 0) * 0.5) + lb.inner).toFixed(3),
+          learnedBias: lb, note: [t?.note, lb.text].filter(Boolean).join("／") };
   }
   if (!t) return null; const c = ST.cushion[r.id]; return c != null ? { ...t, cushion: c } : t;
+}
+const goingClass = g => /重|不/.test(g || "") && !/稍/.test(g || "") ? "wet" : "dry";
+const kaiKey = k => (k || "").replace(/\s*\d+日目.*/, "").replace(/\s+/g, "");
+function biasCorr(xs, ys){ const n = xs.length; if (n < 4) return null; const mx = xs.reduce((a, b) => a + b, 0) / n, my = ys.reduce((a, b) => a + b, 0) / n;
+  let sxy = 0, sx = 0, sy = 0; xs.forEach((x, i) => { sxy += (x - mx) * (ys[i] - my); sx += (x - mx) ** 2; sy += (ys[i] - my) ** 2; }); return sx && sy ? sxy / Math.sqrt(sx * sy) : null; }
+// 1レースの「前に行った馬ほど上位か」「内枠ほど上位か」の相関（+ なら前残り・内有利）
+function raceBiasOf(x){
+  const res = x.result; if (!res?.rows?.length) return null;
+  const fin = res.rows.filter(h => /^\d+$/.test(String(h.pos))); const n = fin.length; if (n < 6) return null;
+  const pr = h => (+h.pos - 1) / (n - 1);
+  const c = res.corners?.length ? res.corners[Math.min(1, res.corners.length - 1)] : null;
+  const early = {}; if (c) c.forEach((num, k) => early[num] = k / Math.max(1, c.length - 1));
+  const fe = fin.filter(h => early[h.num] != null);
+  const N = x.entries?.length || n;
+  return { ce: fe.length >= 6 ? biasCorr(fe.map(h => early[h.num]), fe.map(pr)) : null, cg: biasCorr(fin.map(h => (h.num - 1) / Math.max(1, N - 1)), fin.map(pr)) };
+}
+function dayBias(r){
+  if (r.surface === "障") return null;
+  const t0 = raceStart(r), gc = goingClass(ST.going[r.id] || r.going || "良"), kk = kaiKey(r.kai);
+  const lo = new Date(new Date(r.date + "T12:00:00+09:00") - 1.5 * 864e5);
+  const prev = Object.values(DB.races).filter(x => x.id !== r.id && x.venue === r.venue && x.surface === r.surface && x.result?.rows?.length
+    && raceStart(x) < t0 && raceStart(x) >= lo && (!kk || !x.kai || kaiKey(x.kai) === kk) && goingClass(x.result.going || x.going) === gc);
+  const bs = prev.map(raceBiasOf).filter(Boolean);
+  const stat = k => { const v = bs.map(b => b[k]).filter(v => v != null); const n = v.length; if (n < 4) return { n, m: 0, t: 0 };
+    const m = v.reduce((a, b) => a + b, 0) / n, sd = Math.sqrt(v.reduce((a, b) => a + (b - m) ** 2, 0) / (n - 1)) || 1e-6; return { n, m, t: m / (sd / Math.sqrt(n)) }; };
+  const e = stat("ce"), g = stat("cg");
+  // 95%で偶然とは言えない偏りだけを反映（t分布の両側5%点。レース数が少ないほど厳しく）
+  const tcrit = n => [99, 99, 99, 99, 3.18, 2.78, 2.57, 2.45, 2.36, 2.31, 2.26][n] || 2.2;
+  if (e.n < 4 && g.n < 4) return null;
+  // はっきりしない偏り（95%で有意でないもの）は反映しない（誤った反映を防ぐ）。反映するときもレース数が少ないほど控えめに
+  const front = Math.abs(e.t) >= tcrit(e.n) ? Math.max(-0.5, Math.min(0.6, e.m * 0.9 * e.n / (e.n + 6))) : 0;
+  const inner = Math.abs(g.t) >= tcrit(g.n) ? Math.max(-0.4, Math.min(0.4, g.m * 0.8 * g.n / (g.n + 6))) : 0;
+  const cond = `${r.venue}${r.surface}・${gc === "wet" ? "重〜不良" : "良〜稍重"}・この日このレースより前の${bs.length}R`;
+  const text = `当日の偏り（${cond}）：${front > 0.04 ? "前残り" : front < -0.04 ? "差し有利" : "脚質は反映なし"}・${inner > 0.04 ? "内枠有利" : inner < -0.04 ? "外枠有利" : "枠は反映なし"}`;
+  return { front: +front.toFixed(3), inner: +inner.toFixed(3), races: bs.length, tFront: +e.t.toFixed(2), tInner: +g.t.toFixed(2), corrEarly: +e.m.toFixed(3), corrGate: +g.m.toFixed(3), cond, text };
 }
 function trendOf(r){ const k = Object.keys(SEED.trends || {}).find(k => (r.name || "").includes(k)); return k ? { key: k, ...SEED.trends[k] } : null; }
 function forecastGoing(r){ const t = trackOf(r); if (!t?.goingProb) return null; return Object.entries(t.goingProb).sort((a, b) => b[1] - a[1])[0][0]; }
@@ -3013,7 +3096,7 @@ function ticketRows(tickets, ctx){
 }
 function planKpis(pl, budget){
   return `<div class="kpis">
-      <div><span>期待払戻（平均）</span><b class="num">${yen(pl.expReturn)}</b><span class="small">回収率 ${Math.round(pl.expReturn / budget * 100)}%</span></div>
+      <div><span>期待払戻（平均）</span><b class="num">${yen(pl.expReturn)}</b><span class="small">回収率 ${Math.round(pl.expReturn / (pl.staked || budget) * 100)}%（使う${yen(pl.staked || budget)}に対して）</span></div>
       <div><span>何か当たる確率</span><b class="num">${pct(pl.hitRate)}%</b></div>
       <div><span>当たったときの平均払戻</span><b class="num">${yen(pl.avgHitPay)}</b></div>
       <div><span>プラス収支の確率</span><b class="num">${pct(pl.profitRate)}%</b></div>
@@ -3026,7 +3109,7 @@ function planCard(budget, pl, ctx){
   if (pl.noOdds) return `<div class="plan"><h4>${budget.toLocaleString()}円</h4><p class="small">オッズが入っていないため期待値を計算できません。「オッズだけ更新」を押すか、「出馬表・補正」タブでオッズを入力してください。</p></div>`;
   const evm = pl.evmax ? `<div class="evmax"><h5>期待値最大（1点集中）<span class="small">払戻の平均が最も大きくなる買い方</span></h5>
       <div class="tbl-wrap"><table>${PLAN_HEAD}<tbody>${ticketRows(pl.evmax.tickets, ctx)}</tbody></table></div>
-      <p class="small">期待払戻 <b>${yen(pl.evmax.expReturn)}</b>（回収率 ${Math.round(pl.evmax.expReturn / budget * 100)}%）・的中率 <b>${pct(pl.evmax.hitRate)}%</b>。数学的には期待値最大ですが、${pl.evmax.hitRate < 0.2 ? "外れる回が大半で、" : ""}結果のブレが最も大きい買い方です。</p></div>` : "";
+      <p class="small">期待払戻 <b>${yen(pl.evmax.expReturn)}</b>（回収率 ${Math.round(pl.evmax.expReturn / (pl.evmax.staked || budget) * 100)}%）・的中率 <b>${pct(pl.evmax.hitRate)}%</b>。数学的には期待値最大ですが、${pl.evmax.hitRate < 0.2 ? "外れる回が大半で、" : ""}結果のブレが最も大きい買い方です。</p></div>` : "";
   if (pl.none) return `<div class="plan"><h4>${budget.toLocaleString()}円</h4><p><b>見送り推奨</b>：モデルとオッズを統合した確率で、誤差を見込んでも期待値が ${Bets.EV_MIN.toFixed(2)} を超え、資金の伸びがプラスになる買い目がありません。</p><p class="small">参考（期待値上位）：${pl.ref.map(c => `${c.type} ${c.nums.join("-")}（期待値 ${c.ev.toFixed(2)}・${c.odds}倍・100円→${yen(100 * c.odds)}）`).join("、")}</p>${evm}</div>`;
   const total = pl.tickets.reduce((a, t) => a + t.stake, 0);
   return `<div class="plan"><h4>${budget.toLocaleString()}円の配分 <span class="small">使うのは <b>${yen(total)}</b>${total < budget ? `・残り ${yen(budget - total)} は見送り` : ""}</span></h4>
@@ -3443,6 +3526,8 @@ function summarizeSim(r, sim){
     tri: tri ? { nums: tri.idx.map(i => f[i].num), p: tri.p } : null,
     dark: sim.dark ? { num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: sim.dark.a.top3 } : null,
     bet: planTxt(sim.plans?.[1000]), bet5: planTxt(sim.plans?.[5000]), k1: kp(sim.plans?.[1000]), k5: kp(sim.plans?.[5000]), evm1: evm(sim.plans?.[1000]),
+    anaTop: (() => { const L = sim.cands?.list; if (!L) return null; const pop = {}; f.forEach(x => pop[x.num] = x.pop || 99);
+      return L.filter(c => c.nums.some(n => pop[n] >= 6) && c.ev >= 1.0).sort((a, b) => b.evL - a.evL).slice(0, 3).map(c => ({ t: `${c.type} ${c.nums.join("-")}`, odds: c.odds, ev: +c.ev.toFixed(2), evL: +c.evL.toFixed(2), p: c.p })); })(),
     favPop: f[w[0].i].pop ?? null, mktFav: (f.filter(x => x.odds > 1).sort((a, b) => a.odds - b.odds)[0] || {}).num ?? null, hasOdds: !!sim.cands, oddsAsOf: r.oddsAsOf || null, evTop, moves };
 }
 // ===== クラウド版（GitHub Pages）：データは data/*.json、更新は GitHub Actions に依頼 =====
@@ -3650,6 +3735,21 @@ async function loadServerDB(){
 async function loadServerSummary(d){
   if (!SERVER.on || BATCH.saved[d] !== undefined) return;
   try { const j = await api("/api/summary?date=" + ymdOf(d)); BATCH.saved[d] = j && j.rows ? j : null; } catch (e) { BATCH.saved[d] = null; }
+  // クラウドが自動で記録した「発走前の予想」を取り込む（この端末に発走前の予想がないレースの答え合わせ用）
+  try {
+    const pre = SERVER.cloud ? await staticJson(`pre_${ymdOf(d)}.json`) : await api("/api/pre?date=" + ymdOf(d));
+    if (pre?.rows && Object.keys(pre.rows).length){
+      const sv = BATCH.saved[d] || { date: d, rows: [] }; const by = Object.fromEntries((sv.rows || []).map(x => [x.id, x]));
+      Object.entries(pre.rows).forEach(([id, p]) => {
+        const r = DB.races[id]; if (!r || new Date(p.at) > raceStart(r)) return;
+        const x = by[id];
+        if (!x){ by[id] = p; return; }
+        const mine = preRowOf(r, x);
+        if (!mine || new Date(mine.at) < new Date(p.at)){ if (x === mine || new Date(x.at) <= raceStart(r)) by[id] = p; else by[id] = { ...x, preRace: p }; }
+      });
+      BATCH.saved[d] = { ...sv, rows: Object.values(by) };
+    }
+  } catch (e) {}
   if (ST.tab === "all") renderAllTab();
 }
 function pickInitialDate(j){
@@ -3720,7 +3820,7 @@ const LEARN = { model: null, base: null };
 function applyLearn(m){
   if (!m || !m.calib) return;
   LEARN.model = m;
-  Bets.setCalibration({ ...m.calib, races: m.races });
+  if ((m.version || 1) >= 2) Bets.setCalibration({ ...m.calib, races: m.races });   // 旧版（上位3着をそのまま当てはめた a+b<1 の値）は使わない
   if (!LEARN.base) LEARN.base = { ...Engine.WEIGHTS };
   const w = { ...LEARN.base };
   Object.entries(m.weights || {}).forEach(([k, v]) => { w[k] = (w[k] ?? 1) * v; });
@@ -3748,15 +3848,18 @@ function renderLearnTab(){
       : `<p>まだ蓄積はありません。レース後に「答え合わせ」を押すと、その日の結果が記録され、ここに表示されます。</p>`}
     </div>
     ${m ? `<div class="learnbox"><h3>学習した内容（いまの予想に反映中）</h3>
-      <p class="small"><b>モデルとオッズの統合</b>：p ∝ モデル<sup>${m.calib.a}</sup> × オッズ<sup>${m.calib.b}</sup>（学習前は 0.5・0.55）</p>
+      <p class="small"><b>モデルとオッズの統合</b>：p ∝ モデル<sup>${Bets.CAL.a}</sup> × オッズ<sup>${Bets.CAL.b}</sup>（学習前は 0.3・0.85${(m.version || 1) < 2 ? "。旧方式の学習値は使っていません" : ""}）</p>
       <p class="small"><b>要素の重み</b>：${Object.keys(m.weights || {}).length ? Object.entries(m.weights).map(([k, v]) => `${esc(k)} ×${v}`).join("・") : "まだ変更なし（レースが少ないうちはほぼ動かしません）"}</p>
       <p class="small"><b>穴パターンの加点</b>：${Object.entries(m.anaWeights || {}).map(([k, v]) => `${esc(k)} ${v.pts}`).join("・") || "初期値"}</p>
-      <p class="small"><b>馬場の偏り（直近14日）</b>：${Object.entries(m.bias || {}).map(([k, v]) => `${esc(k)} ${v.races}R 前残り度${v.front} 内枠度${v.inner}`).join("／") || "なし"}</p>
+      <p class="small"><b>馬場の偏り（記録・直近14日／予想への反映は当日の同条件のみ）</b>：${Object.entries(m.bias || {}).map(([k, v]) => `${esc(k)} ${v.races}R 前残り度${v.front} 内枠度${v.inner}`).join("／") || "なし"}</p>
+      <div class="ctrls"><label class="small">馬場の偏りの反映 <select id="biasSel"><option value="auto" ${LS.get("keibaBiasMode", "auto") !== "off" ? "selected" : ""}>当日の同条件だけ反映（推奨）</option><option value="off" ${LS.get("keibaBiasMode", "auto") === "off" ? "selected" : ""}>反映しない</option></select></label></div>
+      ${(() => { const rs = racesOfDay(d).map(r => [r, dayBias(r)]).filter(([, b]) => b && (b.front || b.inner)); return rs.length ? `<p class="small"><b>この日に反映された偏り</b>：${rs.map(([r, b]) => `${esc(r.venue)}${r.no}R（${b.front > 0 ? "前残り" : b.front < 0 ? "差し" : ""}${b.front && b.inner ? "・" : ""}${b.inner > 0 ? "内有利" : b.inner < 0 ? "外有利" : ""}／先行${b.races}R・t=${b.tFront}）`).join("、")}</p>` : `<p class="small">この日は、反映条件を満たす馬場の偏りはありませんでした（はっきりしない偏りは反映しません）。</p>`; })()}
       <div class="ctrls"><button class="btn primary" id="reBatch">学習を反映して ${esc(d.slice(5).replace("-", "/"))} の全レースを予想し直す</button></div>
       <p class="small">予想し直したあと「答え合わせ」を「最新の予想」で行うと、学習の反映を確かめられます。<b>ただし、その日の結果で学習してから同じ日を予想し直すと、答えを少し知った状態になるので成績は実力より良く出ます。</b>本当の実力は、翌週以降の答え合わせ（発走前の予想）で測ります。</p>
     </div>` : ""}
     ${m ? upsetPanel(d) : ""}
     ${m ? learnPanel() : ""}`;
+  const bsel = $("#biasSel"); if (bsel) bsel.onchange = e => { LS.set("keibaBiasMode", e.target.value); Object.keys(ST.sims).forEach(markStale); renderLearnTab(); toast("馬場の偏りの反映を切り替えました。予想し直すと反映されます"); };
   const rb = $("#reBatch"); if (rb) rb.onclick = async () => { CHECK_MODE.v = "latest"; await runBatch(true); showCheck(ST.date); };
 }
 async function loadLearn(){
@@ -3771,9 +3874,10 @@ async function runLearn(d){
   if (!races.length) return null;
   setUpdProgress(0.5, "結果を学習中…（各レースのモデル確率を計算）");
   const full = await api("/api/learn?full=1").catch(() => ({}));
-  const done = new Set((full.records || []).map(x => x.id));
+  // 旧版の記録（学習の作り方が違う）は作り直す
+  const done = new Set((full.model?.version || 1) >= 2 ? (full.records || []).map(x => x.id) : []);
   const betsOf = r => betsForLearn(d, r.id);
-  const recs = await Learn.recordsForRaces(Engine, races.filter(r => !done.has(r.id)), DB.horses, trackOf, 2000, betsOf);
+  const recs = await Learn.recordsForRaces(Engine, races.filter(r => !done.has(r.id)), DB.horses, trackOf, 2000, betsOf, LEARN.base || Engine.WEIGHTS);
   // 既に記録済みのレースにも、答え合わせの仮想収支を付け足す
   (full.records || []).forEach(x => { if (x.date === d && !x.bets) x.bets = betsOf({ id: x.id }); });
   const all = Learn.merge(full.records, recs);
@@ -3810,10 +3914,10 @@ function learnPanel(){
   const bias = Object.entries(m.bias || {}).filter(([, v]) => v.races >= 2);
   return `<div class="learnbox"><h3>学習状況 <span class="small">累計 ${m.races}レース・${esc(m.updated ? new Date(m.updated).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "")} 更新</span></h3>
     <p class="small">1着の当てやすさ（対数損失・小さいほど良い）：モデル <b>${f(m.metrics?.model)}</b>／オッズ <b>${f(m.metrics?.market)}</b>／統合 <b>${f(m.metrics?.blend)}</b>。
-      統合の仕方 p ∝ モデル<sup>${m.calib.a}</sup> × オッズ<sup>${m.calib.b}</sup>。${m.calib.a < 0.15 ? "<b>現状、モデルはオッズ以上の情報を示せていないため、買い目はほぼオッズどおりの確率で判断し、期待値1を超える買い目が少なくなります（見送りが増えるのは正常です）。</b>" : m.calib.a > 0.5 ? "モデルの見立てがオッズに対して有効に働いています。" : "モデルとオッズを組み合わせると最もよく当たっています。"}</p>
+      統合の仕方 p ∝ モデル<sup>${Bets.CAL.a}</sup> × オッズ<sup>${Bets.CAL.b}</sup>。${m.metrics && m.metrics.blend > m.metrics.market ? "<b>今のところ、オッズだけの方が当たっています（モデルの上積みはまだ確認できていません）。そのため期待値1.1以上の買い目は少なく、見送りが多くなるのが正常です。</b>" : Bets.CAL.a < 0.15 ? "<b>モデルはオッズ以上の情報をほとんど示せていないため、買い目は少なくなります。</b>" : "モデルとオッズを組み合わせた方が、オッズだけより当たっています。"}</p>
     ${m.hist?.length ? `<div class="tbl-wrap"><table><thead><tr><th>開催日</th><th class="r">レース</th><th class="r">モデル</th><th class="r">オッズ</th><th class="r">統合</th></tr></thead><tbody>${m.hist.slice(-8).reverse().map(h => `<tr><td>${esc(h.date)}</td><td class="r num">${h.races}</td><td class="r num">${f(h.model)}</td><td class="r num">${f(h.market)}</td><td class="r num"><b>${f(h.blend)}</b></td></tr>`).join("")}</tbody></table></div>` : ""}
     <p class="small">要素の効きの補正（${m.races < 200 ? "レースが少ないうちは控えめ" : "蓄積にもとづく"}）：${W.length ? W.slice(0, 8).map(([k, v]) => `${esc(k)} ×${v}`).join("・") : "まだ変更なし"}</p>
-    ${bias.length ? `<p class="small">直近の馬場の偏り：${bias.map(([k, v]) => `${esc(k)}（${v.races}R）${v.front > 0.08 ? "前残り" : v.front < -0.08 ? "差し有利" : "脚質差小"}・${v.inner > 0.06 ? "内有利" : v.inner < -0.06 ? "外有利" : "枠差小"}`).join("／")}。同じ競馬場の次の開催の予想に反映します。</p>` : ""}
+    ${bias.length ? `<p class="small">直近の馬場の偏り：${bias.map(([k, v]) => `${esc(k)}（${v.races}R）${v.front > 0.08 ? "前残り" : v.front < -0.08 ? "差し有利" : "脚質差小"}・${v.inner > 0.06 ? "内有利" : v.inner < -0.06 ? "外有利" : "枠差小"}`).join("／")}。<b>これは記録（参考）です。</b>馬場の偏りはその日の馬場だけのものなので、予想に反映するのは「同じ日・同じ競馬場・同じ芝/ダート・同じ馬場区分（良〜稍重／重〜不良）で、そのレースより前に終わった4レース以上の結果に、統計的にはっきりした偏り（95%で有意）があるとき」だけです。</p>` : ""}
   </div>`;
 }
 
@@ -3831,10 +3935,13 @@ function payOf(t, res){
   const key = t.type === "単勝" || t.type === "複勝" ? String(t.nums[0]) : t.type === "馬単" ? t.nums.join("-") : t.nums.slice().sort((a, b) => a - b).join("-");
   return tbl[key] ? t.stake / 100 * tbl[key] : 0;
 }
-function checkRows(d){
+// 発走前の予想：発走時刻より前に計算した行（発走後に計算し直した場合は preRace に残した方）
+function preRowOf(r, x){ if (!x) return null; if (x.preRace) return x.preRace; return new Date(x.at) <= raceStart(r) ? x : null; }
+function checkRows(d, mode){
+  mode = mode || CHECK_MODE.v;
   const saved = Object.fromEntries((BATCH.saved[d]?.rows || []).map(x => [x.id, x]));
   return Object.values(DB.races).filter(r => r.date === d && r.entries?.length).sort((a, b) => a.venue.localeCompare(b.venue, "ja") || a.no - b.no)
-    .map(r => ({ r, row: (() => { const x = BATCH.rows[r.id] || saved[r.id]; return x ? (CHECK_MODE.v === "latest" ? x : (x.preRace || x)) : null; })(), res: r.result || null }));
+    .map(r => { const x = BATCH.rows[r.id] || saved[r.id] || null; return { r, row: mode === "latest" ? x : (preRowOf(r, x) || preRowOf(r, saved[r.id])), any: x, res: r.result || null }; });
 }
 function computeCheck(d){
   const items = checkRows(d).filter(x => x.res && x.row);
@@ -3860,7 +3967,9 @@ function computeCheck(d){
     out.favPos = o.indexOf(m0) + 1; out.marks = [...(row.marks || []), ...(row.subs || [])].map(x => x.num);
     per[r.id] = out;
   });
-  CHECK[d] = { n: items.length, total: checkRows(d).length, tot, fav1, fav3, tri, dark3, darkN, pre, per, at: new Date().toISOString() };
+  const all = checkRows(d);
+  const preAvail = checkRows(d, "pre").filter(x => x.res && x.row).length;
+  CHECK[d] = { n: items.length, total: all.length, done: all.filter(x => x.res).length, noRow: all.filter(x => x.res && !x.row).length, preAvail, mode: CHECK_MODE.v, tot, fav1, fav3, tri, dark3, darkN, pre, per, at: new Date().toISOString() };
   return CHECK[d];
 }
 async function startCheck(){
@@ -3890,13 +3999,16 @@ function checkPanel(d){
   const c = CHECK[d]; if (!c) return "";
   const sgn = x => (x >= 0 ? "+" : "−") + Math.abs(Math.round(x)).toLocaleString() + "円";
   const row = t => `<tr><td>${t.label}</td><td class="r num">${t.races}</td><td class="r num">${yen(t.invest)}</td><td class="r num">${yen(t.ret)}</td><td class="r num ${t.ret - t.invest >= 0 ? "pos" : "neg"}"><b>${sgn(t.ret - t.invest)}</b></td><td class="r num">${t.invest ? Math.round(t.ret / t.invest * 100) : 0}%</td><td class="r num">${t.hitRaces}/${t.races}</td></tr>`;
-  return `<div class="checkbox"><h3>答え合わせ <span class="small">${c.n}/${c.total}レース確定分</span></h3>
-    <div class="checkmode small">集計に使う予想：<button class="btn" data-cm="pre" aria-pressed="${CHECK_MODE.v === "pre"}">発走前の予想（実力の判定用）</button><button class="btn" data-cm="latest" aria-pressed="${CHECK_MODE.v === "latest"}">最新の予想（学習の反映を確認）</button></div>
-    <div class="tbl-wrap"><table><thead><tr><th>買い方</th><th class="r">購入R</th><th class="r">投資</th><th class="r">払戻</th><th class="r">収支</th><th class="r">回収率</th><th class="r">的中R</th></tr></thead>
-    <tbody>${Object.values(c.tot).filter(t => t.races).map(row).join("")}</tbody></table></div>
+  const isPre = c.mode !== "latest";
+  return `<div class="checkbox"><h3>答え合わせ <span class="small">${c.n}/${c.total}レースで集計（${isPre ? "発走前の予想" : "最新の予想"}）</span></h3>
+    <div class="checkmode small">集計に使う予想：<button class="btn" data-cm="pre" aria-pressed="${isPre}">発走前の予想（実力の判定用）</button><button class="btn" data-cm="latest" aria-pressed="${!isPre}">最新の予想（学習の反映を確認）</button></div>
+    ${isPre && !c.preAvail ? `<p class="small neg"><b>この端末には、この日の発走前の予想が1レースも残っていません。</b>発走前に一括シミュレーションした端末（スマホなど）で答え合わせするか、「最新の予想」に切り替えてください。次回からはクラウドが発走前の予想を自動で記録します。</p>` : ""}
+    ${isPre && c.preAvail && c.noRow ? `<p class="small">発走前の予想がない ${c.noRow}レースは集計から除いています。</p>` : ""}
+    ${c.n ? `<div class="tbl-wrap"><table><thead><tr><th>買い方</th><th class="r">購入R</th><th class="r">投資</th><th class="r">払戻</th><th class="r">収支</th><th class="r">回収率</th><th class="r">的中R</th></tr></thead>
+    <tbody>${Object.values(c.tot).filter(t => t.races).map(row).join("") || `<tr><td colspan="7" class="small">買い目のあるレースはありませんでした（すべて見送り）</td></tr>`}</tbody></table></div>
     <p class="small">◎の1着 <b>${c.fav1}</b>回・3着以内 <b>${c.fav3}</b>回（${c.n}レース）／最有力3連単の的中 <b>${c.tri}</b>回／注目穴馬の3着以内 <b>${c.dark3}</b>/${c.darkN}回。
-      ${c.pre < c.n ? `<br>注意：${c.n - c.pre}レースは発走前の予想が残っていなかったため、発走後に計算した予想（確定に近いオッズ）で集計しています。` : "すべて発走前の予想（買い目）で集計しています。"}
-      払戻はJRAの確定払戻（100円あたり）で計算。見送りのレースは投資0円です。</p></div>`;
+      ${isPre ? "すべて発走前の予想（買い目）で集計しています。" : `<b>最新の予想は発走後（確定オッズ・その日の学習を含む）で計算したものなので、成績は実力より良く出ることがあります。</b>`}
+      払戻はJRAの確定払戻（100円あたり）で計算。見送りのレースは投資0円です。</p>` : ""}</div>`;
 }
 
 const MARKS = ["◎", "○", "▲"];
@@ -3922,6 +4034,7 @@ function renderAllTab(){
       ${x.tri ? `<div class="line">最有力の3連単 <b>${x.tri.nums.join("→")}</b> <span class="small">（${pct(x.tri.p)}%）</span></div>` : ""}
       ${x.dark ? `<div class="line">注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}3着内${pct(x.dark.top3)}%</span></div>` : ""}
       ${x.evTop?.length ? `<div class="line">期待値上位 ${x.evTop.map(e => `<span class="${evCls(e.ev)}">${e.kind}${e.num} <b>${e.ev.toFixed(2)}</b></span>`).join("・")}</div>` : ""}
+      ${x.anaTop?.length ? `<div class="line small">穴絡みの期待値上位 ${x.anaTop.map(e => `<span class="${evCls(e.ev)}">${esc(e.t)}（${e.odds}倍・期待値${e.ev.toFixed(2)}・控えめ${e.evL.toFixed(2)}）</span>`).join("・")}</div>` : ""}
       ${x.moves?.length ? `<div class="line small">人気の変動 ${x.moves.map(m => `${m.num}番 <span class="${m.ratio > 1 ? "neg" : ""}">${m.ratio > 1 ? "▲" : "▼"}${m.fromOdds}→${m.toOdds}倍${m.fromPop && m.toPop && m.fromPop !== m.toPop ? `（${m.fromPop}→${m.toPop}人気）` : ""}</span>`).join("・")}</div>` : ""}
       ${(x.hasOdds ?? !!x.marks[0]?.odds) ? `<div class="line small"><b>1,000円</b>${x.k1 ? `（期待払戻 ${Math.round(x.k1.exp).toLocaleString()}円・的中率${pct(x.k1.hit)}%）` : ""} ${x.bet ? esc(x.bet.join("／")) : "期待値1.1以上の買い目なし（見送り）"}</div><div class="line small"><b>5,000円</b>${x.k5 ? `（期待払戻 ${Math.round(x.k5.exp).toLocaleString()}円・的中率${pct(x.k5.hit)}%）` : ""} ${x.bet5 ? esc(x.bet5.join("／")) : "期待値1.1以上の買い目なし（見送り）"}</div>${x.evm1 ? `<div class="line small">期待値最大の1点：${esc(x.evm1.t)}（期待値${x.evm1.ev.toFixed(2)}・的中率${pct(x.evm1.hit)}%）</div>` : ""}` : `<div class="line small">オッズ未取得のため期待値・買い目は未計算（「オッズだけ更新」で取得）</div>`}
       ${x.oddsAsOf ? `<div class="cond">オッズ ${esc(x.oddsAsOf)} 時点</div>` : ""}
@@ -4029,6 +4142,8 @@ $("#tabs").onclick = e => { const b = e.target.closest(".tab"); if (b) setTab(b.
 
 function renderAll(){ renderBand(); renderCard(); renderResult(); if (ST.tab === "replay") renderReplayPanel(); if (ST.tab === "db") renderDB(); }
 renderDays(); renderVenues(); renderAll(); renderUpd();
-if (SERVER.enabled) serverInit(); else runSim(true);
+// ヘッドレス実行（クラウドで発走前の予想を自動記録する predict_run.js から使う）
+if (typeof globalThis !== "undefined" && globalThis.__HEADLESS){ globalThis.__APP = { ST, DB, SERVER, BATCH, BATCH_RUNS, LEARN, runSim, racesOfDay, raceStart, loadServerDB, loadLearn, api, preRowOf }; }
+else if (SERVER.enabled) serverInit(); else runSim(true);
 })();
 </script>

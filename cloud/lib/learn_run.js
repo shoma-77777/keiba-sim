@@ -10,6 +10,17 @@ const DATA = process.argv[2] || path.join(__dirname, "..", "..", "docs", "data")
   // スマホ・PCの答え合わせで送られた仮想収支（発走前の推奨を買っていた場合の [投資, 払戻]）
   const bets = {};
   fs.readdirSync(DATA).filter(f => /^bets_\d{8}\.json$/.test(f)).forEach(f => Object.assign(bets, JSON.parse(fs.readFileSync(path.join(DATA, f), "utf8"))));
+  // クラウドが記録した発走前の予想（pre_*.json）の買い目 × 確定払戻 → 仮想収支（どの端末で見ていたかに関係なく、正しい「発走前」の成績）
+  const PAYK = { 単勝: 1, 複勝: 1, 馬連: 0, ワイド: 0, 馬単: 2, 三連複: 0 };
+  const payOf = (t, pay) => { const tb = pay?.[t.type]; if (!tb) return 0; const k = PAYK[t.type] === 1 ? String(t.nums[0]) : PAYK[t.type] === 2 ? t.nums.join("-") : t.nums.slice().sort((a, b) => a - b).join("-"); return tb[k] ? t.stake / 100 * tb[k] : 0; };
+  const resOf = {};
+  fs.readdirSync(DATA).filter(f => /^races_\d{8}\.json$/.test(f)).forEach(f => { (JSON.parse(fs.readFileSync(path.join(DATA, f), "utf8")).races || []).forEach(r => { if (r.result?.pay) resOf[r.id] = r.result; }); });
+  fs.readdirSync(DATA).filter(f => /^pre_\d{8}\.json$/.test(f)).forEach(f => {
+    const pre = JSON.parse(fs.readFileSync(path.join(DATA, f), "utf8"));
+    Object.entries(pre.rows || {}).forEach(([id, x]) => { const res = resOf[id]; if (!res) return;
+      const pick = ts => ts?.length ? [ts.reduce((a, t) => a + t.stake, 0), Math.round(ts.reduce((a, t) => a + payOf(t, res.pay), 0))] : [0, 0];
+      bets[id] = { t1: pick(x.t1), t5: pick(x.t5), te: pick(x.te), src: "pre" }; });
+  });
   let attached = 0;
   (old.records || []).forEach(r => { if (bets[r.id] && JSON.stringify(r.bets) !== JSON.stringify(bets[r.id])){ r.bets = bets[r.id]; attached++; } });
   let recs = [];
@@ -22,7 +33,7 @@ const DATA = process.argv[2] || path.join(__dirname, "..", "..", "docs", "data")
     console.log(`${f}: ${out.length}レースを記録`);
     recs = recs.concat(out);
   }
-  if (!recs.length && !attached && old.model){ console.log("新しい結果なし"); return; }
+  if (!recs.length && !attached && (old.model?.version || 1) >= 2){ console.log("新しい結果なし"); return; }
   const all = Learn.merge(old.records, recs).slice(-3000);
   const model = Learn.build(all, new Date().toISOString().slice(0, 10));
   fs.writeFileSync(lp, JSON.stringify({ model, records: all }));

@@ -72,7 +72,7 @@ def main():
 
     # 古いスナップショット（14日より前）を整理
     cutoff = (dt.date.today() - dt.timedelta(days=14)).strftime("%Y%m%d")
-    for p in DATA.glob("races_*.json"):
+    for p in list(DATA.glob("races_*.json")) + list(DATA.glob("pre_*.json")):
         if p.stem.split("_")[1] < cutoff: p.unlink()
     for p in DATA.glob("summary_*.json"): p.unlink()
     # ログは直近300行だけ残す

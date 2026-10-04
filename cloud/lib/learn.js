@@ -4,14 +4,21 @@
 // 2) 各要素（スピード・騎手・枠…）の効き具合の補正
 // 3) 競馬場ごとの馬場の偏り（前残り・内枠有利）
 // を、上位3着までの着順の尤度（Plackett–Luce）を最大にするように推定する。
-// データが少ないうちは事前の値（a=0.5, b=0.55, 補正0）に強く引き寄せ、レースが増えるほどデータに従う。
+// データが少ないうちは事前の値（a=0.3, b=0.85, 補正0）に強く引き寄せ、レースが増えるほどデータに従う。
 const Learn = (() => {
   const FEATS = ["能力","スピード","レース傾向","当日馬場","血統","季節","調子","距離","芝ダ","馬場","競馬場","回り","枠","斤量","騎手","乗替","調教","ローテ","年齢","穴要素","人気変動"];
-  const PRIOR = { a: 0.5, b: 0.55, sa: 0.35, sb: 0.35, sc: 0.025 };
+  const PRIOR = { a: 0.3, b: 0.85, sa: 0.2, sb: 0.2, sc: 0.025 };
+  // 2着・3着の選ばれ方は1着より「まぎれ」が大きいので、段階ごとに確率の鋭さを割り引く（ベンターの方法）。
+  // これをしないと、統合の指数 a+b が 1 より小さく推定され、大穴の確率を過大に見積もってしまう（10/4 で実際に発生）。
+  const LAM = [1, 0.75, 0.6];
+  const AB_MIN = 1.0;   // a+b の下限：統合後の確率がオッズより「平ら」（＝大穴を過大評価）にならないように
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
   // 1レース分の記録を作る（pm: モデルの1着確率、ctx: buildContext の結果、res: 結果）
-  function record(race, ctx, pm, res, bets){
+  // wcur: 記録時に効いていた要素の重み、wbase: 学習前の基準の重み（要素の値を基準の単位に直して記録する）
+  function record(race, ctx, pm, res, bets, wcur, wbase){
+    wcur = wcur || {}; wbase = wbase || {};
+    const wc = k => (k === "能力" ? 1 : (wcur[k] ?? 1)), wb = k => (k === "能力" ? 1 : (wbase[k] ?? 1));
     const rows = res.rows || [];
     const fin = {}; rows.forEach(x => { if (/^\d+$/.test(String(x.pos))) fin[x.num] = x; });
     const order = res.order || rows.filter(x => /^\d+$/.test(String(x.pos))).sort((a, b) => a.pos - b.pos).map(x => x.num);
@@ -27,15 +34,16 @@ const Learn = (() => {
     if (res.corners?.length){ const c = res.corners[Math.min(1, res.corners.length - 1)]; c.forEach((num, k) => early[num] = k / Math.max(1, c.length - 1)); }
     const l3 = rows.filter(x => x.l3f > 0).map(x => x.l3f).sort((a, b) => a - b);
     return {
-      id: race.id, date: race.date, venue: race.venue, surface: race.surface, dist: race.distance, going: res.going || race.going || null, n: N, sens: +sens.toFixed(4),
+      id: race.id, date: race.date, post: race.postTime || null, kai: race.kai || null, venue: race.venue, surface: race.surface, dist: race.distance, going: res.going || race.going || null, n: N, sens: +sens.toFixed(4),
       order: order.slice(0, 5),
       h: ctx.field.map((f, i) => ({
         num: f.num, pm: +Math.max(pm[i], 1e-4).toFixed(5), pk: +(inv[i] / s).toFixed(5), odds: odds[i], pop: fin[f.num]?.pop ?? f.pop ?? null,
         pos: fin[f.num] ? +fin[f.num].pos : null, time: fin[f.num]?.time || null, l3f: fin[f.num]?.l3f || null,
         l3rank: fin[f.num]?.l3f ? l3.indexOf(fin[f.num].l3f) + 1 : null, early: early[f.num] ?? null,
         gate: +(((f.num - 1) / Math.max(1, N - 1))).toFixed(3), style: f.style, ana: f.ana || [],
-        z: FEATS.map(k => +(f.adj[k] || 0).toFixed(3))
+        z: FEATS.map(k => +((f.adj[k] || 0) / (Math.abs(wc(k)) > 1e-6 ? wc(k) : 1)).toFixed(3))
       })),
+      wr: FEATS.map(k => +(wc(k) / (Math.abs(wb(k)) > 1e-6 ? wb(k) : 1)).toFixed(3)),
       bets: bets || null
     };
   }
@@ -110,9 +118,11 @@ const Learn = (() => {
       // 1円あたりの回収の平均と標準誤差（レースごとの比を投資額で重み付け）
       const rr = xs.map(b => b[1] / b[0]), w = xs.map(b => b[0] / inv);
       const m = rr.reduce((a, x, i) => a + w[i] * x, 0);
-      const v = rr.reduce((a, x, i) => a + w[i] * (x - m) ** 2, 0) * xs.length / Math.max(1, xs.length - 1);
-      const se = Math.sqrt(v / xs.length);
-      out[k] = { races: xs.length, invest: inv, ret: Math.round(ret), roi: +(ret / inv).toFixed(4), lo95: +(m - 1.96 * se).toFixed(4), hi95: +(m + 1.96 * se).toFixed(4),
+      // 投資額で重み付けした平均の標準誤差（賭け額が不ぞろいでも正しい形）: se² = Σ w_i² (r_i − m)² × n/(n−1)
+      const n = xs.length;
+      const se = Math.sqrt(rr.reduce((a, x, i) => a + w[i] * w[i] * (x - m) ** 2, 0) * n / Math.max(1, n - 1));
+      const v = se * se * n;   // 1レースあたりの分散（必要レース数の見積もり用）
+      out[k] = { races: xs.length, invest: inv, ret: Math.round(ret), roi: +(ret / inv).toFixed(4), lo95: +Math.max(0, m - 1.96 * se).toFixed(4), hi95: +(m + 1.96 * se).toFixed(4),
         need: se > 0 ? Math.ceil((1.96 * Math.sqrt(v) / Math.max(0.02, Math.abs(m - 1))) ** 2) : null };
     });
     return out;
@@ -126,15 +136,17 @@ const Learn = (() => {
       const H = r.h, n = H.length; if (n < 2 || !r.order?.length) continue;
       const u = H.map(h => th[0] * Math.log(h.pm) + th[1] * Math.log(h.pk) + h.z.reduce((a, z, k) => a + th[2 + k] * z, 0));
       const used = new Array(n).fill(false);
-      for (const num of r.order.slice(0, 3)){
+      const top = r.order.slice(0, 3);
+      for (let st = 0; st < top.length; st++){
+        const num = top[st], lam = LAM[st];
         const wi = H.findIndex(h => h.num === num); if (wi < 0 || used[wi]) break;
-        let mx = -1e9; for (let i = 0; i < n; i++) if (!used[i]) mx = Math.max(mx, u[i]);
-        let Z = 0; const e = new Array(n).fill(0); for (let i = 0; i < n; i++) if (!used[i]){ e[i] = Math.exp(u[i] - mx); Z += e[i]; }
-        L -= u[wi] - mx - Math.log(Z);
+        let mx = -1e9; for (let i = 0; i < n; i++) if (!used[i]) mx = Math.max(mx, lam * u[i]);
+        let Z = 0; const e = new Array(n).fill(0); for (let i = 0; i < n; i++) if (!used[i]){ e[i] = Math.exp(lam * u[i] - mx); Z += e[i]; }
+        L -= lam * u[wi] - mx - Math.log(Z);
         if (grad){
           const feat = i => [Math.log(H[i].pm), Math.log(H[i].pk), ...H[i].z];
-          const fw = feat(wi); for (let j = 0; j < 2 + K; j++) grad[j] -= fw[j];
-          for (let i = 0; i < n; i++) if (!used[i]){ const p = e[i] / Z, fi = feat(i); for (let j = 0; j < 2 + K; j++) grad[j] += p * fi[j]; }
+          const fw = feat(wi); for (let j = 0; j < 2 + K; j++) grad[j] -= lam * fw[j];
+          for (let i = 0; i < n; i++) if (!used[i]){ const p = e[i] / Z, fi = feat(i); for (let j = 0; j < 2 + K; j++) grad[j] += lam * p * fi[j]; }
         }
         used[wi] = true;
       }
@@ -157,6 +169,7 @@ const Learn = (() => {
         th[j] -= lr * (m[j] / (1 - 0.9 ** t)) / (Math.sqrt(v[j] / (1 - 0.999 ** t)) + 1e-8);
       }
       th[0] = clamp(th[0], 0, 1.5); th[1] = clamp(th[1], 0, 1.5);
+      if (th[0] + th[1] < AB_MIN){ const d = (AB_MIN - th[0] - th[1]) / 2; th[0] += d; th[1] += d; }
     }
     return th;
   }
@@ -199,7 +212,14 @@ const Learn = (() => {
     const weights = {};
     // 要素の補正はレースが十分たまるまで控えめに（200レースで半分、600レースで3/4の強さ）
     const trust = recs.length / (recs.length + 200);
-    FEATS.forEach((k, j) => { const c = th[2 + j]; const mult = clamp(1 + c / (Math.max(0.3, th[0]) * sens) * trust, 0.6, 1.5); if (Math.abs(mult - 1) >= 0.02) weights[k] = +mult.toFixed(3); });
+    // 記録時に効いていた重み（基準に対する倍率）の平均に、残差の係数 c を上乗せする。
+    // 要素の効きは、オッズとの混合（市場の重み0.4）で確率への効きが0.6倍になっている分を戻して換算
+    FEATS.forEach((k, j) => {
+      const c = th[2 + j];
+      const rel = recs.length ? recs.reduce((a, r) => a + (r.wr ? r.wr[j] : 1), 0) / recs.length : 1;
+      const mult = clamp(rel + c / (Math.max(0.3, th[0]) * sens * 0.6) * trust, 0.6, 1.5);
+      if (Math.abs(mult - 1) >= 0.02) weights[k] = +mult.toFixed(3);
+    });
     const a = th[0], b = th[1];
     const byDate = {};
     recs.forEach(r => (byDate[r.date] ||= []).push(r));
@@ -207,7 +227,7 @@ const Learn = (() => {
       model: +logloss(byDate[d], h => h.pm).toFixed(3), market: +logloss(byDate[d], h => h.pk).toFixed(3),
       blend: +logloss(byDate[d], h => Math.pow(h.pm, a) * Math.pow(h.pk, b)).toFixed(3) }));
     return {
-      version: 1, updated: new Date().toISOString(), races: recs.length,
+      version: 2, updated: new Date().toISOString(), races: recs.length,
       calib: { a: +a.toFixed(3), b: +b.toFixed(3) },
       weights, featCoef: Object.fromEntries(FEATS.map((k, j) => [k, +th[2 + j].toFixed(4)])),
       metrics: { model: logloss(recs, h => h.pm), market: logloss(recs, h => h.pk), blend: logloss(recs, h => Math.pow(h.pm, a) * Math.pow(h.pk, b)) },
@@ -223,7 +243,7 @@ const Learn = (() => {
   }
 
   // 結果の出ているレースについて、モデルの1着確率を計算して記録を作る（ブラウザでもNodeでも同じ）
-  async function recordsForRaces(Engine, races, horses, trackOf, runs = 2500, betsOf){
+  async function recordsForRaces(Engine, races, horses, trackOf, runs = 2500, betsOf, baseW){
     const out = [];
     for (const r of races){
       const res = r.result; if (!res || !r.entries?.length) continue;
@@ -240,7 +260,7 @@ const Learn = (() => {
         m.stats.forEach((s, i) => win[i] += w * s.win); tot += w;
       }
       const pm = Array.from(win, x => x / tot);
-      out.push(record(race, ctx, pm, res, betsOf ? betsOf(r) : null));
+      out.push(record(race, ctx, pm, res, betsOf ? betsOf(r) : null, Engine.WEIGHTS, baseW || Engine.WEIGHTS));
     }
     return out;
   }

@@ -62,11 +62,16 @@ const Bets = (() => {
   // 単勝・複勝それぞれ「モデル確率^(1-β) × 市場確率^β」に統合し、シミュレーションの各回に重みを付けて
   // 1着・3着内の確率がこの統合確率に合うように調整する（着順の組み合わせ構造はシミュレーションのまま）。
   // 市場確率は大穴が過大評価されやすい（本命・大穴バイアス）ので、オッズの逆数を1.1乗して補正。
-  // 統合：目標確率 ∝ p_model^A × p_market^B（A, B は答え合わせの蓄積から学習。初期値は A=0.5, B=0.55）
-  let CAL = { a: 0.5, b: 0.55, learned: false, races: 0 };
+  // 統合：目標確率 ∝ p_model^A × p_market^B（A, B は答え合わせの蓄積から学習。初期値は A=0.3, B=0.85）
+  // A+B が1未満だと確率が平らになり大穴を過大評価する（＝大穴の単勝ばかり買う）ので、A+B≧1 を必ず守る。
+  let CAL = { a: 0.3, b: 0.85, learned: false, races: 0 };
   let BETA = null;              // 手動で「市場を信じる割合」を選んだときだけ使う（null=学習値）
   function setMarketBeta(b){ BETA = (b == null || b === "auto") ? null : (b >= 0 && b <= 1 ? +b : BETA); }
-  function setCalibration(c){ if (c && c.a >= 0 && c.b >= 0) CAL = { ...CAL, ...c, learned: true }; }
+  function setCalibration(c){
+    if (!(c && c.a >= 0 && c.b >= 0)) return;
+    let { a, b } = c; if (a + b < 1){ const d = (1 - a - b) / 2; a += d; b += d; }
+    CAL = { ...CAL, ...c, a: +a.toFixed(3), b: +b.toFixed(3), learned: true };
+  }
   const exps = () => BETA == null ? { a: CAL.a, b: CAL.b } : { a: 1 - BETA, b: BETA * 1.1 };
   function blendWeights(ctx, res, odds){
     const N = ctx.N, R = res.runs, o = res.orders, f = ctx.field, placeK = N <= 7 ? 2 : 3;
@@ -80,13 +85,14 @@ const Bets = (() => {
       return { win: Array.from(W1, x => x / t), place: Array.from(P1, x => x / t) }; };
     const m0 = marg();
     const comb = (pm, pk) => pm.map((x, i) => Math.pow(Math.max(x, 1e-5), EA) * Math.pow(Math.max(pk[i], 1e-5), EB));
-    const tWin = norm(comb(m0.win, mWin), 1);
+    // シミュレーションで一度も1着にならなかった馬は重み付けで確率を作れないので0のまま（他の馬に配り直されて歪むのを防ぐ）
+    const tWin = norm(comb(m0.win, mWin).map((x, i) => m0.win[i] > 1e-6 ? x : 0), 1);
     let tPlace = null;
     if (hasPlace){
       const mid = f.map((x, i) => x.placeLo > 0 ? (x.placeLo + (x.placeHi || x.placeLo)) / 2 : null);
       const mx = Math.max(...mid.filter(Boolean));
       const mPl = norm(mid.map(v => 1 / (v || mx * 2)), placeK);
-      tPlace = norm(comb(m0.place, mPl), placeK).map(x => Math.min(0.97, x));
+      tPlace = norm(comb(m0.place, mPl).map((x, i) => m0.place[i] > 1e-6 ? x : 0), placeK).map(x => Math.min(0.97, x));
     }
     for (let it = 0; it < 6; it++){
       if (tPlace){
@@ -118,31 +124,49 @@ const Bets = (() => {
     const R = B.ess, CO = ctx.race?.comboOdds || {};
     const real = { 馬連: !!CO.馬連, ワイド: !!CO.ワイド, 馬単: !!CO.馬単, 三連複: !!CO.三連複 };
     const out = [];
-    const push = (type, idx, p, odds, est, hi) => {
+    const { a: EA, b: EB } = exps();
+    // psim: 重み付けしたシミュレーション上の的中確率。組み合わせ馬券は確率をさらにオッズと統合するので、
+    // 配分（ケリー）と期待払戻の計算では払戻を rho = p / psim 倍して、期待値を p × オッズ に合わせる
+    const push = (type, idx, p, odds, est, hi, psim) => {
       if (p < MIN_P[type] || !(odds > 1)) return;
       odds = Math.round(odds * 10) / 10;
-      const se = Math.sqrt(p * (1 - p) / R);
-      out.push({ type, idx, nums: idx.map(i => f[i].num), p, odds, oddsHi: hi || null, est, ev: p * odds, evL: Math.max(0, p - se) * odds, kelly: (p * odds - 1) / (odds - 1) });
+      // シミュレーションの誤差は統合の指数 A 倍に縮んで確率に効く（p ∝ p_model^A）
+      const se = Math.sqrt(p * (1 - p) / R) * Math.min(1, Math.max(EA, 0.1));
+      const rho = psim > 1e-9 ? Math.max(0.2, Math.min(5, p / psim)) : 1;
+      out.push({ type, idx, nums: idx.map(i => f[i].num), p, odds, oddsHi: hi || null, est, ev: p * odds, evL: Math.max(0, p - se) * odds, kelly: (p * odds - 1) / (odds - 1), rho });
     };
     for (let i = 0; i < N; i++){
       if (!(f[i].odds > 1)) continue;          // オッズ不明の馬の単複は買わない
-      push("単勝", [i], M.win[i], f[i].odds, false);
-      if (f[i].placeLo > 0) push("複勝", [i], M.place[i], f[i].placeLo, false, f[i].placeHi);
+      push("単勝", [i], M.win[i], f[i].odds, false, null, M.win[i]);
+      if (f[i].placeLo > 0) push("複勝", [i], M.place[i], f[i].placeLo, false, f[i].placeHi, M.place[i]);
     }
-    const est = (q, t) => Math.max(1.5, Math.round((1 - TAKE[t]) / q * 0.85 * 10) / 10);   // 推定配当は控えめに（×0.85）
     const key = idx => idx.map(i => f[i].num).sort((a, b) => a - b).join("-");
+    // 組み合わせ馬券は実オッズがあるときだけ（推定配当は誤差が大きく、期待値を過大に見積もるため買わない）。
+    // シミュレーションの組み合わせ確率は、上位馬どうしの同時入着を強めに見積もりやすい（10/4の検証で、期待払戻175%に対し実際143%）。
+    // そこで単勝と同じく「モデル^A × 市場^B」で、組み合わせごとのオッズが示す確率とも統合してから期待値を計算する。
+    // モデル側は重み付け前のシミュレーションの確率を使う（重み付け後は既に市場が混ざっているので、二重に混ぜない）。
+    const M0 = modelProbs({ orders: res.orders, runs: res.runs }, N);
+    const items = { 馬連: [], ワイド: [], 馬単: [], 三連複: [] };
     for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++){
       const k2 = key([i, j]);
-      // 組み合わせ馬券は実オッズがあるときだけ（推定配当は誤差が大きく、期待値を過大に見積もるため買わない）
-      if (real.馬連){ const v = CO.馬連[k2]; if (v) push("馬連", [i, j], M.pair[i*N + j], v, false); }
-      if (real.ワイド){ const v = CO.ワイド[k2]; if (v) push("ワイド", [i, j], M.wide[i*N + j], Array.isArray(v) ? v[0] : v, false, Array.isArray(v) ? v[1] : null); }
+      if (real.馬連){ const v = CO.馬連[k2]; if (v) items.馬連.push({ idx: [i, j], p: M0.pair[i*N + j], ps: M.pair[i*N + j], odds: v, mk: v }); }
+      if (real.ワイド){ const v = CO.ワイド[k2]; if (v){ const lo = Array.isArray(v) ? v[0] : v, hi = Array.isArray(v) ? v[1] : null; items.ワイド.push({ idx: [i, j], p: M0.wide[i*N + j], ps: M.wide[i*N + j], odds: lo, hi, mk: hi ? (lo + hi) / 2 : lo }); } }
       if (real.馬単){
         const v1 = CO.馬単[`${f[i].num}-${f[j].num}`], v2 = CO.馬単[`${f[j].num}-${f[i].num}`];
-        if (v1) push("馬単", [i, j], M.exacta[i*N + j], v1, false);
-        if (v2) push("馬単", [j, i], M.exacta[j*N + i], v2, false);
+        if (v1) items.馬単.push({ idx: [i, j], p: M0.exacta[i*N + j], ps: M.exacta[i*N + j], odds: v1, mk: v1 });
+        if (v2) items.馬単.push({ idx: [j, i], p: M0.exacta[j*N + i], ps: M.exacta[j*N + i], odds: v2, mk: v2 });
       }
-      if (real.三連複) for (let k = j + 1; k < N; k++){ const v = CO.三連複[key([i, j, k])]; if (v) push("三連複", [i, j, k], M.trio[(i*N + j)*N + k], v, false); }
+      if (real.三連複) for (let k = j + 1; k < N; k++){ const v = CO.三連複[key([i, j, k])]; if (v) items.三連複.push({ idx: [i, j, k], p: M0.trio[(i*N + j)*N + k], ps: M.trio[(i*N + j)*N + k], odds: v, mk: v }); }
     }
+    Object.entries(items).forEach(([type, xs]) => {
+      if (!xs.length) return;
+      // 統合後の確率の合計は、重み付け後のシミュレーションでこれらの組み合わせが占める確率に合わせる
+      const q = xs.map(x => 1 / x.mk), qs = q.reduce((a, b) => a + b, 0);
+      const pmS = xs.reduce((a, x) => a + x.ps, 0);
+      const t = xs.map((x, n) => Math.pow(Math.max(x.p, 1e-6), EA) * Math.pow(q[n] / qs, EB));
+      const ts = t.reduce((a, b) => a + b, 0) || 1;
+      xs.forEach((x, n) => push(type, x.idx, Math.min(0.97, t[n] / ts * pmS), x.odds, false, x.hi || null, x.ps));
+    });
     return { list: out.sort((a, b) => b.ev - a.ev), M, K, real, wres, blend: B };
   }
 
@@ -164,7 +188,7 @@ const Bets = (() => {
   }
 
   // 予算の配分：シミュレーションの着順（数千〜1万レース分）の上で、資金の対数の期待値（＝長期の資金成長率）を最大にする
-  // ケリー基準を、券種どうしの相関（同じレースで同時に当たる・外れる）も含めて100円単位の貪欲法で厳密に解く。
+  // ケリー基準を、券種どうしの相関（同じレースで同時に当たる・外れる）も含めて100円単位の貪欲法で（近似的に）解く。
   // 資金は予算の10倍（1レースに資金の1割を使う）と仮定。
   const BANK_MUL = 10;
   function plan(ctx, res, budget, cands){
@@ -192,7 +216,7 @@ const Bets = (() => {
       let best = -Infinity, bi = -1;
       for (let i = 0; i < pool.length; i++){
         if (!stake[i] && used >= maxBets) continue;
-        const pay = 100 * pool[i].odds, h = H[i];
+        const pay = 100 * pool[i].odds * (pool[i].rho || 1), h = H[i];
         let g = 0;
         for (let q = 0; q < h.length; q++){ const w = W[h[q]] - 100; g += QW[h[q]] * (Math.log(w + pay) - Math.log(w)); }
         g = g / tq + base;
@@ -202,7 +226,7 @@ const Bets = (() => {
       if (!stake[bi]) used++;
       stake[bi]++;
       for (let m = 0; m < Msz; m++) W[m] -= 100;
-      const pay = 100 * pool[bi].odds; H[bi].forEach(m => W[m] += pay);
+      const pay = 100 * pool[bi].odds * (pool[bi].rho || 1); H[bi].forEach(m => W[m] += pay);
     }
     const tickets = pool.map((c, i) => ({ ...c, stake: stake[i] * 100 })).filter(t => t.stake > 0)
       .sort((a, b) => b.stake - a.stake || b.ev - a.ev);
@@ -224,6 +248,7 @@ const Bets = (() => {
   function evaluate(res, tickets, N, budget){
     const R = res.runs, o = res.orders, placeK = N <= 7 ? 2 : 3, Wt = res.w;
     let sum = 0, hit = 0, profit = 0, hitSum = 0, maxPay = 0, tw = 0;
+    const staked = tickets.reduce((a, t) => a + t.stake, 0);   // 実際に使う額（予算を使い切らないことがある）
     for (let r = 0; r < R; r++){
       const top = [o[r*N], o[r*N+1], o[r*N+2]];
       let pay = 0;
@@ -235,12 +260,12 @@ const Bets = (() => {
         else if (t.type === "馬単") ok = top[0] === h[0] && top[1] === h[1];
         else if (t.type === "ワイド") ok = top.includes(h[0]) && top.includes(h[1]);
         else if (t.type === "三連複") ok = h.every(x => top.includes(x));
-        if (ok) pay += t.stake * t.odds;
+        if (ok) pay += t.stake * t.odds * (t.rho || 1);
       }
       const q = Wt ? Wt[r] : 1; tw += q;
-      sum += q * pay; if (pay > 0){ hit += q; hitSum += q * pay; } if (pay > budget) profit += q; if (pay > maxPay) maxPay = pay;
+      sum += q * pay; if (pay > 0){ hit += q; hitSum += q * pay; } if (pay > staked) profit += q; if (pay > maxPay) maxPay = pay;
     }
-    return { expReturn: sum / tw, hitRate: hit / tw, profitRate: profit / tw, avgHitPay: hit ? hitSum / hit : 0, maxPay };
+    return { expReturn: sum / tw, staked, hitRate: hit / tw, profitRate: profit / tw, avgHitPay: hit ? hitSum / hit : 0, maxPay };
   }
 
   return { candidates, plan, EV_MIN, setMarketBeta, setCalibration, get BETA(){ return BETA; }, get CAL(){ return CAL; } };
