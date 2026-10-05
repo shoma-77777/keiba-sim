@@ -4205,6 +4205,51 @@ function checkPanel(d){
       払戻はJRAの確定払戻（100円あたり）で計算。見送りのレースは投資0円です。</p>` : ""}</div>`;
 }
 
+// ===== 全日程の累計（取得済みのすべての開催日の答え合わせを合計） =====
+const CHECK_ALL = { running: false, res: null };
+async function checkAllDates(){
+  if (CHECK_ALL.running || BATCH.running) return;
+  CHECK_ALL.running = true; renderAllTab();
+  const keep = ST.date, mode = CHECK_MODE.v;
+  const dates = [...new Set(Object.values(DB.races).filter(r => r.result?.rows?.length && r.entries?.length).map(r => r.date))].sort();
+  const out = [];
+  try {
+    for (const d of dates){
+      setUpdProgress(out.length / dates.length, `全日程の答え合わせ ${out.length + 1}/${dates.length}：${d.slice(5).replace("-", "/")}`);
+      await loadServerSummary(d);
+      // 最新の予想で集計するとき、その日の予想がまだなければ、今の設定（学習値）で予想してから集計
+      if (mode === "latest" && checkRows(d, "latest").some(x => x.res && !x.row)){ ST.date = d; await runBatch(true); }
+      CHECK_MODE.v = mode;
+      const c = computeCheck(d);
+      out.push({ d, n: c.n, tot: JSON.parse(JSON.stringify(c.tot)) });
+    }
+  } finally {
+    ST.date = keep; CHECK_ALL.running = false;
+  }
+  const tot = {};
+  out.forEach(x => Object.entries(x.tot).forEach(([k, t]) => { const a = (tot[k] ||= { label: t.label, invest: 0, ret: 0, races: 0, hitRaces: 0 }); a.invest += t.invest; a.ret += t.ret; a.races += t.races; a.hitRaces += t.hitRaces; }));
+  CHECK_ALL.res = { mode, at: new Date().toISOString(), dates: out, tot };
+  setUpdProgress(1, `全${dates.length}開催日の答え合わせを集計しました`);
+  computeCheck(ST.date); renderDays(); renderVenues(); setTab("all"); renderAllTab();
+}
+function checkAllPanel(){
+  const R = CHECK_ALL.res;
+  const btn = `<div class="ctrls"><button class="btn" id="checkAll" ${CHECK_ALL.running ? "disabled" : ""}>${CHECK_ALL.running ? "集計中…" : `取得済みの全開催日を合計する（${CHECK_MODE.v === "latest" ? "最新の予想" : "発走前の予想"}）`}</button></div>`;
+  if (!R) return btn;
+  const yenS = x => (x >= 0 ? "+" : "−") + Math.abs(Math.round(x)).toLocaleString() + "円";
+  const keys = Object.keys(R.tot).filter(k => R.tot[k].races);
+  const rate = t => t.invest ? Math.round(t.ret / t.invest * 100) + "%" : "—";
+  return `<div class="learnbox"><h3>全開催日の累計 <span class="small">${R.dates.length}開催日・${R.dates.reduce((a, x) => a + x.n, 0)}レース（${R.mode === "latest" ? "最新の予想" : "発走前の予想"}）</span></h3>
+    <div class="tbl-wrap"><table><thead><tr><th>買い方</th><th class="r">購入R</th><th class="r">投資</th><th class="r">払戻</th><th class="r">収支</th><th class="r">回収率</th><th class="r">的中R</th></tr></thead><tbody>
+    ${keys.map(k => { const t = R.tot[k]; return `<tr><td>${esc(t.label)}</td><td class="r num">${t.races}</td><td class="r num">${yen(t.invest)}</td><td class="r num">${yen(t.ret)}</td><td class="r num ${t.ret >= t.invest ? "pos" : "neg"}"><b>${yenS(t.ret - t.invest)}</b></td><td class="r num"><b>${rate(t)}</b></td><td class="r num">${t.hitRaces}/${t.races}</td></tr>`; }).join("")}
+    </tbody></table></div>
+    <div class="tbl-wrap"><table><thead><tr><th>開催日</th>${keys.map(k => `<th class="r">${({ "1000": "1,000円 勝負", "5000": "5,000円 勝負", "1000s": "1,000円 全R", "5000s": "5,000円 全R", "e1000": "期待値最大 1千", "e5000": "期待値最大 5千" })[k] || esc(R.tot[k].label)}</th>`).join("")}</tr></thead><tbody>
+    ${R.dates.map(x => `<tr><td>${esc(x.d.slice(5).replace("-", "/"))}（${x.n}R）</td>${keys.map(k => { const t = x.tot[k]; return `<td class="r num ${t && t.invest ? (t.ret >= t.invest ? "pos" : "neg") : ""}">${t && t.invest ? `${rate(t)}<span class="small">（${yen(t.invest)}）</span>` : "—"}</td>`; }).join("")}</tr>`).join("")}
+    </tbody></table></div>
+    <p class="small">${R.mode === "latest" ? "最新の予想は、今の学習の設定で過去の日を予想し直したものです（その日より前の出走歴だけを使用）。学習にはその日の結果も含まれているので、実力より少し良く出ます。" : "発走前の予想が残っている開催日・レースだけを集計しています。"}</p>
+    ${btn}</div>`;
+}
+
 const MARKS = ["◎", "○", "▲"];
 function renderAllTab(){
   const el = $("#p-all"); if (!el) return;
@@ -4252,12 +4297,14 @@ function renderAllTab(){
   })();
   el.innerHTML = `
     ${checkPanel(d)}
+    ${CHECK[d] ? checkAllPanel() : ""}
     ${CHECK[d] || LEARN.model ? upsetPanel(d) + learnPanel() : ""}
     ${diag}
     <div class="allhead"><h3>${esc(d.slice(5).replace("-", "/"))} 全レース予想</h3><span class="small">${doneN}/${list.length}レース計算済み${BATCH.running ? `（計算中 ${BATCH.done}/${BATCH.total}）` : ""}。一括計算は各条件 ${BATCH_RUNS.toLocaleString()}回×馬場4×ペース3。レースを開いて「シミュレーション実行」を押すと1万回で計算し直せます。</span></div>
     ${venues.map(v => `<h3 class="sec">${esc(v)}</h3><div class="allgrid">${list.filter(r => r.venue === v).map(card).join("")}</div>`).join("")}
     <div class="note">1,000円・5,000円の買い方と◎○▲は、各レースを「馬場4種×ペース3種」の12条件で各${BATCH_RUNS.toLocaleString()}回走らせ、馬場（発表済みなら発表の馬場、発表前は予報）とペース（脚質構成から計算した各ペースの起きやすさ）の確率で混ぜた結果から計算しています。確率は、学習した比率でオッズと統合し、当日の馬場の偏り・クッション値・馬体重の効き（反映条件を満たすときだけ）も入っています。確率は過去データにもとづく推定で、的中を保証するものではありません。馬券は余裕資金の範囲で。</div>`;
-  el.querySelectorAll("[data-cm]").forEach(b => b.onclick = () => { CHECK_MODE.v = b.dataset.cm; computeCheck(d); renderAllTab(); });
+  el.querySelectorAll("[data-cm]").forEach(b => b.onclick = () => { CHECK_MODE.v = b.dataset.cm; CHECK_ALL.res = null; computeCheck(d); renderAllTab(); });
+  const ca = el.querySelector("#checkAll"); if (ca) ca.onclick = () => checkAllDates();
   el.querySelectorAll("[data-open]").forEach(b => b.onclick = () => { ST.raceId = b.dataset.open; ST.venue = DB.races[ST.raceId]?.venue; renderVenues(); renderAll(); setTab(ST.sims[ST.raceId] ? "result" : "card"); window.scrollTo({ top: 0, behavior: "smooth" }); });
 }
 
