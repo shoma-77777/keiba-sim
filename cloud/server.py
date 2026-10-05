@@ -20,9 +20,11 @@ from urllib.parse import urlparse, parse_qs
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import keiba_collector as kc   # noqa: E402
+import backfill as bf          # noqa: E402
 
 WEB = HERE / "web"
 DATA = Path(os.environ.get("KEIBA_DATA") or (HERE / "data")); DATA.mkdir(parents=True, exist_ok=True)
+bf.init(DATA)
 DB_PATH = Path(os.environ.get("KEIBA_DB") or (HERE / "keiba.db"))
 TWEAKS = DATA / "tweaks.json"
 JOB = {"running": False, "date": None, "step": "", "done": 0, "total": 0, "log": [], "error": None, "finished_at": None, "kind": None}
@@ -315,6 +317,11 @@ class Handler(SimpleHTTPRequestHandler):
             s["nextSunday"] = next_sunday().strftime("%Y%m%d"); s["dates"] = [d["date"] for d in collect_db()["dates"]]
             return self._json(s)
         if u.path == "/api/db": return self._json(collect_db())
+        if u.path == "/api/backfill/status": return self._json(bf.status())
+        if u.path == "/api/backfill/day":
+            ymd = re.sub(r"\D", "", (q.get("date") or [""])[0])[:8]
+            j = bf.day_data(ymd) if len(ymd) == 8 else None
+            return self._json(j or {"error": "no data"}, 200 if j else 404)
         if u.path == "/api/learn":
             fp = DATA / ("learn.json" if q.get("full") else "learn_model.json")
             return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {})
@@ -375,15 +382,39 @@ class Handler(SimpleHTTPRequestHandler):
                 except Exception: pass
                 return self._json({"ok": True})
             return self._json({"ok": False}, 404)
+        if u.path in ("/api/backfill/start", "/api/backfill/stop", "/api/backfill/done"):
+            n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8") if n else "{}"
+            try: j = json.loads(body or "{}")
+            except Exception: j = {}
+            if u.path == "/api/backfill/start":
+                frm, to = j.get("from"), j.get("to")
+                try: dt.date.fromisoformat(frm); dt.date.fromisoformat(to)
+                except Exception: return self._json({"ok": False, "message": "期間の指定が正しくありません"}, 400)
+                return self._json({"ok": bf.start(frm, to)})
+            if u.path == "/api/backfill/stop": bf.stop(); return self._json({"ok": True})
+            ymd = re.sub(r"\D", "", str(j.get("date") or ""))[:8]
+            if len(ymd) != 8: return self._json({"ok": False}, 400)
+            bf.mark_processed(ymd, j.get("result") or {}); return self._json({"ok": True})
         if u.path == "/api/learn":
             n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8")
             try:
                 j = json.loads(body)
-                (DATA / "learn.json").write_text(json.dumps({"model": j["model"], "records": j["records"]}, ensure_ascii=False), encoding="utf-8")
+                lp = DATA / "learn.json"
+                if "records" in j: recs = j["records"]
+                else:   # 追加分だけ送られてきたとき（過去データの一括学習など）：保存済みの記録に合わせる
+                    old = json.loads(lp.read_text(encoding="utf-8")).get("records", []) if lp.exists() else []
+                    m = {r["id"]: r for r in old}
+                    for r in j.get("append") or []:
+                        o = m.get(r["id"]); m[r["id"]] = {**r, "bets": r.get("bets") or (o or {}).get("bets")}
+                    recs = sorted(m.values(), key=lambda r: (r.get("date", ""), r.get("id", "")))
+                lp.write_text(json.dumps({"model": j["model"], "records": recs}, ensure_ascii=False), encoding="utf-8")
                 (DATA / "learn_model.json").write_text(json.dumps(j["model"], ensure_ascii=False), encoding="utf-8")
-                log(f"学習を更新しました（{len(j['records'])}レース分）")
-                threading.Thread(target=lambda: _safe(lambda: _push_after(None)), daemon=True).start()
-                return self._json({"ok": True})
+                log(f"学習を更新しました（{len(recs)}レース分）")
+                global LAST_LEARN_PUSH
+                if time.time() - LAST_LEARN_PUSH > 1800 or not j.get("bulk"):   # 一括学習中はクラウドへの送信を30分に1回に抑える
+                    LAST_LEARN_PUSH = time.time()
+                    threading.Thread(target=lambda: _safe(lambda: _push_after(None)), daemon=True).start()
+                return self._json({"ok": True, "records": len(recs)})
             except Exception as ex:
                 return self._json({"ok": False, "message": str(ex)}, 400)
         if u.path in ("/api/tweaks", "/api/summary"):
@@ -450,6 +481,7 @@ def get_pre(ymd):
             if not o or (_at(o) and _at(v) and _at(o) < _at(v)): pre["rows"][k] = v
     return pre
 
+LAST_LEARN_PUSH = 0.0
 def _safe(fn):
     try: fn()
     except Exception as ex: print("クラウド更新で警告:", ex)
@@ -542,7 +574,9 @@ def main():
         ymd = next_sunday().strftime("%Y%m%d") if v == "next" else v
         update_date(ymd, odds_only=bool(a.odds)); return
     ensure_three()
-    if not os.environ.get("KEIBA_NO_AUTO"): threading.Thread(target=auto_odds_loop, daemon=True).start()
+    if not os.environ.get("KEIBA_NO_AUTO"):
+        threading.Thread(target=auto_odds_loop, daemon=True).start()
+        bf.resume_if_active()     # 途中だった過去データの取得を続きから再開
     cm = cloud_mod()
     if cm and cm.load_conf().get("token") and cm.load_conf().get("appVersion") != cm.app_version():
         threading.Thread(target=lambda: _safe(lambda: cm.republish(DATA, write_status)), daemon=True).start()   # アプリを新しくしたらクラウドも更新

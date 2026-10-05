@@ -118,7 +118,20 @@ const Engine = (() => {
     "叩き2戦目": { pts: 0.5, sig: 0.2, desc: "休み明けを一度使われての2戦目" },
     "鞍上強化": { pts: 0.4, sig: 0.2, desc: "前走より騎手評価が上がる乗り替わり" },
     "内枠の先行馬": { pts: 0.4, sig: 0.3, desc: "内枠×先行脚質でロスなく運べる" },
-    "コース巧者": { pts: 0.5, sig: 0.3, desc: "同コースで好走歴" }
+    "コース巧者": { pts: 0.5, sig: 0.3, desc: "同コースで好走歴" },
+    // ここから下は追加の候補（初期の加点は0。答え合わせの蓄積で、オッズ以上に来ると分かったものだけ加点が育つ）
+    "前走で追い込み届かず": { pts: 0, sig: 0.2, desc: "前走は最後の直線で4頭以上抜いたが4着以下" },
+    "先行力あり": { pts: 0, sig: 0.1, desc: "過去の出走で最初のコーナーをほぼ前の方で回っている" },
+    "単騎逃げ見込み": { pts: 0, sig: 0.2, desc: "逃げ馬がこの馬だけ" },
+    "斤量3kg以上減": { pts: 0, sig: 0.1, desc: "前走より斤量が3kg以上軽い" },
+    "減量騎手": { pts: 0, sig: 0.1, desc: "見習い騎手（▲△☆◇）の減量" },
+    "芝ダ替わり": { pts: 0, sig: 0.3, desc: "前走と芝・ダートが替わる" },
+    "道悪巧者×道悪": { pts: 0, sig: 0.2, desc: "道悪で成績が良い馬が稍重〜不良で走る" },
+    "調教高評価の人気薄": { pts: 0, sig: 0.2, desc: "調教評価Aなのに6番人気以下" },
+    "直前に買われた": { pts: 0, sig: 0.1, desc: "最初のオッズから直前までに単勝が3割以上下がった" },
+    "持ち時計上位": { pts: 0, sig: 0.2, desc: "このメンバーで最高のスピード指数が上位3頭以内" },
+    "昇級2戦目": { pts: 0, sig: 0.2, desc: "前走が昇級初戦で、今回も同じクラス" },
+    "鉄砲駆け実績": { pts: 0, sig: 0.2, desc: "90日以上の休み明けで、過去にも休み明けで3着以内" }
   };
   let ANA = JSON.parse(JSON.stringify(ANA_DEFAULT));
   function setAnaWeights(w){ ANA = JSON.parse(JSON.stringify(ANA_DEFAULT)); Object.entries(w || {}).forEach(([k, v]) => { if (ANA[k]) Object.assign(ANA[k], v); }); }
@@ -138,12 +151,13 @@ const Engine = (() => {
   const GOING_F = { 芝: { 良: 1, 稍: 1.006, 重: 1.013, 不: 1.022 }, ダ: { 良: 1, 稍: 0.995, 重: 0.99, 不: 0.988 } };
   const formulaTime = (surface, D) => D / (surface === "ダ" ? 17.5 - 0.7 * D / 1000 : 17.9 - 0.5 * D / 1000);
   let SPEED = null, SPEED_KEY = null;
-  function buildSpeedModel(horsesDB){
-    const key = Object.keys(horsesDB).length + ":" + Object.values(horsesDB).reduce((a, h) => a + (h.runs?.length || 0), 0);
+  // before：この日付より前の出走だけで基準タイムを作る（過去の日を予想し直すときに未来のデータを使わない）
+  function buildSpeedModel(horsesDB, before){
+    const key = (before || "") + ":" + Object.keys(horsesDB).length + ":" + Object.values(horsesDB).reduce((a, h) => a + (h.runs?.length || 0), 0);
     if (SPEED && SPEED_KEY === key) return SPEED;
     const all = [];
     Object.values(horsesDB).forEach(h => (h.runs || []).forEach(s => {
-      const r = parseRun(s); const t = tsec(r.time);
+      const r = parseRun(s); if (before && r.date && r.date >= before) return; const t = tsec(r.time);
       if (!t || r.overseas || r.surface === "障" || !JRA.has(r.venue) || !(r.dist > 0)) return;
       const win = t - Math.max(0, r.margin ?? 0);
       const gF = GOING_F[r.surface]?.[r.going] ?? 1;
@@ -335,7 +349,7 @@ const Engine = (() => {
     if (!horse.sire) return { ...out, pts: 0 };
     let pts = 0;
     const D = race.distance;
-    const runs = (horse.runs || []).map(parseRun);
+    const runs = (horse.runs || []).map(parseRun).filter(r => !race.date || !r.date || r.date < race.date);
     const nNear = runs.filter(r => r.surface === race.surface && Math.abs(r.dist - D) <= 200).length;
     const rely = 1 / (1 + nNear / 3);                         // 実績が多い距離ほど血統の重みは小さく
     if (s && race.surface === "芝"){
@@ -352,7 +366,7 @@ const Engine = (() => {
     // DB内の同じ父の産駒（他の出走馬・過去走）の成績：この距離帯・馬場種別での着差評価
     const sibs = Object.values(horsesDB).filter(h => h !== horse && h.sire && h.sire === horse.sire);
     if (sibs.length){
-      const rs = sibs.flatMap(h => (h.runs || []).map(parseRun)).filter(r => r.surface === race.surface && Math.abs(r.dist - D) <= 400 && r.margin != null && !r.overseas);
+      const rs = sibs.flatMap(h => (h.runs || []).map(parseRun)).filter(r => (!race.date || !r.date || r.date < race.date) && r.surface === race.surface && Math.abs(r.dist - D) <= 400 && r.margin != null && !r.overseas);
       if (rs.length >= 4){ const m = mean(rs.map(r => Math.min(2, r.margin))); const v = clamp((0.8 - m) * 0.6, -0.6, 0.6); pts += v; out.sibs = { n: rs.length, m }; if (Math.abs(v) > 0.15) out.why.push(`同じ父の産駒がこの条件で${v > 0 ? "好成績" : "苦戦"}`); }
     }
     out.pts = pts; return out;
@@ -382,7 +396,7 @@ const Engine = (() => {
     const N = R.entries.length;
     const course = courseOf(R.venue, R.surface, R.distance);
     const meanKg = R.entries.reduce((a,e)=>a+e.weight,0) / N;
-    const model = buildSpeedModel(horsesDB);
+    const model = buildSpeedModel(horsesDB, R.date);
     const trend = opts.trend || null, track = opts.track || null;
     const field = R.entries.map(e => {
       const h = horsesDB[e.horseId] || horsesDB[e.name] || { runs: [] };
@@ -421,6 +435,20 @@ const Engine = (() => {
       if (p.lastJockey && jNow - jLast >= 0.6) hit("鞍上強化");
       if ((e.num - 1) / Math.max(1, N - 1) <= 0.25 && p.earlyPos < 0.35 && p.n) hit("内枠の先行馬");
       if (p.courseGood) hit("コース巧者");
+      // ---- 追加の候補 ----
+      const L = p.last, pv = p.runs?.[1];
+      if (L && L.pos >= 4 && L.passing?.length && L.passing[L.passing.length - 1] - L.pos >= 4) hit("前走で追い込み届かず");
+      if (p.n >= 2 && p.earlyPos < 0.2) hit("先行力あり");
+      if (p.weightChange <= -3) hit("斤量3kg以上減");
+      if (/^[▲△☆◇★]/.test(e.jockey || "")) hit("減量騎手");
+      if (L && L.surface !== "障" && R.surface !== "障" && L.surface !== R.surface) hit("芝ダ替わり");
+      if (/稍|重|不/.test(going) && p.wetDiff != null && p.wetDiff >= 2) hit("道悪巧者×道悪");
+      const tg = (opts.training?.[e.num] ?? e.training?.score ?? h.training?.score);
+      if (tg != null && tg >= 75 && pop && pop >= 6) hit("調教高評価の人気薄");
+      const oh = (e.oddsHist || []).filter(x => x.o > 1);
+      if (oh.length >= 2 && e.odds > 1 && oh[0].o / e.odds >= 1.3) hit("直前に買われた");
+      if (L && pv && (GRADE_RANK[L.grade] ?? 4) > (GRADE_RANK[pv.grade] ?? 4) && (GRADE_RANK[R.grade] ?? 4) === (GRADE_RANK[L.grade] ?? 4)) hit("昇級2戦目");
+      if (p.daysOff != null && p.daysOff >= 90 && (p.runs || []).some((r, i) => r.pos <= 3 && p.runs[i + 1] && daysBetween(p.runs[i + 1].date, r.date) >= 90)) hit("鉄砲駆け実績");
       adj.穴要素 = ana.reduce((a, k) => a + (ANA[k]?.pts || 0), 0);
       const sigmaUp = ana.reduce((a, k) => a + (ANA[k]?.sig || 0), 0);
       Object.keys(adj).forEach(k => { if (k !== "能力" && k !== "手動" && WEIGHTS[k] != null) adj[k] *= WEIGHTS[k]; });
@@ -433,6 +461,17 @@ const Engine = (() => {
     const bests = field.map(f => f.prof.bestFig).filter(x => x != null);
     const meanBest = bests.length ? mean(bests) : null;
     const wetNow = wet(going);
+    // 穴パターン（メンバー全体を見て決まるもの）：単騎逃げ見込み・持ち時計上位
+    {
+      const nige = field.filter(f => f.prof.n && f.style === "逃げ");
+      const bestRank = field.filter(f => f.prof.bestFig != null).sort((a, b) => b.prof.bestFig - a.prof.bestFig).slice(0, 3);
+      field.forEach(f => {
+        const add = [];
+        if (nige.length === 1 && nige[0] === f) add.push("単騎逃げ見込み");
+        if (bestRank.includes(f) && (f.pop || 99) >= 4) add.push("持ち時計上位");
+        add.forEach(k => { f.ana.push(k); const v = (ANA[k]?.pts || 0) * (WEIGHTS.穴要素 ?? 1); f.adj.穴要素 += v; f.P += v; f.sigma += (ANA[k]?.sig || 0) * 0.5; });
+      });
+    }
     field.forEach(f => {
       const p = f.prof, gRel = (f.num - 1) / Math.max(1, N - 1);
       // スピード指数：場の平均との差（指数1＝約0.1秒、能力評価との二重計上を避け0.35倍）

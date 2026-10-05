@@ -509,7 +509,20 @@ const Engine = (() => {
     "叩き2戦目": { pts: 0.5, sig: 0.2, desc: "休み明けを一度使われての2戦目" },
     "鞍上強化": { pts: 0.4, sig: 0.2, desc: "前走より騎手評価が上がる乗り替わり" },
     "内枠の先行馬": { pts: 0.4, sig: 0.3, desc: "内枠×先行脚質でロスなく運べる" },
-    "コース巧者": { pts: 0.5, sig: 0.3, desc: "同コースで好走歴" }
+    "コース巧者": { pts: 0.5, sig: 0.3, desc: "同コースで好走歴" },
+    // ここから下は追加の候補（初期の加点は0。答え合わせの蓄積で、オッズ以上に来ると分かったものだけ加点が育つ）
+    "前走で追い込み届かず": { pts: 0, sig: 0.2, desc: "前走は最後の直線で4頭以上抜いたが4着以下" },
+    "先行力あり": { pts: 0, sig: 0.1, desc: "過去の出走で最初のコーナーをほぼ前の方で回っている" },
+    "単騎逃げ見込み": { pts: 0, sig: 0.2, desc: "逃げ馬がこの馬だけ" },
+    "斤量3kg以上減": { pts: 0, sig: 0.1, desc: "前走より斤量が3kg以上軽い" },
+    "減量騎手": { pts: 0, sig: 0.1, desc: "見習い騎手（▲△☆◇）の減量" },
+    "芝ダ替わり": { pts: 0, sig: 0.3, desc: "前走と芝・ダートが替わる" },
+    "道悪巧者×道悪": { pts: 0, sig: 0.2, desc: "道悪で成績が良い馬が稍重〜不良で走る" },
+    "調教高評価の人気薄": { pts: 0, sig: 0.2, desc: "調教評価Aなのに6番人気以下" },
+    "直前に買われた": { pts: 0, sig: 0.1, desc: "最初のオッズから直前までに単勝が3割以上下がった" },
+    "持ち時計上位": { pts: 0, sig: 0.2, desc: "このメンバーで最高のスピード指数が上位3頭以内" },
+    "昇級2戦目": { pts: 0, sig: 0.2, desc: "前走が昇級初戦で、今回も同じクラス" },
+    "鉄砲駆け実績": { pts: 0, sig: 0.2, desc: "90日以上の休み明けで、過去にも休み明けで3着以内" }
   };
   let ANA = JSON.parse(JSON.stringify(ANA_DEFAULT));
   function setAnaWeights(w){ ANA = JSON.parse(JSON.stringify(ANA_DEFAULT)); Object.entries(w || {}).forEach(([k, v]) => { if (ANA[k]) Object.assign(ANA[k], v); }); }
@@ -529,12 +542,13 @@ const Engine = (() => {
   const GOING_F = { 芝: { 良: 1, 稍: 1.006, 重: 1.013, 不: 1.022 }, ダ: { 良: 1, 稍: 0.995, 重: 0.99, 不: 0.988 } };
   const formulaTime = (surface, D) => D / (surface === "ダ" ? 17.5 - 0.7 * D / 1000 : 17.9 - 0.5 * D / 1000);
   let SPEED = null, SPEED_KEY = null;
-  function buildSpeedModel(horsesDB){
-    const key = Object.keys(horsesDB).length + ":" + Object.values(horsesDB).reduce((a, h) => a + (h.runs?.length || 0), 0);
+  // before：この日付より前の出走だけで基準タイムを作る（過去の日を予想し直すときに未来のデータを使わない）
+  function buildSpeedModel(horsesDB, before){
+    const key = (before || "") + ":" + Object.keys(horsesDB).length + ":" + Object.values(horsesDB).reduce((a, h) => a + (h.runs?.length || 0), 0);
     if (SPEED && SPEED_KEY === key) return SPEED;
     const all = [];
     Object.values(horsesDB).forEach(h => (h.runs || []).forEach(s => {
-      const r = parseRun(s); const t = tsec(r.time);
+      const r = parseRun(s); if (before && r.date && r.date >= before) return; const t = tsec(r.time);
       if (!t || r.overseas || r.surface === "障" || !JRA.has(r.venue) || !(r.dist > 0)) return;
       const win = t - Math.max(0, r.margin ?? 0);
       const gF = GOING_F[r.surface]?.[r.going] ?? 1;
@@ -726,7 +740,7 @@ const Engine = (() => {
     if (!horse.sire) return { ...out, pts: 0 };
     let pts = 0;
     const D = race.distance;
-    const runs = (horse.runs || []).map(parseRun);
+    const runs = (horse.runs || []).map(parseRun).filter(r => !race.date || !r.date || r.date < race.date);
     const nNear = runs.filter(r => r.surface === race.surface && Math.abs(r.dist - D) <= 200).length;
     const rely = 1 / (1 + nNear / 3);                         // 実績が多い距離ほど血統の重みは小さく
     if (s && race.surface === "芝"){
@@ -743,7 +757,7 @@ const Engine = (() => {
     // DB内の同じ父の産駒（他の出走馬・過去走）の成績：この距離帯・馬場種別での着差評価
     const sibs = Object.values(horsesDB).filter(h => h !== horse && h.sire && h.sire === horse.sire);
     if (sibs.length){
-      const rs = sibs.flatMap(h => (h.runs || []).map(parseRun)).filter(r => r.surface === race.surface && Math.abs(r.dist - D) <= 400 && r.margin != null && !r.overseas);
+      const rs = sibs.flatMap(h => (h.runs || []).map(parseRun)).filter(r => (!race.date || !r.date || r.date < race.date) && r.surface === race.surface && Math.abs(r.dist - D) <= 400 && r.margin != null && !r.overseas);
       if (rs.length >= 4){ const m = mean(rs.map(r => Math.min(2, r.margin))); const v = clamp((0.8 - m) * 0.6, -0.6, 0.6); pts += v; out.sibs = { n: rs.length, m }; if (Math.abs(v) > 0.15) out.why.push(`同じ父の産駒がこの条件で${v > 0 ? "好成績" : "苦戦"}`); }
     }
     out.pts = pts; return out;
@@ -773,7 +787,7 @@ const Engine = (() => {
     const N = R.entries.length;
     const course = courseOf(R.venue, R.surface, R.distance);
     const meanKg = R.entries.reduce((a,e)=>a+e.weight,0) / N;
-    const model = buildSpeedModel(horsesDB);
+    const model = buildSpeedModel(horsesDB, R.date);
     const trend = opts.trend || null, track = opts.track || null;
     const field = R.entries.map(e => {
       const h = horsesDB[e.horseId] || horsesDB[e.name] || { runs: [] };
@@ -812,6 +826,20 @@ const Engine = (() => {
       if (p.lastJockey && jNow - jLast >= 0.6) hit("鞍上強化");
       if ((e.num - 1) / Math.max(1, N - 1) <= 0.25 && p.earlyPos < 0.35 && p.n) hit("内枠の先行馬");
       if (p.courseGood) hit("コース巧者");
+      // ---- 追加の候補 ----
+      const L = p.last, pv = p.runs?.[1];
+      if (L && L.pos >= 4 && L.passing?.length && L.passing[L.passing.length - 1] - L.pos >= 4) hit("前走で追い込み届かず");
+      if (p.n >= 2 && p.earlyPos < 0.2) hit("先行力あり");
+      if (p.weightChange <= -3) hit("斤量3kg以上減");
+      if (/^[▲△☆◇★]/.test(e.jockey || "")) hit("減量騎手");
+      if (L && L.surface !== "障" && R.surface !== "障" && L.surface !== R.surface) hit("芝ダ替わり");
+      if (/稍|重|不/.test(going) && p.wetDiff != null && p.wetDiff >= 2) hit("道悪巧者×道悪");
+      const tg = (opts.training?.[e.num] ?? e.training?.score ?? h.training?.score);
+      if (tg != null && tg >= 75 && pop && pop >= 6) hit("調教高評価の人気薄");
+      const oh = (e.oddsHist || []).filter(x => x.o > 1);
+      if (oh.length >= 2 && e.odds > 1 && oh[0].o / e.odds >= 1.3) hit("直前に買われた");
+      if (L && pv && (GRADE_RANK[L.grade] ?? 4) > (GRADE_RANK[pv.grade] ?? 4) && (GRADE_RANK[R.grade] ?? 4) === (GRADE_RANK[L.grade] ?? 4)) hit("昇級2戦目");
+      if (p.daysOff != null && p.daysOff >= 90 && (p.runs || []).some((r, i) => r.pos <= 3 && p.runs[i + 1] && daysBetween(p.runs[i + 1].date, r.date) >= 90)) hit("鉄砲駆け実績");
       adj.穴要素 = ana.reduce((a, k) => a + (ANA[k]?.pts || 0), 0);
       const sigmaUp = ana.reduce((a, k) => a + (ANA[k]?.sig || 0), 0);
       Object.keys(adj).forEach(k => { if (k !== "能力" && k !== "手動" && WEIGHTS[k] != null) adj[k] *= WEIGHTS[k]; });
@@ -824,6 +852,17 @@ const Engine = (() => {
     const bests = field.map(f => f.prof.bestFig).filter(x => x != null);
     const meanBest = bests.length ? mean(bests) : null;
     const wetNow = wet(going);
+    // 穴パターン（メンバー全体を見て決まるもの）：単騎逃げ見込み・持ち時計上位
+    {
+      const nige = field.filter(f => f.prof.n && f.style === "逃げ");
+      const bestRank = field.filter(f => f.prof.bestFig != null).sort((a, b) => b.prof.bestFig - a.prof.bestFig).slice(0, 3);
+      field.forEach(f => {
+        const add = [];
+        if (nige.length === 1 && nige[0] === f) add.push("単騎逃げ見込み");
+        if (bestRank.includes(f) && (f.pop || 99) >= 4) add.push("持ち時計上位");
+        add.forEach(k => { f.ana.push(k); const v = (ANA[k]?.pts || 0) * (WEIGHTS.穴要素 ?? 1); f.adj.穴要素 += v; f.P += v; f.sigma += (ANA[k]?.sig || 0) * 0.5; });
+      });
+    }
     field.forEach(f => {
       const p = f.prof, gRel = (f.num - 1) / Math.max(1, N - 1);
       // スピード指数：場の平均との差（指数1＝約0.1秒、能力評価との二重計上を避け0.35倍）
@@ -2130,7 +2169,7 @@ const Learn = (() => {
   // 2着・3着の選ばれ方は1着より「まぎれ」が大きいので、段階ごとに確率の鋭さを割り引く（ベンターの方法）。
   // これをしないと、統合の指数 a+b が 1 より小さく推定され、大穴の確率を過大に見積もってしまう（10/4 で実際に発生）。
   const LAM = [1, 0.75, 0.6];
-  const RV = 3;   // 記録の作り方の版（3: その日より前の出走歴だけでモデル確率を計算）
+  const RV = 4;   // 4: 穴パターンの候補を追加   // 記録の作り方の版（3: その日より前の出走歴だけでモデル確率を計算）
   const AB_MIN = 1.0;   // a+b の下限：統合後の確率がオッズより「平ら」（＝大穴を過大評価）にならないように
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
@@ -2230,7 +2269,10 @@ const Learn = (() => {
     }).sort((a, b) => b.lift - a.lift) };
   }
   // 穴パターンの加点を、穴馬の3着内率のリフトから更新（件数が少ないうちは初期値のまま）
-  const ANA_PTS = { "前走度外視": 0.8, "G1からの格下げ": 0.6, "実績の割に人気薄": 0.7, "距離短縮": 0.4, "叩き2戦目": 0.5, "鞍上強化": 0.4, "内枠の先行馬": 0.4, "コース巧者": 0.5 };
+  const ANA_PTS = { "前走度外視": 0.8, "G1からの格下げ": 0.6, "実績の割に人気薄": 0.7, "距離短縮": 0.4, "叩き2戦目": 0.5, "鞍上強化": 0.4, "内枠の先行馬": 0.4, "コース巧者": 0.5,
+    // 追加の候補（初期値0。オッズ以上に来ると分かったものだけ加点が育つ）
+    "前走で追い込み届かず": 0, "先行力あり": 0, "単騎逃げ見込み": 0, "斤量3kg以上減": 0, "減量騎手": 0, "芝ダ替わり": 0,
+    "道悪巧者×道悪": 0, "調教高評価の人気薄": 0, "直前に買われた": 0, "持ち時計上位": 0, "昇級2戦目": 0, "鉄砲駆け実績": 0 };
   function anaWeights(stats){
     const out = {};
     Object.entries(ANA_PTS).forEach(([k, pts]) => {
@@ -3987,6 +4029,7 @@ async function serverInit(){
     const j = await loadServerDB();
     await loadLearn();
     startAutoRefresh();
+    bfRefresh().then(s => { if (s && (s.running || s.pending?.length)) bfEnsure(); });
     refreshCloudInfo().then(() => renderUpd());
     autoOddsRefresh();
     pickInitialDate(j);
@@ -4021,8 +4064,117 @@ function updateLearnChip(){
   el.hidden = false; el.textContent = `学習済み ${m.races}レース${last ? `（${last.slice(5).replace("-", "/")}まで）` : ""}`;
   el.onclick = () => setTab("learn");
 }
+// ===== 過去データの一括取得と、予想→答え合わせ→学習（古い日から順に・放置で進む） =====
+// 取得はPCのアプリ（サーバー）が裏で進め、取得できた日はこの画面が古い順に
+// 「その日より前の結果だけで学習したモデル」で予想 → 答え合わせ → その日の結果を学習 を繰り返す（未来の情報は使わない）。
+const BF = { status: null, proc: false, pause: false, recs: null, pendRecs: [], msg: "", timer: null };
+const bfSleep = ms => new Promise(r => setTimeout(r, ms));
+async function bfRefresh(){ if (!SERVER.enabled || SERVER.cloud || !SERVER.on) return null; try { BF.status = await api("/api/backfill/status", { timeout: 8000 }); } catch (e) {} return BF.status; }
+async function bfStart(){
+  const from = $("#bfFrom")?.value, to = $("#bfTo")?.value;
+  if (!from || !to || from > to){ toast("期間を正しく選んでください"); return; }
+  try { const j = await api("/api/backfill/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from, to }) });
+    toast(j.ok ? "過去データの取得を始めました（アプリを閉じても、次に起動したときに続きから再開します）" : "すでに取得中です"); } catch (e) { toast("開始できませんでした：" + e.message); }
+  await bfRefresh(); bfEnsure(); renderLearnTab();
+}
+async function bfStop(){ try { await api("/api/backfill/stop", { method: "POST" }); } catch (e) {} await bfRefresh(); renderLearnTab(); }
+function bfEnsure(){
+  if (!BF.timer) BF.timer = setInterval(async () => { await bfRefresh(); if (ST.tab === "learn") renderLearnTab(); bfProcessLoop(); }, 60000);
+  bfProcessLoop();
+}
+async function bfProcessLoop(){
+  if (BF.proc || BF.pause || !SERVER.enabled || SERVER.cloud || !SERVER.on) return;
+  const st = BF.status || await bfRefresh(); if (!st?.pending?.length) return;
+  BF.proc = true;
+  try {
+    if (!BF.recs){ const full = await api("/api/learn?full=1", { timeout: 120000 }).catch(() => ({})); BF.recs = full.records || []; }
+    while (!BF.pause){
+      const s = await bfRefresh(); const ymd = s?.pending?.[0]; if (!ymd) break;
+      while (BATCH.running || simBusy || CHECK_ALL.running) await bfSleep(1000);   // 画面で一括予想などをしている間は待つ
+      const j = await api("/api/backfill/day?date=" + ymd, { timeout: 180000 }).catch(() => null);
+      if (!j?.races){ await bfSleep(5000); continue; }
+      await bfProcessDay(j, s.pending.length);
+      if (ST.tab === "learn") renderLearnTab();
+    }
+    if (BF.pendRecs.length) await bfPostLearn();
+  } catch (e) { console.error(e); BF.msg = "処理が止まりました：" + e.message; }
+  finally {
+    // 処理が終わったら（止めたときも）、すべての記録で学習したモデルに戻して、これからの予想に使う
+    if (BF.recs?.length){ const latest = BF.recs.reduce((m, r) => r.date > m ? r.date : m, ""); applyLearn(Learn.build(BF.recs, latest)); }
+    BF.proc = false; if (ST.tab === "learn") renderLearnTab();
+  }
+}
+async function bfPostLearn(){
+  // 保存するのは、すべての記録で学習したモデル（今後の予想に使う）
+  const latest = BF.recs.reduce((m, r) => r.date > m ? r.date : m, "");
+  const model = Learn.build(BF.recs, latest || iso(new Date()));
+  await api("/api/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, append: BF.pendRecs, bulk: true }), timeout: 120000 });
+  BF.pendRecs = [];
+}
+async function bfProcessDay(j, left){
+  const d = j.date;
+  const addedH = Object.keys(j.horses || {}).filter(id => !DB.horses[id]);
+  mergeImport({ races: j.races, horses: j.horses });
+  applyBodyWeight();
+  const races = racesOfDay(d);
+  BF.msg = `${d.slice(0, 4)}/${d.slice(5).replace("-", "/")} を予想中（残り${left}開催日）`;
+  try {
+    // その日より前の結果だけで学習したモデルに切り替える（未来の結果で学習したモデルで過去を予想しない）
+    applyLearn(Learn.build(BF.recs.filter(r => r.date < d), d));
+    // ① 予想（この時点のモデル＝この日より前の結果だけで学習したもの）
+    for (let i = 0; i < races.length; i++){
+      if (BF.pause) return;
+      await runSim(true, { id: races[i].id, runs: BATCH_RUNS, onProgress: p => setUpdProgress((i + p) / races.length, `過去データ ${d}：${i + 1}/${races.length}レースを予想中（残り${left}開催日）`) });
+    }
+    // ② 答え合わせ（確定オッズ・確定払戻で集計）
+    const keepMode = CHECK_MODE.v; CHECK_MODE.v = "latest"; const c = computeCheck(d); CHECK_MODE.v = keepMode;
+    const result = { n: c.n, fav1: c.fav1, fav3: c.fav3, dark3: c.dark3, darkN: c.darkN, a: Bets.CAL.a, b: Bets.CAL.b,
+      tot: Object.fromEntries(Object.entries(c.tot).map(([k, t]) => [k, { inv: t.invest, ret: Math.round(t.ret), races: t.races, hit: t.hitRaces }])) };
+    // ③ 学習（その日の結果を記録して、次の日からの予想に使う）
+    const betsOf = r => { const p = c.per[r.id]; if (!p) return null; const pick = k => p.plans[k] ? [p.plans[k].inv, Math.round(p.plans[k].ret)] : [0, 0]; return { t1: pick("1000"), t5: pick("5000"), te: pick("e1000"), t1s: pick("1000s"), src: "backfill" }; };
+    setUpdProgress(1, `過去データ ${d}：結果を学習中`);
+    const recs = await Learn.recordsForRaces(Engine, races.filter(r => r.result?.rows?.length), DB.horses, trackOf, 2000, betsOf, LEARN.base || Engine.WEIGHTS);
+    BF.recs = Learn.merge(BF.recs, recs); BF.pendRecs.push(...recs);
+    await api("/api/backfill/done", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date: ymdOf(d), result }) });
+    if (BF.pendRecs.length >= 120 || left <= 1) await bfPostLearn();
+  } finally {
+    // 画面のデータから外す（メモリを使いすぎないように）
+    races.forEach(r => { delete DB.races[r.id]; delete BATCH.rows[r.id]; delete ST.sims[r.id]; });
+    delete CHECK[d]; addedH.forEach(id => delete DB.horses[id]);
+    applyBodyWeight();
+  }
+}
+function bfPanel(){
+  if (!SERVER.enabled || SERVER.cloud) return `<div class="learnbox"><h3>過去データで学習</h3><p class="small">過去の開催の一括取得と学習は、PCのアプリで行います（取得した学習結果はクラウドにも反映されます）。</p></div>`;
+  const s = BF.status || {};
+  const today = new Date(), y3 = new Date(today); y3.setFullYear(today.getFullYear() - 3); const yd = new Date(today); yd.setDate(today.getDate() - 1);
+  const pct0 = s.daysTotal ? Math.round((s.daysChecked || 0) / s.daysTotal * 100) : 0;
+  const P = s.processed || {}, days = Object.keys(P).sort();
+  const sum = {}; const byYear = {};
+  days.forEach(k => { const r = P[k]; Object.entries(r.tot || {}).forEach(([pk, t]) => { const a = (sum[pk] ||= { inv: 0, ret: 0, races: 0, hit: 0 }); a.inv += t.inv; a.ret += t.ret; a.races += t.races; a.hit += t.hit;
+    const yk = k.slice(0, 4), b = ((byYear[yk] ||= {})[pk] ||= { inv: 0, ret: 0, races: 0 }); b.inv += t.inv; b.ret += t.ret; b.races += t.races; }); });
+  const L = { "1000": "1,000円（勝負だけ）", "1000s": "1,000円（全レース）", "5000": "5,000円（勝負だけ）", "5000s": "5,000円（全レース）", "e1000": "期待値最大1点" };
+  const rate = t => t?.inv ? Math.round(t.ret / t.inv * 100) + "%" : "—";
+  const nR = days.reduce((a, k) => a + (P[k].n || 0), 0);
+  const last = days.length ? P[days[days.length - 1]] : null;
+  return `<div class="learnbox"><h3>過去データで学習（放置で進む）</h3>
+    <p class="small">指定した期間のJRAの全開催（土日・祝日）を取得し、古い日から順に「その日より前の結果だけで学習したモデル」で予想 → 確定オッズと払戻で答え合わせ → その日の結果を学習、を自動で繰り返します。未来の情報は使わないので、ここで出る回収率は実力に近い数字です（ただしオッズは発走前ではなく確定オッズ）。
+      取得はアプリを閉じても次の起動で続きから再開し、予想・学習はこの画面（PCのアプリ）を開いている間に進みます。サイトに負担をかけないよう1.5秒に1回ずつ取得するため、<b>3年分で2〜3日</b>かかります。</p>
+    <div class="ctrls"><label class="small">期間 <input type="date" id="bfFrom" value="${esc(s.from || iso(y3))}"> 〜 <input type="date" id="bfTo" value="${esc(s.to || iso(yd))}"></label>
+      ${s.running ? `<button class="btn" id="bfStop">取得を止める</button>` : `<button class="btn primary" id="bfStart">取得を${s.daysChecked ? "再開・期間を変更" : "開始"}</button>`}
+      <button class="btn" id="bfPause">${BF.pause ? "予想・学習を再開" : "予想・学習を一時停止"}</button></div>
+    ${s.from ? `<p class="small"><b>取得</b>：${s.running ? `取得中（${esc(s.cur || "")} ${esc(s.phase || "")}）` : s.fetchDone ? "完了" : "停止中"}・${s.daysChecked || 0}/${s.daysTotal || "—"}日を確認（${pct0}%）・開催${s.raceDays || 0}日・${(s.races || 0).toLocaleString()}レース・出走馬${(s.horses || 0).toLocaleString()}頭
+      <br><b>予想・答え合わせ・学習</b>：${days.length}開催日（${nR.toLocaleString()}レース）済み・残り${(s.pending || []).length}開催日${BF.proc ? `・処理中（${esc(BF.msg)}）` : BF.pause ? "・一時停止中" : ""}${last ? `・今のモデルの比重 ${last.a}` : ""}</p>` : ""}
+    ${days.length ? `<div class="tbl-wrap"><table><thead><tr><th>買い方</th><th class="r">購入R</th><th class="r">投資</th><th class="r">払戻</th><th class="r">回収率</th>${Object.keys(byYear).sort().map(y => `<th class="r">${y}年</th>`).join("")}</tr></thead><tbody>
+      ${Object.keys(L).filter(k => sum[k]?.races).map(k => `<tr><td>${L[k]}</td><td class="r num">${sum[k].races.toLocaleString()}</td><td class="r num">${yen(sum[k].inv)}</td><td class="r num">${yen(sum[k].ret)}</td><td class="r num ${sum[k].ret >= sum[k].inv ? "pos" : "neg"}"><b>${rate(sum[k])}</b></td>${Object.keys(byYear).sort().map(y => `<td class="r num">${rate(byYear[y][k])}</td>`).join("")}</tr>`).join("")}
+      </tbody></table></div>` : ""}
+    ${s.log?.length ? `<details><summary class="small">取得のログ</summary><pre class="small mono" style="white-space:pre-wrap">${esc(s.log.join("\n"))}</pre></details>` : ""}
+  </div>`;
+}
+
 function renderLearnTab(){
   const el = $("#p-learn"); if (!el) return;
+  if (!BF.status && !BF.loading && SERVER.enabled && !SERVER.cloud && SERVER.on){ BF.loading = true; bfRefresh().then(() => { BF.loading = false; if (ST.tab === "learn") renderLearnTab(); }); }
   const m = LEARN.model, d = ST.date;
   const dates = m?.hist || [];
   el.innerHTML = `
@@ -4045,7 +4197,11 @@ function renderLearnTab(){
     </div>` : ""}
     ${m ? upsetPanel(d) : ""}
     ${m ? learnPanel() : ""}
-    ${bodyWeightPanel()}`;
+    ${bodyWeightPanel()}
+    ${bfPanel()}`;
+  const bs1 = $("#bfStart"); if (bs1) bs1.onclick = bfStart;
+  const bs2 = $("#bfStop"); if (bs2) bs2.onclick = bfStop;
+  const bs3 = $("#bfPause"); if (bs3) bs3.onclick = () => { BF.pause = !BF.pause; if (!BF.pause) bfProcessLoop(); renderLearnTab(); };
   const bsel = $("#biasSel"); if (bsel) bsel.onchange = e => { LS.set("keibaBiasMode", e.target.value); Object.keys(ST.sims).forEach(markStale); renderLearnTab(); toast("馬場の偏りの反映を切り替えました。予想し直すと反映されます"); };
   const rb = $("#reBatch"); if (rb) rb.onclick = async () => { CHECK_MODE.v = "latest"; await runBatch(true); showCheck(ST.date); };
 }

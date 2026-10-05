@@ -34,14 +34,14 @@ VENUES = {"01":"札幌","02":"函館","03":"福島","04":"新潟","05":"東京",
 TRAIN_SCORE = {"A": 75, "B": 60, "C": 45, "D": 35}
 
 class Fetcher:
-    def __init__(self, delay=1.5, refresh=False):
+    def __init__(self, delay=1.5, refresh=False, cache=True):
         self.s = requests.Session(); self.s.headers.update({"User-Agent": UA, "Referer": "https://race.netkeiba.com/", "Accept-Language": "ja,en;q=0.8"})
-        self.delay, self.refresh, self.last = delay, refresh, 0.0
+        self.delay, self.refresh, self.last, self.cache = delay, refresh, 0.0, cache   # cache=False：ページを保存しない（大量取得でディスクを使い切らないように）
         CACHE.mkdir(exist_ok=True)
 
     def get(self, url, ttl_hours=None, encoding=None):
         key = CACHE / (hashlib.md5(url.encode()).hexdigest() + ".html")
-        if key.exists() and not self.refresh:
+        if self.cache and key.exists() and not self.refresh:
             age = (time.time() - key.stat().st_mtime) / 3600
             if ttl_hours is None or age < ttl_hours:
                 return key.read_text(encoding="utf-8")
@@ -57,7 +57,7 @@ class Fetcher:
         elif not r.encoding or r.encoding.lower() in ("iso-8859-1",):
             r.encoding = r.apparent_encoding
         txt = r.text
-        key.write_text(txt, encoding="utf-8")
+        if self.cache: key.write_text(txt, encoding="utf-8")
         return txt
 
 def soup(html): return BeautifulSoup(html, "lxml")

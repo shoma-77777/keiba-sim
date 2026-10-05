@@ -38,6 +38,10 @@ const DATA = process.argv[2] || path.join(__dirname, "..", "..", "docs", "data")
   const all = Learn.merge(old.records, recs).slice(-6000);   // クラウドのファイルが大きくなりすぎないよう直近6000レースまで（PCは全件）
   const model = Learn.build(all, new Date().toISOString().slice(0, 10));
   fs.writeFileSync(lp, JSON.stringify({ model, records: all }));
-  fs.writeFileSync(path.join(DATA, "learn_model.json"), JSON.stringify(model));
+  // PCで過去データを含めて学習した結果（こちらより多いレースで学習）があれば、それを優先して上書きしない
+  const mp = path.join(DATA, "learn_model.json");
+  const pcModel = fs.existsSync(mp) ? JSON.parse(fs.readFileSync(mp, "utf8")) : null;
+  if (pcModel && (pcModel.races || 0) > model.races){ console.log(`PCの学習結果（${pcModel.races}レース）を使います`); return; }
+  fs.writeFileSync(mp, JSON.stringify(model));
   console.log(JSON.stringify({ races: model.races, calib: model.calib, metrics: model.metrics, weights: model.weights }));
 })().catch(e => { console.error(e); process.exit(0); });
