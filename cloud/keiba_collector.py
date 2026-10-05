@@ -113,10 +113,18 @@ def parse_bw(t):
     return {"bodyWeight": f"{m.group(1)}({d})" if d else m.group(1), "bw": int(m.group(1)), "bwDiff": int(d) if d and re.fullmatch(r"[+-]?\d+", d) else None}
 
 def body_weights(f, race, ttl_hours=0.1):
-    """当日の馬体重（発走の約70分前に発表）を出馬表から取る。戻り値: 取れた頭数"""
+    """当日の出馬表から、最新の馬場状態・天候と、馬体重（発走の約70分前に発表）を取る。戻り値: 馬体重が取れた頭数"""
     html = f.get(f"{BASE_RACE}/race/shutuba.html?race_id={race['id']}", ttl_hours=ttl_hours, encoding="EUC-JP")
+    sp = soup(html)
+    rd = sp.select_one(".RaceData01")
+    if rd:
+        info = parse_racedata(clean(rd.get_text()))
+        if info.get("going") and info["going"] != race.get("going"):
+            race["goingPrev"] = race.get("going")
+        if info.get("going"): race["going"] = info["going"]; race["goingAt"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        if info.get("weather"): race["weather"] = info["weather"]
     got = {}
-    for tr in soup(html).select("tr.HorseList"):
+    for tr in sp.select("tr.HorseList"):
         uma = tr.select_one("td[class^=Umaban]"); bwt = tr.select_one("td.Weight")
         if not (uma and bwt): continue
         bw = parse_bw(bwt.get_text())

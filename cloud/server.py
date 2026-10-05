@@ -159,10 +159,12 @@ def update_date(ymd, odds_only=False):
                     with LOCK: JOB["done"] = i + 1
                     continue
                 if r.get("entries"):
-                    # 馬体重は発走の約70分前に発表。発表後は一度取れば十分
-                    if race_started(ymd, r, -80) and not all(e.get("bw") for e in r["entries"]):
-                        try: kc.body_weights(f, r)
-                        except Exception as ex: print(f"  馬体重取得スキップ ({r['id']}): {ex}")
+                    # 開催当日は出馬表を読み直して、最新の馬場状態（朝や雨で変わる）を1時間ごとに反映。
+                    # 馬体重（発走の約70分前に発表）は、発表時刻が近づいたら毎回確認する
+                    near = race_started(ymd, r, -80) and not all(e.get("bw") for e in r["entries"])
+                    if near or ymd == dt.date.today().strftime("%Y%m%d"):
+                        try: kc.body_weights(f, r, ttl_hours=0.1 if near else 1.0)
+                        except Exception as ex: print(f"  出馬表（馬場・馬体重）取得スキップ ({r['id']}): {ex}")
                     n, src, err = kc.odds(f, r, ttl_hours=0.02)
                     if n: ok += 1; kc.combo_odds(f, r, ttl_hours=0.02)
                     else: errs.append(f"{r['venue']}{r['no']}R: {err}")

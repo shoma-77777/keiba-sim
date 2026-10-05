@@ -75,14 +75,23 @@ const Learn = (() => {
     });
   }
   // 穴馬（6番人気以下）の中で、各要因があったときの3着内率と、なかったときの比（リフト）
+  // 確定オッズから見た「3着以内に入る確率」（Harville。人気薄の2・3着を少なめに見積もるくせは、全穴馬の比で割って打ち消す）
+  function top3FromMarket(pk){
+    const n = pk.length, out = new Array(n).fill(0);
+    for (let i = 0; i < n; i++){ out[i] += pk[i];
+      for (let j = 0; j < n; j++){ if (j === i) continue; const pj = pk[j], d1 = 1 - pj; if (d1 <= 0) continue; out[i] += pj * pk[i] / d1;
+        for (let k = 0; k < n; k++){ if (k === i || k === j) continue; const d2 = 1 - pj - pk[k]; if (d2 <= 0) continue; out[i] += pj * pk[k] / d1 * pk[i] / d2; } } }
+    return out;
+  }
+  // 穴馬（6番人気以下・15倍以上）について、各要因があったときに「オッズから見た期待」より何倍3着以内に来たか。
+  // 人気（オッズ）の差でできる見かけの差は取り除き、オッズが見落としていた分だけを測る（お金になるのはこの分だけ）
   function upsetStats(recs){
-    const cnt = {}; let base = 0, baseHit = 0;
+    const cnt = {}; let base = 0, baseHit = 0, baseExp = 0;
     recs.forEach(r => {
-      const H = r.h.filter(h => h.pos); if (H.length < 5) return;
-      const top3 = H.filter(h => h.pos <= 3), e3 = top3.filter(h => h.early != null).map(h => h.early);
-      const sh = e3.length ? (e3.reduce((a, b) => a + b, 0) / e3.length < 0.3 ? "前残り" : e3.reduce((a, b) => a + b, 0) / e3.length > 0.6 ? "差し・追込決着" : "平均的") : null;
-      H.filter(isLong).forEach(h => {
-        base++; const hit = h.pos <= 3; if (hit) baseHit++;
+      const H = r.h.filter(h => h.pos && h.pk > 0); if (H.length < 5) return;
+      const s = H.reduce((a, h) => a + h.pk, 0), t3 = top3FromMarket(H.map(h => h.pk / s));
+      H.forEach((h, i) => { if (!isLong(h)) return;
+        base++; const hit = h.pos <= 3; if (hit) baseHit++; baseExp += t3[i];
         const keys = [];
         if (h.early != null && h.early <= 0.25) keys.push("展開:前に行った");
         if (h.early != null && h.early >= 0.55) keys.push("展開:後方待機");
@@ -90,12 +99,16 @@ const Learn = (() => {
         if (r.going && r.going !== "良") keys.push("馬場:道悪");
         if (h.pm >= h.pk * 1.3) keys.push("モデル:市場より高評価");
         (h.ana || []).forEach(a => keys.push("穴パターン:" + a));
-        keys.forEach(k => { const c = (cnt[k] ||= { n: 0, hit: 0 }); c.n++; if (hit) c.hit++; });
+        keys.forEach(k => { const c = (cnt[k] ||= { n: 0, hit: 0, exp: 0 }); c.n++; if (hit) c.hit++; c.exp += t3[i]; });
       });
     });
-    const p0 = base ? baseHit / base : 0;
-    return { longshots: base, top3Rate: +p0.toFixed(4), factors: Object.entries(cnt).map(([k, c]) => ({ k, n: c.n, hit: c.hit, rate: +(c.hit / c.n).toFixed(4),
-      lift: +(((c.hit + 2 * p0) / (c.n + 2)) / Math.max(p0, 1e-4)).toFixed(3) })).sort((a, b) => b.lift - a.lift) };
+    const p0 = base ? baseHit / base : 0, r0 = baseExp ? baseHit / baseExp : 1;
+    return { longshots: base, top3Rate: +p0.toFixed(4), marketRatio: +r0.toFixed(3), factors: Object.entries(cnt).map(([k, c]) => {
+      const e = c.exp * r0;                                   // くせを打ち消した期待数
+      const lift = (c.hit + 2) / (e + 2);                     // 件数が少ないときは1に寄せる
+      const z = e > 0 ? (c.hit - e) / Math.sqrt(e) : 0;
+      return { k, n: c.n, hit: c.hit, exp: +e.toFixed(1), rate: +(c.hit / c.n).toFixed(4), lift: +lift.toFixed(3), z: +z.toFixed(2) };
+    }).sort((a, b) => b.lift - a.lift) };
   }
   // 穴パターンの加点を、穴馬の3着内率のリフトから更新（件数が少ないうちは初期値のまま）
   const ANA_PTS = { "前走度外視": 0.8, "G1からの格下げ": 0.6, "実績の割に人気薄": 0.7, "距離短縮": 0.4, "叩き2戦目": 0.5, "鞍上強化": 0.4, "内枠の先行馬": 0.4, "コース巧者": 0.5 };
@@ -104,7 +117,8 @@ const Learn = (() => {
     Object.entries(ANA_PTS).forEach(([k, pts]) => {
       const f = stats.factors.find(x => x.k === "穴パターン:" + k); if (!f) return;
       const t = f.n / (f.n + 300);                       // 300頭分で半分の重み（偶然の偏りに振り回されないように）
-      const learned = clamp(Math.log(Math.max(f.lift, 0.2)) * 2.5, -0.5, 2.5);  // リフト2倍 ≒ +1.7Pt
+      // オッズ比のリフトから加点を決める（リフト2倍 ≒ +1.7Pt）。偶然と区別できない（|z|<1.5）ときは加点0の方向へ寄せる
+      const learned = Math.abs(f.z ?? 0) >= 1.5 ? clamp(Math.log(Math.max(f.lift, 0.2)) * 2.5, -0.5, 2.5) : 0;
       out[k] = { pts: +(pts * (1 - t) + learned * t).toFixed(3) };
     });
     return out;

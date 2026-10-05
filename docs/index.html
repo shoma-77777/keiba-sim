@@ -2194,14 +2194,23 @@ const Learn = (() => {
     });
   }
   // 穴馬（6番人気以下）の中で、各要因があったときの3着内率と、なかったときの比（リフト）
+  // 確定オッズから見た「3着以内に入る確率」（Harville。人気薄の2・3着を少なめに見積もるくせは、全穴馬の比で割って打ち消す）
+  function top3FromMarket(pk){
+    const n = pk.length, out = new Array(n).fill(0);
+    for (let i = 0; i < n; i++){ out[i] += pk[i];
+      for (let j = 0; j < n; j++){ if (j === i) continue; const pj = pk[j], d1 = 1 - pj; if (d1 <= 0) continue; out[i] += pj * pk[i] / d1;
+        for (let k = 0; k < n; k++){ if (k === i || k === j) continue; const d2 = 1 - pj - pk[k]; if (d2 <= 0) continue; out[i] += pj * pk[k] / d1 * pk[i] / d2; } } }
+    return out;
+  }
+  // 穴馬（6番人気以下・15倍以上）について、各要因があったときに「オッズから見た期待」より何倍3着以内に来たか。
+  // 人気（オッズ）の差でできる見かけの差は取り除き、オッズが見落としていた分だけを測る（お金になるのはこの分だけ）
   function upsetStats(recs){
-    const cnt = {}; let base = 0, baseHit = 0;
+    const cnt = {}; let base = 0, baseHit = 0, baseExp = 0;
     recs.forEach(r => {
-      const H = r.h.filter(h => h.pos); if (H.length < 5) return;
-      const top3 = H.filter(h => h.pos <= 3), e3 = top3.filter(h => h.early != null).map(h => h.early);
-      const sh = e3.length ? (e3.reduce((a, b) => a + b, 0) / e3.length < 0.3 ? "前残り" : e3.reduce((a, b) => a + b, 0) / e3.length > 0.6 ? "差し・追込決着" : "平均的") : null;
-      H.filter(isLong).forEach(h => {
-        base++; const hit = h.pos <= 3; if (hit) baseHit++;
+      const H = r.h.filter(h => h.pos && h.pk > 0); if (H.length < 5) return;
+      const s = H.reduce((a, h) => a + h.pk, 0), t3 = top3FromMarket(H.map(h => h.pk / s));
+      H.forEach((h, i) => { if (!isLong(h)) return;
+        base++; const hit = h.pos <= 3; if (hit) baseHit++; baseExp += t3[i];
         const keys = [];
         if (h.early != null && h.early <= 0.25) keys.push("展開:前に行った");
         if (h.early != null && h.early >= 0.55) keys.push("展開:後方待機");
@@ -2209,12 +2218,16 @@ const Learn = (() => {
         if (r.going && r.going !== "良") keys.push("馬場:道悪");
         if (h.pm >= h.pk * 1.3) keys.push("モデル:市場より高評価");
         (h.ana || []).forEach(a => keys.push("穴パターン:" + a));
-        keys.forEach(k => { const c = (cnt[k] ||= { n: 0, hit: 0 }); c.n++; if (hit) c.hit++; });
+        keys.forEach(k => { const c = (cnt[k] ||= { n: 0, hit: 0, exp: 0 }); c.n++; if (hit) c.hit++; c.exp += t3[i]; });
       });
     });
-    const p0 = base ? baseHit / base : 0;
-    return { longshots: base, top3Rate: +p0.toFixed(4), factors: Object.entries(cnt).map(([k, c]) => ({ k, n: c.n, hit: c.hit, rate: +(c.hit / c.n).toFixed(4),
-      lift: +(((c.hit + 2 * p0) / (c.n + 2)) / Math.max(p0, 1e-4)).toFixed(3) })).sort((a, b) => b.lift - a.lift) };
+    const p0 = base ? baseHit / base : 0, r0 = baseExp ? baseHit / baseExp : 1;
+    return { longshots: base, top3Rate: +p0.toFixed(4), marketRatio: +r0.toFixed(3), factors: Object.entries(cnt).map(([k, c]) => {
+      const e = c.exp * r0;                                   // くせを打ち消した期待数
+      const lift = (c.hit + 2) / (e + 2);                     // 件数が少ないときは1に寄せる
+      const z = e > 0 ? (c.hit - e) / Math.sqrt(e) : 0;
+      return { k, n: c.n, hit: c.hit, exp: +e.toFixed(1), rate: +(c.hit / c.n).toFixed(4), lift: +lift.toFixed(3), z: +z.toFixed(2) };
+    }).sort((a, b) => b.lift - a.lift) };
   }
   // 穴パターンの加点を、穴馬の3着内率のリフトから更新（件数が少ないうちは初期値のまま）
   const ANA_PTS = { "前走度外視": 0.8, "G1からの格下げ": 0.6, "実績の割に人気薄": 0.7, "距離短縮": 0.4, "叩き2戦目": 0.5, "鞍上強化": 0.4, "内枠の先行馬": 0.4, "コース巧者": 0.5 };
@@ -2223,7 +2236,8 @@ const Learn = (() => {
     Object.entries(ANA_PTS).forEach(([k, pts]) => {
       const f = stats.factors.find(x => x.k === "穴パターン:" + k); if (!f) return;
       const t = f.n / (f.n + 300);                       // 300頭分で半分の重み（偶然の偏りに振り回されないように）
-      const learned = clamp(Math.log(Math.max(f.lift, 0.2)) * 2.5, -0.5, 2.5);  // リフト2倍 ≒ +1.7Pt
+      // オッズ比のリフトから加点を決める（リフト2倍 ≒ +1.7Pt）。偶然と区別できない（|z|<1.5）ときは加点0の方向へ寄せる
+      const learned = Math.abs(f.z ?? 0) >= 1.5 ? clamp(Math.log(Math.max(f.lift, 0.2)) * 2.5, -0.5, 2.5) : 0;
       out[k] = { pts: +(pts * (1 - t) + learned * t).toFixed(3) };
     });
     return out;
@@ -4077,7 +4091,7 @@ function upsetPanel(d){
   const pp = Object.entries(m.paper || {}).filter(([, v]) => v.races);
   return `<div class="learnbox"><h3>穴決着の分析 <span class="small">${d.slice(5).replace("-", "/")}・人気薄（6番人気以下で1着、または9番人気以下で3着内）</span></h3>
     ${us.length ? `<ul class="upsets">${us.map(u => `<li><b>${esc(u.venue)}${String(u.id).slice(-2).replace(/^0/, "")}R ${u.num}番</b>（${u.pop}番人気・${u.odds}倍）${u.pos}着：${esc(u.why.join("／"))}${u.favFlop?.length ? `<span class="small">（${esc(u.favFlop.join("、"))}）</span>` : ""}<span class="small">　モデル${(u.pm * 100).toFixed(1)}%／市場${(u.pk * 100).toFixed(1)}%</span></li>`).join("")}</ul>` : `<p class="small">この日は大きな穴決着はありませんでした（または学習がまだです）。</p>`}
-    ${st?.factors?.length ? `<p class="small"><b>累計の傾向</b>（穴馬${st.longshots}頭・3着内率${(st.top3Rate * 100).toFixed(1)}%に対して、要因があったときの倍率）：${st.factors.slice(0, 8).map(f => `${esc(f.k)} ×${f.lift}（${f.hit}/${f.n}）`).join("・")}。穴パターンの加点は、この倍率から少しずつ更新されます。</p>` : ""}
+    ${st?.factors?.length ? `<p class="small"><b>累計の傾向</b>（穴馬${st.longshots}頭。<b>オッズから見て期待される3着以内の数</b>に対して、実際に何倍来たか。人気の差でできる見かけの差は除いています）：${st.factors.slice(0, 10).map(f => `${esc(f.k)} ×${f.lift}（${f.hit}頭／期待${f.exp ?? "—"}頭${f.z != null && Math.abs(f.z) >= 2 ? "・偶然ではない" : ""}）`).join("・")}。穴パターンの加点は、この倍率のうち偶然と区別できるもの（|z|≧1.5）から少しずつ更新されます。「展開」は結果の通過順なので、レース前には使えない分析用の項目です。</p>` : ""}
     ${pp.length ? `<p class="small"><b>仮想収支（発走前の推奨どおりに買っていた場合の累計）</b>：${pp.map(([k, v]) => `${label[k]} ${v.races}R・回収率${Math.round(v.roi * 100)}%（95%の範囲 ${Math.round(v.lo95 * 100)}〜${Math.round(v.hi95 * 100)}%）`).join("／")}。<b>範囲の下限が100%を超えるまでは「長期でプラス」とは言えません</b>${pp[0][1].need ? `（今のぶれ方だと判定に約${pp[0][1].need.toLocaleString()}レース必要）` : ""}。</p>` : ""}
   </div>`;
 }
@@ -4208,7 +4222,7 @@ function renderAllTab(){
     if (!x) return `<div class="rc pending"><div class="hd"><span class="no">${r.no}R</span><span class="nm">${esc(r.name)}</span></div><div class="cond">${r.surface}${r.distance}m・${r.entries.length}頭・${esc(r.postTime || "")}</div><div class="line small">${BATCH.running ? "計算待ち…" : "未計算"}</div><div class="foot"><button class="btn" data-open="${r.id}">このレースを開く</button></div></div>`;
     return `<div class="rc">
       <div class="hd"><span class="no">${r.no}R</span><span class="nm">${esc(r.name)}</span></div>
-      <div class="cond">${r.surface}${r.distance}m・${x.field}頭・発走 ${esc(r.postTime || "")}・馬場「${esc(x.going)}」想定${fromSaved ? "・保存済みの結果" : ""}</div>
+      <div class="cond">${r.surface}${r.distance}m・${x.field}頭・発走 ${esc(r.postTime || "")}・馬場「${esc(x.going)}」${r.goingAt ? `（${esc(r.goingAt.slice(11))}の発表${r.goingPrev && r.goingPrev !== r.going ? `・${esc(r.goingPrev)}から変更` : ""}）` : "想定"}${fromSaved ? "・保存済みの結果" : ""}</div>
       ${x.pace ? `<div class="line small">展開予想 <b>${PACE_JA[x.pace.best]}ペース ${pct(x.pace[x.pace.best])}%</b>（前に行く馬${x.pace.front}頭）</div>` : ""}
       <div class="marks">${x.marks.map((m, k) => `<span class="mk">${MARKS[k]}</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">1着${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}${(x.subs || []).map(m => `<span class="mk">△</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気）</span>` : ""}</span><span class="wpct">1着${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}</div>
       ${x.tri ? `<div class="line">最有力の3連単 <b>${x.tri.nums.join("→")}</b> <span class="small">（${pct(x.tri.p)}%）</span></div>` : ""}
@@ -4242,7 +4256,7 @@ function renderAllTab(){
     ${diag}
     <div class="allhead"><h3>${esc(d.slice(5).replace("-", "/"))} 全レース予想</h3><span class="small">${doneN}/${list.length}レース計算済み${BATCH.running ? `（計算中 ${BATCH.done}/${BATCH.total}）` : ""}。一括計算は各条件 ${BATCH_RUNS.toLocaleString()}回×馬場4×ペース3。レースを開いて「シミュレーション実行」を押すと1万回で計算し直せます。</span></div>
     ${venues.map(v => `<h3 class="sec">${esc(v)}</h3><div class="allgrid">${list.filter(r => r.venue === v).map(card).join("")}</div>`).join("")}
-    <div class="note">◎○▲は天気予報の馬場と脚質構成から起きやすいペースで重み付けした1着率の上位3頭。確率は過去データにもとづく推定で、的中を保証するものではありません。馬券は余裕資金の範囲で。</div>`;
+    <div class="note">1,000円・5,000円の買い方と◎○▲は、各レースを「馬場4種×ペース3種」の12条件で各${BATCH_RUNS.toLocaleString()}回走らせ、馬場（発表済みなら発表の馬場、発表前は予報）とペース（脚質構成から計算した各ペースの起きやすさ）の確率で混ぜた結果から計算しています。確率は、学習した比率でオッズと統合し、当日の馬場の偏り・クッション値・馬体重の効き（反映条件を満たすときだけ）も入っています。確率は過去データにもとづく推定で、的中を保証するものではありません。馬券は余裕資金の範囲で。</div>`;
   el.querySelectorAll("[data-cm]").forEach(b => b.onclick = () => { CHECK_MODE.v = b.dataset.cm; computeCheck(d); renderAllTab(); });
   el.querySelectorAll("[data-open]").forEach(b => b.onclick = () => { ST.raceId = b.dataset.open; ST.venue = DB.races[ST.raceId]?.venue; renderVenues(); renderAll(); setTab(ST.sims[ST.raceId] ? "result" : "card"); window.scrollTo({ top: 0, behavior: "smooth" }); });
 }
