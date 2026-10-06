@@ -382,7 +382,7 @@ class Handler(SimpleHTTPRequestHandler):
                 except Exception: pass
                 return self._json({"ok": True})
             return self._json({"ok": False}, 404)
-        if u.path in ("/api/backfill/start", "/api/backfill/stop", "/api/backfill/done"):
+        if u.path in ("/api/backfill/start", "/api/backfill/stop", "/api/backfill/done", "/api/backfill/reprocess"):
             n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8") if n else "{}"
             try: j = json.loads(body or "{}")
             except Exception: j = {}
@@ -392,6 +392,7 @@ class Handler(SimpleHTTPRequestHandler):
                 except Exception: return self._json({"ok": False, "message": "期間の指定が正しくありません"}, 400)
                 return self._json({"ok": bf.start(frm, to)})
             if u.path == "/api/backfill/stop": bf.stop(); return self._json({"ok": True})
+            if u.path == "/api/backfill/reprocess": return self._json({"ok": True, "n": bf.unmark(j.get("dates") or [])})
             ymd = re.sub(r"\D", "", str(j.get("date") or ""))[:8]
             if len(ymd) != 8: return self._json({"ok": False}, 400)
             bf.mark_processed(ymd, j.get("result") or {}); return self._json({"ok": True})

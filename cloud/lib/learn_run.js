@@ -30,7 +30,7 @@ const DATA = process.argv[2] || path.join(__dirname, "..", "..", "docs", "data")
     const races = (snap.races || []).filter(r => r.result?.rows?.length && r.entries?.length && !done.has(r.id));
     if (!races.length) continue;
     const horses = {}; Object.entries(snap.horses || {}).forEach(([id, h]) => horses[id] = { ...h, id });
-    const out = await Learn.recordsForRaces(Engine, races, horses, r => snap.track?.[r.date + "|" + r.venue] || null, 2500, r => bets[r.id] || null);
+    const out = await Learn.recordsForRaces(Engine, races, horses, r => snap.track?.[r.date + "|" + r.venue] || null, 2500, r => bets[r.id] || null, null, "0000-00-00");   // クラウドは学習した重みを使わず初期値で計算する＝未来の情報なし
     console.log(`${f}: ${out.length}レースを記録`);
     recs = recs.concat(out);
   }

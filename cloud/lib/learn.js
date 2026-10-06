@@ -11,13 +11,39 @@ const Learn = (() => {
   // 2着・3着の選ばれ方は1着より「まぎれ」が大きいので、段階ごとに確率の鋭さを割り引く（ベンターの方法）。
   // これをしないと、統合の指数 a+b が 1 より小さく推定され、大穴の確率を過大に見積もってしまう（10/4 で実際に発生）。
   const LAM = [1, 0.75, 0.6];
-  const RV = 4;   // 4: 穴パターンの候補を追加   // 記録の作り方の版（3: その日より前の出走歴だけでモデル確率を計算）
+  const RV = 5;   // 5: 位置取りの材料（過去の通過順・距離の増減・同型の頭数）と実際の1角・4角の位置を記録   // 4: 穴パターンの候補を追加   // 記録の作り方の版（3: その日より前の出走歴だけでモデル確率を計算）
   const AB_MIN = 1.0;   // a+b の下限：統合後の確率がオッズより「平ら」（＝大穴を過大評価）にならないように
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
+  // ===== 位置取りの材料（モデルの計算は不要。過去の通過順と結果の通過順だけから作る） =====
+  const r3 = x => x == null || !isFinite(x) ? null : +x.toFixed(3);
+  // 実際の位置：最初に記録された角（ふつう1角。2角しかないコースは3角）と最後の角（4角）。過去の通過順と同じ定義
+  function cornerPos(res, last){ const o = {}; const C = res?.corners; if (C?.length){ const c = C[last ? C.length - 1 : 0]; c.forEach((num, k) => o[num] = r3(k / Math.max(1, c.length - 1))); } return o; }
+  // レース前に分かる位置取りの材料（runs：その馬のこのレースより前の出走。新しい順）
+  function preOf(runsIn, distance){
+    const runs = runsIn.filter(x => x.surface !== "障");
+    const pr = runs.filter(x => x.passing?.length && x.field > 4);
+    const eo = x => (x.passing[0] - 1) / Math.max(1, x.field - 1), lo = x => (x.passing[x.passing.length - 1] - 1) / Math.max(1, x.field - 1);
+    const avg = a => a.length ? a.reduce((p, q) => p + q, 0) / a.length : null;
+    return { pp: [r3(avg(pr.map(eo))), pr[0] ? r3(eo(pr[0])) : null, r3(avg(pr.slice(0, 3).map(eo))), pr[0] ? r3(lo(pr[0])) : null, pr.length],
+      dd: runs[0]?.dist > 0 && distance > 0 ? distance - runs[0].dist : null };
+  }
+  function frontCounts(pres){ const w = pres.filter(p => p.pp[4] > 0); return { nf: w.filter(p => p.pp[0] < 0.35).length, nn: w.filter(p => p.pp[0] < 0.12).length }; }
+  // 前の版で作った記録に、位置取りの材料だけを付け足す（モデルの確率はそのまま）。race：出馬表と結果、horses：出走馬の成績
+  function posFill(rec, race, horses, Engine){
+    if (!race?.entries?.length || !race.result) return false;
+    const byNum = {}; race.entries.forEach(e => byNum[e.num] = e);
+    const runsOf = num => { const h = horses[byNum[num]?.horseId]; return (h?.runs || []).map(Engine.parseRun).filter(r => r.pos > 0 && r.field > 0 && (!race.date || !r.date || r.date < race.date)).sort((a, b) => b.date.localeCompare(a.date)); };
+    const pres = rec.h.map(h => preOf(runsOf(h.num), race.distance));
+    const cF = cornerPos(race.result, false), cL = cornerPos(race.result, true);
+    rec.h.forEach((h, i) => { h.pp = pres[i].pp; h.dd = pres[i].dd; h.c1 = cF[h.num] ?? null; h.c4 = cL[h.num] ?? null; });
+    Object.assign(rec, frontCounts(pres)); rec.posFill = true;
+    return true;
+  }
+
   // 1レース分の記録を作る（pm: モデルの1着確率、ctx: buildContext の結果、res: 結果）
   // wcur: 記録時に効いていた要素の重み、wbase: 学習前の基準の重み（要素の値を基準の単位に直して記録する）
-  function record(race, ctx, pm, res, bets, wcur, wbase){
+  function record(race, ctx, pm, res, bets, wcur, wbase, upto){
     wcur = wcur || {}; wbase = wbase || {};
     const wc = k => (k === "能力" ? 1 : (wcur[k] ?? 1)), wb = k => (k === "能力" ? 1 : (wbase[k] ?? 1));
     const rows = res.rows || [];
@@ -34,14 +60,18 @@ const Learn = (() => {
     const early = {};
     if (res.corners?.length){ const c = res.corners[Math.min(1, res.corners.length - 1)]; c.forEach((num, k) => early[num] = k / Math.max(1, c.length - 1)); }
     const l3 = rows.filter(x => x.l3f > 0).map(x => x.l3f).sort((a, b) => a - b);
+    const cFirst = cornerPos(res, false), cLast = cornerPos(res, true);
+    const pres = ctx.field.map(f => preOf(f.prof?.runs || [], race.distance));
+    const { nf, nn } = frontCounts(pres);
     return {
-      rv: RV, id: race.id, date: race.date, post: race.postTime || null, kai: race.kai || null, venue: race.venue, surface: race.surface, dist: race.distance, going: res.going || race.going || null, n: N, sens: +sens.toFixed(4),
+      rv: RV, upto: upto || null, id: race.id, date: race.date, post: race.postTime || null, kai: race.kai || null, venue: race.venue, surface: race.surface, dist: race.distance, going: res.going || race.going || null, n: N, sens: +sens.toFixed(4), nf, nn,
       order: order.slice(0, 5),
       h: ctx.field.map((f, i) => ({
         num: f.num, pm: +Math.max(pm[i], 1e-4).toFixed(5), pk: +(inv[i] / s).toFixed(5), odds: odds[i], pop: fin[f.num]?.pop ?? f.pop ?? null,
         pos: fin[f.num] ? +fin[f.num].pos : null, time: fin[f.num]?.time || null, l3f: fin[f.num]?.l3f || null,
         l3rank: fin[f.num]?.l3f ? l3.indexOf(fin[f.num].l3f) + 1 : null, early: early[f.num] ?? null,
         gate: +(((f.num - 1) / Math.max(1, N - 1))).toFixed(3), style: f.style, ana: f.ana || [],
+        c1: cFirst[f.num] ?? null, c4: cLast[f.num] ?? null, pp: pres[i].pp, dd: pres[i].dd,
         z: FEATS.map(k => +((f.adj[k] || 0) / (Math.abs(wc(k)) > 1e-6 ? wc(k) : 1)).toFixed(3))
       })),
       wr: FEATS.map(k => +(wc(k) / (Math.abs(wb(k)) > 1e-6 ? wb(k) : 1)).toFixed(3)),
@@ -147,26 +177,35 @@ const Learn = (() => {
   }
 
   // 上位3着の Plackett–Luce 対数尤度（パラメータ θ = [a, b, c_1..c_K]）
+  // 1レース分の特徴（log p_model, log p_market, 要素の値）と上位3着の位置を一度だけ作っておく（学習の繰り返しを速くするため。結果は同じ）
+  const PRE = new WeakMap();
+  function prep(r){
+    let p = PRE.get(r); if (p) return p;
+    const H = r.h, n = H.length, D = 2 + FEATS.length, X = new Float64Array(n * D);
+    H.forEach((h, i) => { X[i * D] = Math.log(h.pm); X[i * D + 1] = Math.log(h.pk); for (let k = 0; k < FEATS.length; k++) X[i * D + 2 + k] = h.z[k]; });
+    const idx = [], seen = new Set();
+    for (const num of r.order.slice(0, 3)){ const wi = H.findIndex(h => h.num === num); if (wi < 0 || seen.has(wi)) break; idx.push(wi); seen.add(wi); }
+    p = { n, D, X, idx }; PRE.set(r, p); return p;
+  }
   function nll(recs, th, grad){
     const K = FEATS.length; let L = 0;
     if (grad) grad.fill(0);
     for (const r of recs){
-      const H = r.h, n = H.length; if (n < 2 || !r.order?.length) continue;
-      const u = H.map(h => th[0] * Math.log(h.pm) + th[1] * Math.log(h.pk) + h.z.reduce((a, z, k) => a + th[2 + k] * z, 0));
-      const used = new Array(n).fill(false);
-      const top = r.order.slice(0, 3);
-      for (let st = 0; st < top.length; st++){
-        const num = top[st], lam = LAM[st];
-        const wi = H.findIndex(h => h.num === num); if (wi < 0 || used[wi]) break;
+      if (r.h.length < 2 || !r.order?.length) continue;
+      const { n, D, X, idx } = prep(r);
+      const u = new Float64Array(n);
+      for (let i = 0; i < n; i++){ let s = 0; for (let j = 0; j < D; j++) s += th[j] * X[i * D + j]; u[i] = s; }
+      const used = new Uint8Array(n), e = new Float64Array(n);
+      for (let st = 0; st < idx.length; st++){
+        const wi = idx[st], lam = LAM[st];
         let mx = -1e9; for (let i = 0; i < n; i++) if (!used[i]) mx = Math.max(mx, lam * u[i]);
-        let Z = 0; const e = new Array(n).fill(0); for (let i = 0; i < n; i++) if (!used[i]){ e[i] = Math.exp(lam * u[i] - mx); Z += e[i]; }
+        let Z = 0; for (let i = 0; i < n; i++){ e[i] = used[i] ? 0 : Math.exp(lam * u[i] - mx); Z += e[i]; }
         L -= lam * u[wi] - mx - Math.log(Z);
         if (grad){
-          const feat = i => [Math.log(H[i].pm), Math.log(H[i].pk), ...H[i].z];
-          const fw = feat(wi); for (let j = 0; j < 2 + K; j++) grad[j] -= lam * fw[j];
-          for (let i = 0; i < n; i++) if (!used[i]){ const p = e[i] / Z, fi = feat(i); for (let j = 0; j < 2 + K; j++) grad[j] += lam * p * fi[j]; }
+          for (let j = 0; j < D; j++) grad[j] -= lam * X[wi * D + j];
+          for (let i = 0; i < n; i++) if (!used[i]){ const p = lam * e[i] / Z; for (let j = 0; j < D; j++) grad[j] += p * X[i * D + j]; }
         }
-        used[wi] = true;
+        used[wi] = 1;
       }
     }
     // 事前分布（データが少ないうちは事前の値に寄せる）
@@ -245,7 +284,7 @@ const Learn = (() => {
       model: +logloss(byDate[d], h => h.pm).toFixed(3), market: +logloss(byDate[d], h => h.pk).toFixed(3),
       blend: +logloss(byDate[d], h => Math.pow(h.pm, a) * Math.pow(h.pk, b)).toFixed(3) }));
     return {
-      version: 2, updated: new Date().toISOString(), races: recs.length,
+      version: 2, updated: new Date().toISOString(), races: recs.length, upto: recs.reduce((m, r) => r.date > m ? r.date : m, "0000-00-00"),
       calib: { a: +a.toFixed(3), b: +b.toFixed(3) },
       weights, featCoef: Object.fromEntries(FEATS.map((k, j) => [k, +th[2 + j].toFixed(4)])),
       metrics: { model: logloss(recs, h => h.pm), market: logloss(recs, h => h.pk), blend: logloss(recs, h => Math.pow(h.pm, a) * Math.pow(h.pk, b)) },
@@ -261,7 +300,7 @@ const Learn = (() => {
   }
 
   // 結果の出ているレースについて、モデルの1着確率を計算して記録を作る（ブラウザでもNodeでも同じ）
-  async function recordsForRaces(Engine, races, horses, trackOf, runs = 2500, betsOf, baseW){
+  async function recordsForRaces(Engine, races, horses, trackOf, runs = 2500, betsOf, baseW, upto){
     const out = [];
     for (const r of races){
       const res = r.result; if (!res || !r.entries?.length) continue;
@@ -278,7 +317,7 @@ const Learn = (() => {
         m.stats.forEach((s, i) => win[i] += w * s.win); tot += w;
       }
       const pm = Array.from(win, x => x / tot);
-      out.push(record(race, ctx, pm, res, betsOf ? betsOf(r) : null, Engine.WEIGHTS, baseW || Engine.WEIGHTS));
+      out.push(record(race, ctx, pm, res, betsOf ? betsOf(r) : null, Engine.WEIGHTS, baseW || Engine.WEIGHTS, upto));
     }
     return out;
   }
@@ -286,50 +325,250 @@ const Learn = (() => {
 
 
   // ===== 検証レポート：今のAIが「どこまで穴馬を見抜けているか」を、未来の情報を使わずに測る =====
-  // 記録を日付で前後に分け、前の期間だけで統合の比率（a, b）を学習 → 後の期間で評価する（アウトオブサンプル）。
+  // 時系列のウォークフォワード：最初の4割の期間を学習の土台にし、残りを5つの期間に分けて、
+  // 各期間は「それより前の記録だけ」で統合の比率（a, b）を学習してから成績を測る（どの期間も未来の情報なし）。
   // 単勝は確定オッズ＝実際の払戻なので、単勝の回収率は正確。複勝は記録に払戻がないため率だけを見る。
-  function report(recs, splitFrac = 0.6){
-    const R = recs.filter(r => r.h?.length >= 5 && r.order?.length).slice().sort((a, b) => (a.date + a.id).localeCompare(b.date + b.id));
-    if (R.length < 100) return { ok: false, n: R.length };
-    const dates = [...new Set(R.map(r => r.date))]; const cut = dates[Math.floor(dates.length * splitFrac)];
-    const train = R.filter(r => r.date < cut), test = R.filter(r => r.date >= cut);
-    const th = fit(train); const a = th[0], b = th[1];
-    const band = p => p <= 3 ? "1〜3番人気" : p <= 7 ? "4〜7番人気" : p <= 12 ? "8〜12番人気" : "13番人気以下";
-    const BANDS = ["1〜3番人気", "4〜7番人気", "8〜12番人気", "13番人気以下"];
-    const T = {}; BANDS.forEach(k => T[k] = { n: 0, win: 0, top3: 0, ret: 0, rec: { n: 0, win: 0, top3: 0, ret: 0 }, mark: { n: 0, win: 0, top3: 0, ret: 0 } });
-    const calB = [0, 0.02, 0.05, 0.1, 0.2, 0.35, 1.01], cal = calB.slice(0, -1).map((lo, i) => ({ lo, hi: calB[i + 1], n: 0, p: 0, pk: 0, win: 0 }));
-    const evB = [0, 0.6, 0.8, 1.0, 1.1, 1.3, 1.6, 99], evs = evB.slice(0, -1).map((lo, i) => ({ lo, hi: evB[i + 1], n: 0, win: 0, ret: 0 }));
-    const cap = { 4: [], 10: [] };    // 実際に3着以内に来た穴馬の「穴ランキング」での順位（4番人気以下／10番人気以下）
-    let rnd = { 4: 0, 10: 0 };
-    test.forEach(r => {
-      const H = r.h.filter(h => h.pos != null && h.odds > 1); if (H.length < 5) return;
-      const sk = H.reduce((x, h) => x + h.pk, 0);
-      const q = H.map(h => Math.pow(Math.max(h.pm, 1e-5), a) * Math.pow(h.pk / sk, b)); const sq = q.reduce((x, y) => x + y, 0);
-      const P = q.map(x => x / sq);
-      const top = P.indexOf(Math.max(...P));     // 統合確率の1位＝本命（◎の代わり）
+  // 記録そのもの（モデルの確率）が「そのレースより前の記録だけで学習したモデル」で作られたか（clean）も確かめる。
+  const clean = r => !!r.upto && r.upto < r.date;
+  const BANDS = ["1〜3番人気", "4〜7番人気", "8〜12番人気", "13番人気以下"];
+  const bandOf = p => p <= 3 ? BANDS[0] : p <= 7 ? BANDS[1] : p <= 12 ? BANDS[2] : BANDS[3];
+  const EV_T = [0, 0.8, 0.9, 1.0, 1.05, 1.1, 1.2, 1.3];
+  const CAL_B = [0, 0.02, 0.05, 0.1, 0.2, 0.35, 1.01], EV_B = [0, 0.6, 0.8, 1.0, 1.1, 1.3, 1.6, 99];
+  const zc = () => ({ n: 0, win: 0, top3: 0, ret: 0 });
+  function newAcc(){
+    const T = {}; BANDS.forEach(k => T[k] = { all: zc(), rec: zc(), mark: zc() });
+    const bins = B => B.slice(0, -1).map((lo, i) => ({ lo, hi: B[i + 1], n: 0, p: 0, pm: 0, pk: 0, win: 0, ret: 0 }));
+    return { T, cal: bins(CAL_B), calM: bins(CAL_B), evs: bins(EV_B), thr: EV_T.map(t => ({ t, n: 0, win: 0, ret: 0, ret2: 0, odds: 0 })),
+      cap: { 4: [], 10: [] }, ll: { n: 0, blend: 0, market: 0, model: 0, d: [] }, races: 0 };
+  }
+  function evalRace(r, a, b, A){
+    const H = r.h.filter(h => h.pos != null && h.odds > 1); if (H.length < 5) return;
+    A.races++;
+    const sk = H.reduce((x, h) => x + h.pk, 0), sm = H.reduce((x, h) => x + Math.max(h.pm, 1e-5), 0);
+    const PK = H.map(h => h.pk / sk), PM = H.map(h => Math.max(h.pm, 1e-5) / sm);
+    const q = H.map((h, i) => Math.pow(PM[i], a) * Math.pow(PK[i], b)); const sq = q.reduce((x, y) => x + y, 0);
+    const P = q.map(x => x / sq);
+    const top = P.indexOf(Math.max(...P));     // 統合確率の1位＝本命
+    const wi = H.findIndex(h => h.pos === 1);
+    if (wi >= 0){ const lb = -Math.log(P[wi]), lk = -Math.log(PK[wi]); A.ll.n++; A.ll.blend += lb; A.ll.market += lk; A.ll.model += -Math.log(PM[wi]); A.ll.d.push(lk - lb); }
+    const bin = (B, v) => B.find(x => v >= x.lo && v < x.hi);
+    H.forEach((h, i) => {
+      const B = A.T[bandOf(h.pop || 99)], hit3 = h.pos <= 3, w = h.pos === 1, ev = P[i] * h.odds;
+      const add = o => { o.n++; if (w){ o.win++; o.ret += h.odds; } if (hit3) o.top3++; };
+      add(B.all); if (ev >= 1.1 && P[i] >= 0.02) add(B.rec); if (i === top) add(B.mark);
+      const c = bin(A.cal, P[i]); if (c){ c.n++; c.p += P[i]; c.pm += PM[i]; c.pk += PK[i]; if (w) c.win++; }
+      const cm = bin(A.calM, PM[i]); if (cm){ cm.n++; cm.pm += PM[i]; cm.pk += PK[i]; if (w) cm.win++; }
+      const e = bin(A.evs, ev); if (e){ e.n++; if (w){ e.win++; e.ret += h.odds; } }
+      A.thr.forEach(t => { if (ev >= t.t){ t.n++; t.odds += h.odds; if (w){ t.win++; t.ret += h.odds; t.ret2 += h.odds * h.odds; } } });
+    });
+    // 穴ランキング：その人気以下の馬を「モデル÷オッズ」（市場より何倍高く評価しているか）で並べる
+    [4, 10].forEach(minPop => {
+      const G = H.map((h, i) => ({ h, s: PM[i] / Math.max(PK[i], 1e-6), m: PK[i] })).filter(x => (x.h.pop || 99) >= minPop);
+      const L = G.slice().sort((x, y) => y.s - x.s), M = G.slice().sort((x, y) => y.m - x.m);   // AIの穴ランキング／オッズ順（人気順）
+      L.forEach((x, k) => { if (x.h.pos <= 3) A.cap[minPop].push({ rank: k + 1, mrank: M.indexOf(x) + 1, of: L.length, pop: x.h.pop }); });
+    });
+  }
+  // 偶然との区別：でたらめに並べたときの期待値と分散から z を出す（|z|≧2 でおおむね5%水準）。
+  // 同じレースで2頭以上来たときの順位の重なりは無視しているので、z はやや控えめ（実際より小さめ）に出る。
+  function capStat(arr){
+    if (!arr.length) return null;
+    const n = arr.length;
+    const at = [3, 5, 10, 20].map(k => { const hit = arr.filter(x => x.rank <= k).length; let E = 0, V = 0;
+      arr.forEach(x => { const p = Math.min(1, k / x.of); E += p; V += p * (1 - p); });
+      // オッズ順（人気順）に並べた場合との比較：AIだけが上位k頭に入れていた穴馬（aw）と、オッズ順だけが入れていた穴馬（mw）の差（マクネマー検定）
+      const mk = arr.filter(x => x.mrank <= k).length, aw = arr.filter(x => x.rank <= k && x.mrank > k).length, mw = arr.filter(x => x.rank > k && x.mrank <= k).length;
+      return { k, hit, rate: +(hit / n).toFixed(3), random: +(E / n).toFixed(3), z: V > 1e-9 ? +((hit - E) / Math.sqrt(V)).toFixed(2) : null,
+        market: +(mk / n).toFixed(3), aw, mw, zMk: aw + mw ? +((aw - mw) / Math.sqrt(aw + mw)).toFixed(2) : null }; });
+    const S = arr.reduce((s, x) => s + x.rank, 0), ES = arr.reduce((s, x) => s + (x.of + 1) / 2, 0), VS = arr.reduce((s, x) => s + (x.of * x.of - 1) / 12, 0);
+    return { n, meanRank: +(S / n).toFixed(2), meanRandom: +(ES / n).toFixed(2), meanMarket: +(arr.reduce((s, x) => s + x.mrank, 0) / n).toFixed(2), meanOf: +(arr.reduce((s, x) => s + x.of, 0) / n).toFixed(1),
+      zRank: VS > 0 ? +((ES - S) / Math.sqrt(VS)).toFixed(2) : null, at };
+  }
+  function finAcc(A){
+    const fin = o => ({ n: o.n, winRate: o.n ? +(o.win / o.n).toFixed(4) : null, top3Rate: o.n ? +(o.top3 / o.n).toFixed(4) : null, winROI: o.n ? +(o.ret / o.n).toFixed(3) : null });
+    const d = A.ll.d, md = d.length ? d.reduce((x, y) => x + y, 0) / d.length : 0, sd = d.length > 1 ? Math.sqrt(d.reduce((x, y) => x + (y - md) ** 2, 0) / (d.length - 1)) : 0;
+    return {
+      races: A.races,
+      ll: A.ll.n ? { n: A.ll.n, blend: +(A.ll.blend / A.ll.n).toFixed(4), market: +(A.ll.market / A.ll.n).toFixed(4), model: +(A.ll.model / A.ll.n).toFixed(4),
+        gain: +md.toFixed(4), z: sd > 0 ? +(md / (sd / Math.sqrt(d.length))).toFixed(2) : null } : null,
+      bands: BANDS.map(k => ({ band: k, all: fin(A.T[k].all), rec: fin(A.T[k].rec), mark: fin(A.T[k].mark) })),
+      calibration: A.cal.filter(c => c.n).map(c => ({ range: `${Math.round(c.lo * 100)}〜${Math.round(Math.min(c.hi, 1) * 100)}%`, n: c.n, pred: +(c.p / c.n).toFixed(4), model: +(c.pm / c.n).toFixed(4), market: +(c.pk / c.n).toFixed(4), actual: +(c.win / c.n).toFixed(4) })),
+      calibrationModel: A.calM.filter(c => c.n).map(c => ({ range: `${Math.round(c.lo * 100)}〜${Math.round(Math.min(c.hi, 1) * 100)}%`, n: c.n, pred: +(c.pm / c.n).toFixed(4), market: +(c.pk / c.n).toFixed(4), actual: +(c.win / c.n).toFixed(4) })),
+      ev: A.evs.filter(e => e.n).map(e => ({ range: `${e.lo}〜${e.hi >= 99 ? "" : e.hi}`, n: e.n, winRate: +(e.win / e.n).toFixed(4), roi: +(e.ret / e.n).toFixed(3) })),
+      // 期待値の閾値の感度：「期待値が t 以上の単勝を全部100円ずつ買った」場合（95%の範囲つき）
+      thresholds: A.thr.map(t => { if (!t.n) return { t: t.t, n: 0 }; const m = t.ret / t.n, v = Math.max(0, t.ret2 / t.n - m * m), se = Math.sqrt(v / t.n);
+        return { t: t.t, n: t.n, winRate: +(t.win / t.n).toFixed(4), avgOdds: +(t.odds / t.n).toFixed(1), roi: +m.toFixed(3), lo95: +Math.max(0, m - 1.96 * se).toFixed(3), hi95: +(m + 1.96 * se).toFixed(3) }; }),
+      capture: { pop4: capStat(A.cap[4]), pop10: capStat(A.cap[10]) }
+    };
+  }
+  // 穴馬（lo〜hi番人気）について、各要素が「プラス評価（そのレースの出走馬の平均より上）」だった割合を、来た馬と来なかった馬で比べる。
+  // 人気の差でできる見かけの差を除くため、オッズから見た3着以内の期待数（Harville）に対して何倍来たか（倍率）と z も出す。
+  // 50項目ほどを同時に調べるので、偶然でも |z|≧2 が2〜3個は出る。前半・後半の両方で同じ向きか、|z|≧3.3（多重比較の補正）を目安にする。
+  function factorStats(R, lo, hi){
+    const rows = [];
+    R.forEach(r => {
+      const H = r.h.filter(h => h.pos && h.pk > 0 && h.z); if (H.length < 5) return;
+      const s = H.reduce((a, h) => a + h.pk, 0), sm = H.reduce((a, h) => a + Math.max(h.pm, 1e-5), 0), t3 = top3FromMarket(H.map(h => h.pk / s));
+      const mean = FEATS.map((_, j) => H.reduce((a, h) => a + (h.z[j] || 0), 0) / H.length);
       H.forEach((h, i) => {
-        const pop = h.pop || 99, B = T[band(pop)], hit3 = h.pos <= 3, w = h.pos === 1;
-        B.n++; if (w) { B.win++; B.ret += h.odds; } if (hit3) B.top3++;
-        if (P[i] * h.odds >= 1.1 && P[i] >= 0.02){ B.rec.n++; if (w){ B.rec.win++; B.rec.ret += h.odds; } if (hit3) B.rec.top3++; }   // AIが推奨（単勝の期待値1.1以上）
-        if (i === top){ B.mark.n++; if (w){ B.mark.win++; B.mark.ret += h.odds; } if (hit3) B.mark.top3++; }
-        const c = cal.find(x => P[i] >= x.lo && P[i] < x.hi); if (c){ c.n++; c.p += P[i]; c.pk += h.pk / sk; if (w) c.win++; }
-        const ev = P[i] * h.odds, e = evs.find(x => ev >= x.lo && ev < x.hi); if (e){ e.n++; if (w){ e.win++; e.ret += h.odds; } }
-      });
-      // 穴ランキング：その人気帯以下の馬を「モデル÷オッズ」（市場より何倍高く評価しているか）で並べる
-      [4, 10].forEach(minPop => {
-        const L = H.map((h, i) => ({ h, s: h.pm / Math.max(h.pk / sk, 1e-6) })).filter(x => (x.h.pop || 99) >= minPop).sort((x, y) => y.s - x.s);
-        L.forEach((x, k) => { if (x.h.pos <= 3){ cap[minPop].push({ rank: k + 1, of: L.length, pop: x.h.pop }); } });
+        const pop = h.pop || 99; if (pop < lo || pop > hi) return;
+        const dev = FEATS.map((_, j) => (h.z[j] || 0) - mean[j]);
+        const keys = [];
+        FEATS.forEach((k, j) => { if (dev[j] > 0.001) keys.push("要素:" + k); });
+        (h.ana || []).forEach(a => keys.push("穴パターン:" + a));
+        if (h.style) keys.push("脚質（予想）:" + h.style);
+        if (h.gate <= 0.2) keys.push("枠:内枠"); if (h.gate >= 0.8) keys.push("枠:外枠");
+        if (Math.max(h.pm, 1e-5) / sm >= h.pk / s * 1.3) keys.push("モデル:市場の1.3倍以上の評価");
+        if (r.going && r.going !== "良") keys.push("馬場:稍重〜不良");
+        if (h.early != null && h.early <= 0.25) keys.push("結果:前に行った（レース前には使えない）");
+        if (h.early != null && h.early >= 0.55) keys.push("結果:後方から（レース前には使えない）");
+        // モデルの点数で一番足を引っ張った要素（＝AIが低く評価した主な理由）
+        let worst = null, wv = 0; dev.forEach((v, j) => { if (v < wv){ wv = v; worst = FEATS[j]; } });
+        rows.push({ date: r.date, hit: h.pos <= 3, e: t3[i], keys, worst, under: Math.max(h.pm, 1e-5) / sm < h.pk / s });
       });
     });
-    const capStat = arr => { if (!arr.length) return null; const at = k => arr.filter(x => x.rank <= k).length; const exp = k => arr.reduce((s, x) => s + Math.min(1, k / x.of), 0);
-      return { n: arr.length, meanRank: +(arr.reduce((s, x) => s + x.rank, 0) / arr.length).toFixed(1), meanOf: +(arr.reduce((s, x) => s + x.of, 0) / arr.length).toFixed(1),
-        at: [3, 5, 10, 20].map(k => ({ k, hit: at(k), rate: +(at(k) / arr.length).toFixed(3), random: +(exp(k) / arr.length).toFixed(3) })) }; };
-    const fin = o => ({ n: o.n, winRate: o.n ? +(o.win / o.n).toFixed(4) : null, top3Rate: o.n ? +(o.top3 / o.n).toFixed(4) : null, winROI: o.n ? +(o.ret / o.n).toFixed(3) : null });
-    return { ok: true, races: R.length, trainRaces: train.length, testRaces: test.length, cut, calib: { a: +a.toFixed(3), b: +b.toFixed(3) },
-      bands: BANDS.map(k => ({ band: k, all: fin(T[k]), rec: fin(T[k].rec), mark: fin(T[k].mark) })),
-      calibration: cal.filter(c => c.n).map(c => ({ range: `${Math.round(c.lo * 100)}〜${Math.round(Math.min(c.hi, 1) * 100)}%`, n: c.n, pred: +(c.p / c.n).toFixed(4), market: +(c.pk / c.n).toFixed(4), actual: +(c.win / c.n).toFixed(4) })),
-      ev: evs.filter(e => e.n).map(e => ({ range: `${e.lo}〜${e.hi >= 99 ? "" : e.hi}`, n: e.n, winRate: +(e.win / e.n).toFixed(4), roi: +(e.ret / e.n).toFixed(3) })),
-      capture: { pop4: capStat(cap[4]), pop10: capStat(cap[10]) } };
+    if (rows.length < 50) return null;
+    const dates = rows.map(x => x.date).sort(), mid = dates[Math.floor(dates.length / 2)];
+    const hits = rows.filter(x => x.hit), non = rows.filter(x => !x.hit);
+    const ratio = sub => { const h = sub.filter(x => x.hit).length, e = sub.reduce((a, x) => a + x.e, 0); return e > 0 ? h / e : 1; };
+    const r0 = ratio(rows), r1 = ratio(rows.filter(x => x.date < mid)), r2 = ratio(rows.filter(x => x.date >= mid));
+    const all = {}; rows.forEach(x => x.keys.forEach(k => (all[k] ||= []).push(x)));
+    const items = Object.entries(all).map(([k, xs]) => {
+      const hit = xs.filter(x => x.hit).length, exp = xs.reduce((a, x) => a + x.e, 0) * r0, v = xs.reduce((a, x) => a + x.e * r0 * (1 - Math.min(0.99, x.e * r0)), 0);
+      const half = (sub, rr) => { const h = sub.filter(x => x.hit).length, e = sub.reduce((a, x) => a + x.e, 0) * rr; return e > 0 ? +(h / e).toFixed(2) : null; };
+      const l1 = half(xs.filter(x => x.date < mid), r1), l2 = half(xs.filter(x => x.date >= mid), r2);
+      const z = v > 0 ? (hit - exp) / Math.sqrt(v) : 0;
+      const same = l1 != null && l2 != null && ((l1 > 1 && l2 > 1) || (l1 < 1 && l2 < 1));
+      return { k, n: xs.length, hit, inHit: +(hit / Math.max(1, hits.length)).toFixed(3), inNon: +((xs.length - hit) / Math.max(1, non.length)).toFixed(3),
+        lift: +((hit + 1) / (exp + 1)).toFixed(2), z: +z.toFixed(2), h1: l1, h2: l2,
+        verdict: Math.abs(z) >= 3.3 && same ? "偶然でない可能性が高い" : Math.abs(z) >= 2 && same ? "候補（データを増やして要確認）" : "偶然と区別できない" };
+    }).filter(x => x.n >= 20).sort((a, b) => b.z - a.z);
+    const reasons = {}; rows.forEach(x => { if (!x.worst) return; const o = (reasons[x.worst] ||= { hit: 0, non: 0 }); x.hit ? o.hit++ : o.non++; });
+    return { lo, hi, n: rows.length, hits: hits.length, top3Rate: +(hits.length / rows.length).toFixed(4), marketRatio: +r0.toFixed(3), mid,
+      underHit: +(hits.filter(x => x.under).length / Math.max(1, hits.length)).toFixed(3), underNon: +(non.filter(x => x.under).length / Math.max(1, non.length)).toFixed(3),
+      reasons: Object.entries(reasons).map(([k, o]) => ({ k, hit: o.hit, hitShare: +(o.hit / Math.max(1, hits.length)).toFixed(3), nonShare: +(o.non / Math.max(1, non.length)).toFixed(3) })).sort((a, b) => b.hit - a.hit),
+      items };
+  }
+  // ===== 位置取り（脚質）の検証：「前に行く穴馬」をレース前に当てられるか、それはオッズ以上に来るか =====
+  // 実際の位置は結果なので予想には使えない。使えるのは、レース前の材料から「前に行く」と予想できた分だけ。
+  const STYLE4 = ["逃げ", "先行", "差し", "追込"];
+  const posClass = x => x == null ? null : x <= 0.001 ? "逃げ" : x < 0.35 ? "先行" : x < 0.68 ? "差し" : "追込";
+  function aucOf(sc, y){
+    const idx = sc.map((s, i) => [s, y[i]]).sort((a, b) => a[0] - b[0]);
+    let r = 0, k = 0, np = 0, nn = 0;
+    while (k < idx.length){ let j = k; while (j < idx.length && idx[j][0] === idx[k][0]) j++; const avgRank = (k + j + 1) / 2;
+      for (let t = k; t < j; t++){ if (idx[t][1]){ r += avgRank; np++; } else nn++; } k = j; }
+    return np && nn ? (r - np * (np + 1) / 2) / (np * nn) : null;
+  }
+  // 人気薄の行（1頭ずつ）：3着内の実績と、オッズから見た3着内の期待（Harville）
+  function posRows(R){
+    const out = [];
+    R.forEach(r => {
+      const H = r.h.filter(h => h.pos && h.pk > 0); if (H.length < 5) return;
+      const s = H.reduce((a, h) => a + h.pk, 0), t3 = top3FromMarket(H.map(h => h.pk / s));
+      const eps = H.map(h => h.pp?.[4] > 0 ? h.pp[0] : null), withEp = eps.filter(x => x != null).sort((a, b) => a - b);
+      H.forEach((h, i) => {
+        const ep = eps[i];
+        const rel = ep != null && withEp.length > 1 ? withEp.indexOf(ep) / (withEp.length - 1) : null;   // このメンバーの中で、普段どれだけ前に行く馬か（0＝一番前）
+        out.push({ date: r.date, pop: h.pop || 99, hit: h.pos <= 3, e: t3[i], style: h.style, early: h.early, c1: h.c1, has: h.pp?.[4] > 0, pp: h.pp, dd: h.dd, gate: h.gate,
+          nf: r.nf, nn: r.nn, N: H.length, wet: r.going && r.going !== "良" ? 1 : 0, rel });
+      });
+    });
+    return out;
+  }
+  const posX = x => [x.pp[0], x.pp[1] ?? x.pp[0], x.pp[2] ?? x.pp[0], x.pp[3] ?? x.pp[0], x.rel ?? 0.5, x.gate, Math.max(-2, Math.min(2, (x.dd || 0) / 400)), (x.nf || 0) / x.N, x.nn || 0, x.wet, Math.min(5, x.pp[4]) / 5];
+  const POS_NAMES = ["普段の1角の位置（平均）", "前走の1角の位置", "近3走の1角の位置", "前走の4角の位置", "メンバー内で普段どれだけ前か", "枠（内0〜外1）", "距離の増減", "先行馬の割合", "逃げ馬の頭数", "道悪", "通過順のある出走数"];
+  // オッズの期待に対する倍率（期間ごとのくせ r0 で割る）
+  const liftOf = (sub, r0) => { const hit = sub.filter(x => x.hit).length, e = sub.reduce((a, x) => a + x.e, 0) * r0, v = sub.reduce((a, x) => a + x.e * r0 * (1 - Math.min(0.99, x.e * r0)), 0);
+    return { n: sub.length, hit, exp: +e.toFixed(1), lift: +((hit + 1) / (e + 1)).toFixed(2), z: v > 0 ? +((hit - e) / Math.sqrt(v)).toFixed(2) : null }; };
+  const r0Of = sub => { const h = sub.filter(x => x.hit).length, e = sub.reduce((a, x) => a + x.e, 0); return e > 0 ? h / e : 1; };
+  function positionReport(R, ranges, lo = 10){
+    const rows = posRows(R);
+    const L = rows.filter(x => x.pop >= lo);
+    const inR = (x, g) => x.date >= g.from && x.date <= g.to;
+    const verdict = (all, per) => { const ls = per.filter(p => p && p.n >= 15).map(p => p.lift); const same = ls.length >= 3 && (ls.every(v => v > 1) || ls.every(v => v < 1));
+      return all.z != null && Math.abs(all.z) >= 2 && same ? "全期間で同じ向き・偶然でない" : all.z != null && Math.abs(all.z) >= 2 ? "偶然でないが期間で向きがばらつく" : "偶然と区別できない"; };
+    const byFold = (pred) => ranges.map(g => { const F = L.filter(x => inR(x, g)); const S = F.filter(pred); return S.length ? liftOf(S, r0Of(F)) : null; });
+    const testL = L.filter(x => ranges.some(g => inR(x, g)));
+    const r0T = r0Of(testL);
+    const row = (label, pred, note) => { const S = testL.filter(pred), all = liftOf(S, r0T), per = byFold(pred); return { label, note: note || "", ...all, per: per.map(p => p ? p.lift : null), verdict: verdict(all, per) }; };
+    // ① 予想した脚質と実際の位置（1角）の一致
+    const conf = (sub) => { const m = {}; STYLE4.forEach(a => { m[a] = {}; STYLE4.forEach(b => m[a][b] = 0); });
+      let n = 0, ok = 0; sub.forEach(x => { const a = x.style, b = posClass(x.c1 ?? x.early ?? null); if (!m[a] || !b) return; m[a][b]++; n++; if (a === b) ok++; });
+      return n ? { n, agree: +(ok / n).toFixed(3), m } : null; };
+    // 1角の位置がある記録（新しい版）はそれで、ない記録（前の版）は2角付近の位置で比べる。新しい版では出走歴のない馬（脚質の根拠なし）は除く
+    const anyC1 = rows.some(x => x.c1 != null);
+    const allWith = anyC1 ? rows.filter(x => x.has && x.c1 != null) : rows.filter(x => x.early != null);
+    // ③ 予想した脚質ごとの人気薄の成績（全期間・期間別）。予想脚質は前の版の記録にもあるので今すぐ出せる
+    const byStyle = STYLE4.map(st => row("予想脚質:" + st, x => x.style === st));
+    // ⑥⑦ 実際に前に行った人気薄（結果。予想には使えない）の期間別
+    const actualFront = [row("結果:前に行った（2角付近で前1/4）", x => x.early != null && x.early <= 0.25, "結果なので予想には使えない"),
+      row("結果:1角で前1/4", x => x.c1 != null && x.c1 <= 0.25, "結果なので予想には使えない")];
+    // ⑤ 単独の材料（区切りごと）。材料がそろった記録だけ
+    const P = testL.filter(x => x.has);
+    const single = P.length >= 300 ? [
+      row("前走の1角：前1/4", x => x.pp[1] != null && x.pp[1] <= 0.25), row("前走の1角：後ろ半分", x => x.pp[1] != null && x.pp[1] >= 0.5),
+      row("前走の4角：前1/4", x => x.pp[3] != null && x.pp[3] <= 0.25),
+      row("メンバー内で一番前に行く馬", x => x.rel === 0), row("メンバー内で前1/4", x => x.rel != null && x.rel <= 0.25),
+      row("距離短縮（200m以上）", x => x.dd != null && x.dd <= -200), row("距離延長（200m以上）", x => x.dd != null && x.dd >= 200),
+      row("先行馬が少ない（2割未満）", x => x.has && x.nf / x.N < 0.2), row("先行馬が多い（4割以上）", x => x.has && x.nf / x.N >= 0.4),
+      row("逃げ馬がいない", x => x.has && x.nn === 0),
+      row("内枠（前2割）×普段前1/3", x => x.gate <= 0.2 && x.pp[0] < 0.35), row("前走後ろ半分→普段は前1/3（脚質が戻る）", x => x.pp[1] != null && x.pp[1] >= 0.5 && x.pp[0] < 0.35),
+      row("道悪×普段前1/3", x => x.wet && x.pp[0] < 0.35)
+    ].filter(x => x.n >= 20) : null;
+    // ④⑤ 組み合わせ：「前に行くか」を材料から学習（ウォークフォワード）→ 前に行くと予想した人気薄はオッズ以上に来るか
+    let model = null;
+    const D = rows.filter(x => x.has && x.c1 != null);
+    if (D.length >= 3000){
+      const pred = new Map(); const aucs = [];
+      ranges.forEach(g => {
+        const tr = D.filter(x => x.date < g.from), te = D.filter(x => inR(x, g)); if (tr.length < 1500 || !te.length) return;
+        const m = lsLogit(tr.map(posX), tr.map(() => 0), tr.map(x => x.c1 <= 0.25 ? 1 : 0), 10);
+        const ps = te.map(x => lsPredRow(m, posX(x), 0)); te.forEach((x, i) => pred.set(x, ps[i]));
+        aucs.push({ from: g.from, to: g.to, n: te.length, auc: +aucOf(ps, te.map(x => x.c1 <= 0.25 ? 1 : 0)).toFixed(3), base: +aucOf(te.map(x => -x.pp[0]), te.map(x => x.c1 <= 0.25 ? 1 : 0)).toFixed(3) });
+      });
+      if (aucs.length){
+        const tested = D.filter(x => pred.has(x)), y = tested.map(x => x.c1 <= 0.25 ? 1 : 0);
+        const lastM = lsLogit(D.map(posX), D.map(() => 0), D.map(x => x.c1 <= 0.25 ? 1 : 0), 10);
+        const pf = x => pred.get(x);
+        const has = x => pred.has(x);
+        model = { n: tested.length, auc: +aucOf(tested.map(pf), y).toFixed(3), base: +aucOf(tested.map(x => -x.pp[0]), y).toFixed(3), folds: aucs,
+          coef: POS_NAMES.map((k, j) => [k, +lastM.b[j + 1].toFixed(2)]).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])),
+          bins: [[0, 0.15], [0.15, 0.3], [0.3, 0.5], [0.5, 1.01]].map(([a, b]) => { const pr = x => has(x) && x.pop >= lo && pf(x) >= a && pf(x) < b; const S = D.filter(pr);
+            return { ...row(`前に行く確率 ${Math.round(a * 100)}〜${Math.round(Math.min(b, 1) * 100)}%`, x => x.has && x.c1 != null && pr(x)), front: S.length ? +(S.filter(x => x.c1 <= 0.25).length / S.length).toFixed(3) : null }; }),
+          advance: row("前走は後ろ半分だったが、今回は前に行く確率30%以上", x => x.has && x.c1 != null && has(x) && x.pop >= lo && x.pp[1] != null && x.pp[1] >= 0.5 && pf(x) >= 0.3) };
+      }
+    }
+    return { lo, confBasis: anyC1 ? "1角" : "2角付近（前の版の記録）", nAll: L.length, nPP: P.length, recsPP: R.filter(r => r.h.some(h => h.pp)).length,
+      confAll: conf(allWith), confHit: conf(allWith.filter(x => x.pop >= lo && x.hit)), confLong: conf(allWith.filter(x => x.pop >= lo)),
+      byStyle, actualFront, single, model, periods: ranges.map(g => `${g.from}〜${g.to}`) };
+  }
+
+  async function report(recs, opt = {}){
+    const folds = opt.folds || 5, initFrac = opt.initFrac ?? 0.4;
+    const R = recs.filter(r => r.h?.length >= 5 && r.order?.length).slice().sort((a, b) => (a.date + a.id).localeCompare(b.date + b.id));
+    if (R.length < 100) return { ok: false, n: R.length };
+    const dates = [...new Set(R.map(r => r.date))];
+    const testDates = dates.slice(Math.max(1, Math.floor(dates.length * initFrac)));
+    const per = Math.ceil(testDates.length / folds);
+    const testAll = R.filter(r => r.date >= testDates[0]), cleanTest = testAll.filter(clean).length;
+    // 検証に使う記録：作り直し済み（未来の情報なしと確認できる）記録が200レース以上あれば、それだけで測る
+    const strict = opt.strict ?? cleanTest >= 200;
+    const A = newAcc(), foldRows = [], ranges = [];
+    for (let f = 0; f < folds; f++){
+      const fd = testDates.slice(f * per, (f + 1) * per); if (!fd.length) continue;
+      const from = fd[0], to = fd[fd.length - 1];
+      ranges.push({ from, to });
+      const train = R.filter(r => r.date < from), test = R.filter(r => r.date >= from && r.date <= to && (!strict || clean(r)));
+      if (!test.length) continue;
+      const th = fit(train), a = th[0], b = th[1];
+      const F = newAcc(); test.forEach(r => { evalRace(r, a, b, F); evalRace(r, a, b, A); });
+      const fr = finAcc(F), t11 = fr.thresholds.find(t => t.t === 1.1);
+      foldRows.push({ from, to, train: train.length, test: F.races, a: +a.toFixed(3), b: +b.toFixed(3), ll: fr.ll, bets11: t11.n, roi11: t11.roi ?? null,
+        cap4: fr.capture.pop4?.at[0] || null, cap10: fr.capture.pop10?.at[0] || null });
+      await new Promise(res => setTimeout(res, 0));     // 画面を固めない
+    }
+    return { ok: true, total: R.length, from: testDates[0], strict, cleanTest, testAll: testAll.length, cleanAll: R.filter(clean).length,
+      ...finAcc(A), folds: foldRows, factors: { pop10: factorStats(R, 10, 99), pop4: factorStats(R, 4, 9) }, position: positionReport(R, ranges, 10) };
   }
 
   // ===== 穴馬モデル：人気薄（6番人気以下・15倍以上）だけを対象に、「オッズが見落としている分」を直接学習する =====
@@ -472,6 +711,6 @@ const Learn = (() => {
     return out;
   }
 
-  return { RV, report, lsFit, lsPredict, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
+  return { RV, report, clean, posFill, lsFit, lsPredict, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
 })();
 if (typeof module !== "undefined") module.exports = Learn;

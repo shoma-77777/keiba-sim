@@ -164,6 +164,15 @@ def day_data(ymd):
     return {"date": date, "races": [r for r in j["races"] if r.get("entries")], "horses": horses}
 
 
+def unmark(dates):
+    """前の版で作った記録を作り直すため、指定した開催日を「予想・学習がまだ」に戻す（取得したデータはそのまま）"""
+    pr = load_prog(); p = pr.setdefault("processed", {}); n = 0
+    for d in dates or []:
+        d = "".join(ch for ch in str(d) if ch.isdigit())[:8]
+        if d in p: del p[d]; n += 1
+    save_prog(pr); return n
+
+
 def mark_processed(ymd, payload):
     pr = load_prog(); pr.setdefault("processed", {})[ymd] = payload; save_prog(pr)
 
