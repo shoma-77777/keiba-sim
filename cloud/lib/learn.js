@@ -231,11 +231,45 @@ const Learn = (() => {
     return L;
   }
 
-  function fit(recs){
-    const K = FEATS.length, th = new Float64Array(2 + K); th[0] = PRIOR.a; th[1] = PRIOR.b;
+  // 統合の比率 a, b と要素の補正 c を、上位3着の尤度が最大になるように推定する。
+  // 目的関数は凸（Plackett–Luce＋正規分布の事前分布）なので、ニュートン法で数回の反復で最適解に着く（前の方法より約10倍速い）。
+  // 制約（0≦a,b≦1.5、a+b≧1）に当たったときだけ、前と同じ方法（制約つきの勾配法）で仕上げる。
+  function nllHess(recs, th, g, Hm){
+    const K = FEATS.length, D = 2 + K; let L = 0;
+    g.fill(0); Hm.fill(0);
+    const mu = new Float64Array(D);
+    for (const r of recs){
+      if (r.h.length < 2 || !r.order?.length) continue;
+      const { n, X, idx } = prep(r);
+      const u = new Float64Array(n);
+      for (let i = 0; i < n; i++){ let s2 = 0; for (let j = 0; j < D; j++) s2 += th[j] * X[i * D + j]; u[i] = s2; }
+      const used = new Uint8Array(n), e = new Float64Array(n);
+      for (let st = 0; st < idx.length; st++){
+        const wi = idx[st], lam = LAM[st];
+        let mx = -1e9; for (let i = 0; i < n; i++) if (!used[i]) mx = Math.max(mx, lam * u[i]);
+        let Z = 0; for (let i = 0; i < n; i++){ e[i] = used[i] ? 0 : Math.exp(lam * u[i] - mx); Z += e[i]; }
+        L -= lam * u[wi] - mx - Math.log(Z);
+        mu.fill(0);
+        for (let i = 0; i < n; i++) if (e[i] > 0){ const p = e[i] / Z; for (let j = 0; j < D; j++) mu[j] += p * X[i * D + j]; }
+        for (let j = 0; j < D; j++) g[j] += lam * (mu[j] - X[wi * D + j]);
+        const l2 = lam * lam;
+        for (let i = 0; i < n; i++) if (e[i] > 0){ const p = e[i] / Z;
+          for (let j = 0; j < D; j++){ const dj = X[i * D + j] - mu[j]; if (dj === 0) continue; const pj = l2 * p * dj; for (let k = j; k < D; k++) Hm[j * D + k] += pj * (X[i * D + k] - mu[k]); } }
+        used[wi] = 1;
+      }
+    }
+    const pr = [[th[0] - PRIOR.a, PRIOR.sa], [th[1] - PRIOR.b, PRIOR.sb]];
+    pr.forEach(([d, s2], j) => { L += d * d / (2 * s2 * s2); g[j] += d / (s2 * s2); Hm[j * D + j] += 1 / (s2 * s2); });
+    for (let k = 0; k < K; k++){ const d = th[2 + k]; L += d * d / (2 * PRIOR.sc ** 2); g[2 + k] += d / PRIOR.sc ** 2; Hm[(2 + k) * D + 2 + k] += 1 / PRIOR.sc ** 2; }
+    for (let j = 0; j < D; j++) for (let k = 0; k < j; k++) Hm[j * D + k] = Hm[k * D + j];
+    return L;
+  }
+  const feasible = th => th[0] >= 0 && th[0] <= 1.5 && th[1] >= 0 && th[1] <= 1.5 && th[0] + th[1] >= AB_MIN - 1e-9;
+  function fitAdam(recs, th, iters){
+    const K = FEATS.length;
     const g = new Float64Array(2 + K), m = new Float64Array(2 + K), v = new Float64Array(2 + K);
     const lr = 0.02;
-    for (let t = 1; t <= 600; t++){
+    for (let t = 1; t <= iters; t++){
       nll(recs, th, g);
       for (let j = 0; j < th.length; j++){
         m[j] = 0.9 * m[j] + 0.1 * g[j]; v[j] = 0.999 * v[j] + 0.001 * g[j] * g[j];
@@ -243,6 +277,34 @@ const Learn = (() => {
       }
       th[0] = clamp(th[0], 0, 1.5); th[1] = clamp(th[1], 0, 1.5);
       if (th[0] + th[1] < AB_MIN){ const d = (AB_MIN - th[0] - th[1]) / 2; th[0] += d; th[1] += d; }
+    }
+    return th;
+  }
+  function fit(recs){
+    const K = FEATS.length, D = 2 + K, th = new Float64Array(D); th[0] = PRIOR.a; th[1] = PRIOR.b;
+    const g = new Float64Array(D), Hm = new Float64Array(D * D), tmp = new Float64Array(D);
+    let L = nllHess(recs, th, g, Hm);
+    for (let it = 0; it < 40; it++){
+      const H2 = Array.from({ length: D }, (_, j) => Array.from(Hm.subarray(j * D, j * D + D)));
+      const step = solve(H2, Array.from(g, x => -x));
+      if (!step.every(isFinite)) break;
+      let t = 1, ok = false;
+      for (let ls = 0; ls < 20; ls++){
+        for (let j = 0; j < D; j++) tmp[j] = th[j] + t * step[j];
+        const L2 = nll(recs, tmp, null);
+        if (L2 <= L + 1e-10){ ok = true; break; } t /= 2;
+      }
+      if (!ok) break;
+      th.set(tmp);
+      const mx = Math.max(...step.map(Math.abs)) * t;
+      L = nllHess(recs, th, g, Hm);
+      if (mx < 1e-7) break;
+    }
+    if (!feasible(th)){
+      // 制約に当たるとき：制約の内側へ戻してから、前と同じ方法で仕上げる
+      th[0] = clamp(th[0], 0, 1.5); th[1] = clamp(th[1], 0, 1.5);
+      if (th[0] + th[1] < AB_MIN){ const d = (AB_MIN - th[0] - th[1]) / 2; th[0] += d; th[1] += d; }
+      fitAdam(recs, th, 400);
     }
     return th;
   }
@@ -278,7 +340,8 @@ const Learn = (() => {
   }
 
   // 学習結果をまとめる
-  function build(recs, today){
+  // light：過去データの日ごとのモデル用（予想に要る統合の比率・要素の重み・穴パターンの加点だけ作る）
+  function build(recs, today, opt = {}){
     const th = fit(recs);
     const K = FEATS.length;
     const sens = recs.length ? recs.reduce((a, r) => a + (r.sens || 0.4), 0) / recs.length : 0.4;
@@ -294,20 +357,20 @@ const Learn = (() => {
       if (Math.abs(mult - 1) >= 0.02) weights[k] = +mult.toFixed(3);
     });
     const a = th[0], b = th[1];
+    const us = upsetStats(recs);
+    const base = { version: 2, updated: new Date().toISOString(), races: recs.length, upto: recs.reduce((m, r) => r.date > m ? r.date : m, "0000-00-00"),
+      calib: { a: +a.toFixed(3), b: +b.toFixed(3) }, weights, featCoef: Object.fromEntries(FEATS.map((k, j) => [k, +th[2 + j].toFixed(4)])), sens: +sens.toFixed(3), anaWeights: anaWeights(us) };
+    if (opt.light) return { ...base, light: true };
     const byDate = {};
     recs.forEach(r => (byDate[r.date] ||= []).push(r));
     const hist = Object.keys(byDate).sort().map(d => ({ date: d, races: byDate[d].length,
       model: +logloss(byDate[d], h => h.pm).toFixed(3), market: +logloss(byDate[d], h => h.pk).toFixed(3),
       blend: +logloss(byDate[d], h => Math.pow(h.pm, a) * Math.pow(h.pk, b)).toFixed(3) }));
-    return {
-      version: 2, updated: new Date().toISOString(), races: recs.length, upto: recs.reduce((m, r) => r.date > m ? r.date : m, "0000-00-00"),
-      calib: { a: +a.toFixed(3), b: +b.toFixed(3) },
-      weights, featCoef: Object.fromEntries(FEATS.map((k, j) => [k, +th[2 + j].toFixed(4)])),
+    return { ...base,
       metrics: { model: logloss(recs, h => h.pm), market: logloss(recs, h => h.pk), blend: logloss(recs, h => Math.pow(h.pm, a) * Math.pow(h.pk, b)) },
-      hist, bias: bias(recs, today || new Date().toISOString().slice(0, 10)), sens: +sens.toFixed(3),
-      upsets: recs.slice(-400).flatMap(analyzeUpsets).slice(-60), upsetStats: (() => { const us = upsetStats(recs); return { ...us, factors: us.factors.slice(0, 16) }; })(),
-      anaWeights: anaWeights(upsetStats(recs)), paper: paperStats(recs), longshot: lsFit(recs)
-    };
+      hist, bias: bias(recs, today || new Date().toISOString().slice(0, 10)),
+      upsets: recs.slice(-400).flatMap(analyzeUpsets).slice(-60), upsetStats: { ...us, factors: us.factors.slice(0, 16) },
+      paper: paperStats(recs) };
   }
 
   function merge(oldRecs, newRecs){
@@ -713,6 +776,140 @@ const Learn = (() => {
     return { ready: true, n: rows.length, conditions: COMBO_C.length, combos: combos.length, scopes, wf };
   }
 
+  // ===== 購入ルールの選び方そのものを確かめる（単勝・100円均等） =====
+  // ルール＝人気帯×オッズ帯×期待値の下限（180通り）。各期間について「それより前の期間だけ」で一番良かったルール
+  // （回収率の95%範囲の下限が最も高いもの・200点以上）を選び、その期間に実際に買ったらどうなったかを測る。
+  // 選んだルールをそのまま未来に持っていった成績だけが、実戦で期待できる回収率に近い。
+  function strategyReport(R, ranges, folds){
+    if (!folds.length) return null;
+    const POP = [[1, 3], [4, 7], [8, 12], [13, 99], [4, 99], [1, 99]], ODD = [[1, 5], [5, 10], [10, 20], [20, 50], [50, 9999], [1, 9999]], EVT = [0, 0.8, 0.9, 1.0, 1.1];
+    const rules = []; POP.forEach(p => ODD.forEach(o => EVT.forEach(t => rules.push({ p, o, t }))));
+    const rlabel = r => `${r.p[0] === 1 && r.p[1] === 99 ? "全人気" : r.p[1] === 99 ? `${r.p[0]}番人気以下` : `${r.p[0]}〜${r.p[1]}番人気`}・${r.o[0] === 1 && r.o[1] === 9999 ? "全オッズ" : r.o[1] === 9999 ? `${r.o[0]}倍以上` : `${r.o[0]}〜${r.o[1]}倍`}・期待値${r.t ? r.t + "以上" : "問わず"}`;
+    // 1頭ずつ：期待値は、そのレースを検証した期間の統合比率（最初の土台期間は最初の期間の比率）で計算
+    const abOf = d => { const f = folds.find(x => d >= x.from && d <= x.to); return f || folds[0]; };
+    const bets = [];
+    R.forEach(r => { const H = r.h.filter(h => h.pos != null && h.odds > 1); if (H.length < 5) return; const { a, b } = abOf(r.date);
+      const sk = H.reduce((x, h) => x + h.pk, 0), sm = H.reduce((x, h) => x + Math.max(h.pm, 1e-5), 0);
+      const q = H.map(h => Math.pow(Math.max(h.pm, 1e-5) / sm, a) * Math.pow(h.pk / sk, b)), sq = q.reduce((x, y) => x + y, 0);
+      H.forEach((h, i) => bets.push({ date: r.date, id: r.id, pop: h.pop || 99, odds: h.odds, ev: q[i] / sq * h.odds, ret: h.pos === 1 ? h.odds : 0 })); });
+    const match = (r, x) => x.pop >= r.p[0] && x.pop <= r.p[1] && x.odds >= r.o[0] && x.odds < r.o[1] && x.ev >= r.t;
+    const stat = xs => { const n = xs.length; if (!n) return { n: 0 }; const m = xs.reduce((s, x) => s + x.ret, 0) / n, v = xs.reduce((s, x) => s + (x.ret - m) ** 2, 0) / Math.max(1, n - 1), se = Math.sqrt(v / n);
+      let bal = 0, peak = 0, dd = 0; xs.forEach(x => { bal += (x.ret - 1) * 100; peak = Math.max(peak, bal); dd = Math.max(dd, peak - bal); });
+      return { n, roi: +m.toFixed(3), lo95: +Math.max(0, m - 1.96 * se).toFixed(3), hi95: +(m + 1.96 * se).toFixed(3), profit: Math.round(bal), maxDD: Math.round(dd) }; };
+    const out = [], picked = [];
+    ranges.forEach(g => {
+      const tr = bets.filter(x => x.date < g.from), te = bets.filter(x => x.date >= g.from && x.date <= g.to); if (!te.length) return;
+      let best = null; rules.forEach(r => { const s = stat(tr.filter(x => match(r, x))); if (s.n >= 200 && (!best || s.lo95 > best.s.lo95)) best = { r, s }; });
+      if (!best) return;
+      const got = te.filter(x => match(best.r, x)); picked.push(...got);
+      out.push({ from: g.from, to: g.to, rule: rlabel(best.r), trainROI: best.s.roi, trainN: best.s.n, ...stat(got) });
+    });
+    // 参考：検証期間全体で後から一番良かったルール（＝後知恵。実戦ではこれは選べない）
+    const testAll = bets.filter(x => x.date >= ranges[0].from);
+    let hind = null; rules.forEach(r => { const s = stat(testAll.filter(x => match(r, x))); if (s.n >= 200 && (!hind || s.roi > hind.s.roi)) hind = { r, s }; });
+    const all = stat(picked.sort((x, y) => (x.date + x.id).localeCompare(y.date + y.id)));
+    const lock = out[out.length - 1] || null;
+    return { rules: rules.length, folds: out, total: all, allPositive: out.length > 0 && out.every(f => f.n && f.roi >= 1), lock,
+      hindsight: hind ? { rule: rlabel(hind.r), ...hind.s } : null, base: stat(testAll) };
+  }
+
+  // ===== 券種ごとのずれ（クロスプール）：単勝オッズから計算した各券種の確率 × その券種の実際のオッズ =====
+  // 単勝の売上はいちばん大きく情報が集まるので、単勝オッズから「複勝・ワイド・馬連・馬単・3連複が当たる確率」を計算し、
+  // それぞれの券種のオッズと比べて、売れすぎ／売れなさすぎ（期待値が1を超える目）があるかを確かめる（Hausch–Ziembaの方法）。
+  // 確率は p ∝ (単勝オッズの逆数)^β（1着・2着・3着で別のβ。ベンターの方法）。βは各期間それより前のレースだけで決める。
+  const CT = ["単勝", "複勝", "ワイド", "馬連", "馬単", "三連複"];
+  const pairIdx = (i, j, n) => i * n + j;                       // 順序あり（馬単）・なし（i<j）共通の番号
+  const comb3 = (i, j, k) => k * (k - 1) * (k - 2) / 6 + j * (j - 1) / 2 + i;   // i<j<k の3頭の組の番号（メモリを使わない並べ方）
+  function crossCompact(r){
+    const res = r.result; if (!res?.pay || !r.comboOdds || !r.entries?.length) return null;
+    const rows = (res.rows || []).filter(x => /^\d+$/.test(String(x.pos)));
+    const E = r.entries.filter(e => e.odds > 1 && rows.some(x => x.num === e.num));
+    if (E.length < 5) return null;
+    const n = E.length, nums = E.map(e => e.num), at = {}; nums.forEach((m, i) => at[m] = i);
+    const order = (res.order || rows.slice().sort((a, b) => a.pos - b.pos).map(x => x.num)).slice(0, 3).map(m => at[m]);
+    if (order.length < 3 || order.some(i => i == null)) return null;
+    const C = r.comboOdds, P2 = new Float32Array(n * n), W2 = new Float32Array(n * n), U2 = new Float32Array(n * n), T3 = new Float32Array(n * (n - 1) * (n - 2) / 6);
+    const parse = k => k.split("-").map(m => at[+m]);
+    Object.entries(C.馬連 || {}).forEach(([k, v]) => { const [i, j] = parse(k); if (i != null && j != null) P2[pairIdx(Math.min(i, j), Math.max(i, j), n)] = v; });
+    Object.entries(C.ワイド || {}).forEach(([k, v]) => { const [i, j] = parse(k); if (i != null && j != null) W2[pairIdx(Math.min(i, j), Math.max(i, j), n)] = Array.isArray(v) ? v[0] : v; });
+    Object.entries(C.馬単 || {}).forEach(([k, v]) => { const [i, j] = parse(k); if (i != null && j != null) U2[pairIdx(i, j, n)] = v; });
+    Object.entries(C.三連複 || {}).forEach(([k, v]) => { const t = parse(k); if (t.every(x => x != null)){ t.sort((a, b) => a - b); T3[comb3(t[0], t[1], t[2])] = v; } });
+    const pay = {}; CT.forEach(t => { pay[t] = {}; Object.entries(res.pay[t] || {}).forEach(([k, v]) => { const t2 = k.split("-").map(m => at[+m]); if (t2.every(x => x != null)) pay[t][(t === "馬単" ? t2 : t2.sort((a, b) => a - b)).join("-")] = v / 100; }); });
+    return { date: r.date, id: r.id, n, odds: Float32Array.from(E, e => e.odds), plo: Float32Array.from(E, e => e.placeLo > 1 ? e.placeLo : 0), order, P2, W2, U2, T3, pay };
+  }
+  // 1着・2着・3着の選ばれ方の鋭さ β を、それぞれ尤度最大で決める（段ごとに独立に解ける）
+  function crossFitBeta(rows){
+    const ll = (st, b) => { let L = 0; rows.forEach(x => { const q = Array.from(x.odds, o => Math.pow(1 / o, b)); let Z = q.reduce((a, c) => a + c, 0); for (let s = 0; s < st; s++) Z -= q[x.order[s]]; L += Math.log(q[x.order[st]] / Z); }); return L; };
+    return [0, 1, 2].map(st => { let lo = 0.2, hi = 2; for (let k = 0; k < 40; k++){ const m1 = lo + (hi - lo) / 3, m2 = hi - (hi - lo) / 3; if (ll(st, m1) > ll(st, m2)) hi = m2; else lo = m1; } return +((lo + hi) / 2).toFixed(3); });
+  }
+  // 1レースの各券種の確率（順序つきの1〜3着を全部たどる）と、買える目の期待値・払戻
+  function crossTickets(x, beta, cb){
+    const n = x.n, q = beta.map(b => Array.from(x.odds, o => Math.pow(1 / o, b))), Z = q.map(a => a.reduce((s, c) => s + c, 0));
+    const p1 = q[0].map(v => v / Z[0]), top3 = new Float64Array(n), win2 = new Float64Array(n * n), in3 = new Float64Array(n * n), tri = new Float64Array(x.T3.length);
+    for (let i = 0; i < n; i++){ const pi = p1[i];
+      for (let j = 0; j < n; j++){ if (j === i) continue; const pj = q[1][j] / (Z[1] - q[1][i]), pij = pi * pj; win2[i * n + j] += pij;
+        for (let k = 0; k < n; k++){ if (k === i || k === j) continue; const pk = q[2][k] / (Z[2] - q[2][i] - q[2][j]), p = pij * pk;
+          top3[i] += p; top3[j] += p; top3[k] += p;
+          const a = Math.min(i, j), b = Math.max(i, j); in3[a * n + b] += p; const c1 = Math.min(i, k), d1 = Math.max(i, k); in3[c1 * n + d1] += p; const c2 = Math.min(j, k), d2 = Math.max(j, k); in3[c2 * n + d2] += p;
+          const s3 = [i, j, k].sort((u, v) => u - v); tri[comb3(s3[0], s3[1], s3[2])] += p; } } }
+    const R = (t, key) => x.pay[t][key] || 0;
+    for (let i = 0; i < n; i++){ cb(0, p1[i], x.odds[i], R("単勝", String(i))); if (x.plo[i] > 1) cb(1, top3[i], x.plo[i], R("複勝", String(i))); }
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++){ const k = `${i}-${j}`;
+      if (x.W2[i * n + j] > 1) cb(2, in3[i * n + j], x.W2[i * n + j], R("ワイド", k));
+      if (x.P2[i * n + j] > 1) cb(3, win2[i * n + j] + win2[j * n + i], x.P2[i * n + j], R("馬連", k)); }
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) if (i !== j && x.U2[i * n + j] > 1) cb(4, win2[i * n + j], x.U2[i * n + j], R("馬単", `${i}-${j}`));
+    for (let k = 2; k < n; k++) for (let j = 1; j < k; j++) for (let i = 0; i < j; i++){ const c = comb3(i, j, k), o = x.T3[c]; if (o > 1) cb(5, tri[c], o, R("三連複", `${i}-${j}-${k}`)); }
+  }
+  async function crossReport(rowsIn, opt = {}){
+    const rows = rowsIn.filter(Boolean).sort((a, b) => (a.date + a.id).localeCompare(b.date + b.id));
+    if (rows.length < 300) return { ready: false, n: rows.length };
+    const dates = [...new Set(rows.map(x => x.date))], testDates = dates.slice(Math.max(1, Math.floor(dates.length * 0.4))), per = Math.ceil(testDates.length / 5);
+    const ranges = []; for (let f = 0; f < 5; f++){ const fd = testDates.slice(f * per, (f + 1) * per); if (fd.length) ranges.push({ from: fd[0], to: fd[fd.length - 1] }); }
+    // 期間ごとのβ（それより前のレースだけで決める）。最初の土台期間のレースは1つ目の期間のβで計算
+    ranges.forEach(g => { g.beta = crossFitBeta(rows.filter(x => x.date < g.from)); });
+    const foldOf = d => ranges.findIndex(g => d >= g.from && d <= g.to);
+    const EVB = [0, 0.8, 1.0, 1.1, 1.3, 1.6, 2, 1e9], THR = [1.0, 1.1, 1.2, 1.3, 1.5, 2.0];
+    const bins = CT.map(() => EVB.slice(0, -1).map(() => ({ n: 0, hit: 0, ret: 0, ret2: 0, p: 0 })));
+    // 期待値0.9以上の目だけ1点ずつ残す（買い方の選び方の確かめ用）
+    const T = { fold: [], type: [], ev: [], ret: [], date: [] };
+    for (let r = 0; r < rows.length; r++){
+      const x = rows[r], f = foldOf(x.date), beta = (ranges[f] || ranges[0]).beta;
+      crossTickets(x, beta, (t, p, o, ret) => { const ev = p * o;
+        if (f >= 0){ const bi = EVB.findIndex((b, i) => ev >= b && ev < EVB[i + 1]); const B = bins[t][bi]; B.n++; B.p += p; if (ret > 0){ B.hit++; B.ret += ret; B.ret2 += ret * ret; } }
+        if (ev >= 0.9){ T.fold.push(f); T.type.push(t); T.ev.push(ev); T.ret.push(ret); T.date.push(r); } });
+      if (r % 200 === 199) await new Promise(res => setTimeout(res, 0));
+    }
+    const statOf = idx => { const n = idx.length; if (!n) return { n: 0 }; let s = 0, s2 = 0, hit = 0, bal = 0, peak = 0, dd = 0, streak = 0, maxStreak = 0;
+      idx.forEach(i => { const v = T.ret[i]; s += v; s2 += v * v; if (v > 0){ hit++; streak = 0; } else maxStreak = Math.max(maxStreak, ++streak); bal += (v - 1) * 100; peak = Math.max(peak, bal); dd = Math.max(dd, peak - bal); });
+      const m = s / n, se = Math.sqrt(Math.max(0, s2 / n - m * m) / n);
+      return { n, roi: +m.toFixed(3), lo95: +Math.max(0, m - 1.96 * se).toFixed(3), hi95: +(m + 1.96 * se).toFixed(3), hitRate: +(hit / n).toFixed(4), profit: Math.round(bal), maxDD: Math.round(dd), maxLose: maxStreak }; };
+    const N = T.ev.length, all = Array.from({ length: N }, (_, i) => i);
+    // 券種ごと：前の期間で一番良かった期待値の下限を選び、次の期間で買う（ウォークフォワード）
+    const wfType = t => { const picked = [], folds = [];
+      ranges.forEach((g, f) => {
+        const tr = all.filter(i => T.type[i] === t && rows[T.date[i]].date < g.from);
+        let best = null; THR.forEach(th => { const s = statOf(tr.filter(i => T.ev[i] >= th)); if (s.n >= 300 && s.roi > 1 && (!best || s.lo95 > best.s.lo95)) best = { th, s }; });
+        if (!best){ folds.push({ from: g.from, th: null, n: 0 }); return; }      // 前の期間でプラスの下限がなければ「買わない」
+        const te = all.filter(i => T.type[i] === t && T.fold[i] === f && T.ev[i] >= best.th); picked.push(...te);
+        folds.push({ from: g.from, th: best.th, trainROI: best.s.roi, ...statOf(te) });
+      });
+      return { total: statOf(picked.sort((a, b) => T.date[a] - T.date[b])), folds }; };
+    const types = CT.map((name, t) => ({ name, bins: bins[t].map((B, i) => ({ range: `${EVB[i]}〜${EVB[i + 1] >= 1e9 ? "" : EVB[i + 1]}`, n: B.n, pred: B.n ? +(B.p / B.n).toFixed(4) : null, hitRate: B.n ? +(B.hit / B.n).toFixed(4) : null,
+      roi: B.n ? +(B.ret / B.n).toFixed(3) : null, lo95: B.n ? +Math.max(0, B.ret / B.n - 1.96 * Math.sqrt(Math.max(0, B.ret2 / B.n - (B.ret / B.n) ** 2) / B.n)).toFixed(3) : null })).filter(b => b.n), wf: wfType(t) }));
+    // 全券種まとめて：各期間、前の期間で回収率の95%下限が一番高かった「券種×期待値の下限」を最大3つ選んで買う
+    const picked = [], folds = [];
+    ranges.forEach((g, f) => {
+      const cands = [];
+      CT.forEach((_, t) => THR.forEach(th => { const s = statOf(all.filter(i => T.type[i] === t && rows[T.date[i]].date < g.from && T.ev[i] >= th)); if (s.n >= 300) cands.push({ t, th, s }); }));
+      const sel = cands.filter(c => c.s.roi > 1).sort((a, b) => b.s.lo95 - a.s.lo95).filter((c, i, A) => A.findIndex(d => d.t === c.t) === i).slice(0, 3);
+      const te = all.filter(i => T.fold[i] === f && sel.some(c => c.t === T.type[i] && T.ev[i] >= c.th)); picked.push(...te);
+      folds.push({ from: g.from, to: g.to, beta: g.beta, rules: sel.map(c => `${CT[c.t]}・期待値${c.th}以上（前の期間 ${Math.round(c.s.roi * 100)}%）`), ...statOf(te) });
+    });
+    const races = rows.filter(x => foldOf(x.date) >= 0).length;
+    return { ready: true, n: rows.length, testRaces: races, from: ranges[0].from, ranges: ranges.map(g => ({ from: g.from, to: g.to, beta: g.beta })), types,
+      combined: { total: statOf(picked.sort((a, b) => T.date[a] - T.date[b])), folds, perRace: races ? +(picked.length / races).toFixed(1) : null } };
+  }
+
   async function report(recs, opt = {}){
     const folds = opt.folds || 5, initFrac = opt.initFrac ?? 0.4;
     const R = recs.filter(r => r.h?.length >= 5 && r.order?.length).slice().sort((a, b) => (a.date + a.id).localeCompare(b.date + b.id));
@@ -738,22 +935,9 @@ const Learn = (() => {
       await new Promise(res => setTimeout(res, 0));     // 画面を固めない
     }
     return { ok: true, total: R.length, from: testDates[0], strict, cleanTest, testAll: testAll.length, cleanAll: R.filter(clean).length,
-      ...finAcc(A), folds: foldRows, factors: { pop10: factorStats(R, 10, 99), pop4: factorStats(R, 4, 9) }, position: positionReport(R, ranges, 10), tempered: temperReport(R, ranges), ability: abilityReport(R, ranges, 10), combo: comboReport(R, ranges, 10) };
+      ...finAcc(A), folds: foldRows, factors: { pop10: factorStats(R, 10, 99), pop4: factorStats(R, 4, 9) }, position: positionReport(R, ranges, 10), tempered: temperReport(R, ranges), ability: abilityReport(R, ranges, 10), combo: comboReport(R, ranges, 10), strategy: strategyReport(R, ranges, foldRows.map(f => ({ from: f.from, to: f.to, a: f.a, b: f.b }))) };
   }
 
-  // ===== 穴馬モデル：人気薄（6番人気以下・15倍以上）だけを対象に、「オッズが見落としている分」を直接学習する =====
-  // 全体の確率の当てやすさでは、人気馬の比重が大きく穴馬の見極めが埋もれてしまうので、穴馬だけを別に学習する。
-  // 目的は回収率：オッズから見た確率に対して、どの特徴を持つ穴馬が「より来る／来ない」かを、1着・3着以内それぞれで推定。
-  // 過去の前半で学習 → 後半で確かめ、オッズだけより当たるようになったときだけ予想に使う（使えないと分かれば自動で止める）。
-  const LS_ANA = Object.keys(ANA_PTS);
-  const LS_STYLES = ["逃げ", "先行", "差し", "追込"];
-  const LS_NAMES = [...FEATS.map(k => "要素:" + k), ...LS_ANA.map(k => "穴:" + k), "枠:内", "枠:外", ...LS_STYLES.map(k => "脚質:" + k), "モデル÷オッズ"];
-  const logitF = p => { const q = Math.min(0.999, Math.max(1e-5, p)); return Math.log(q / (1 - q)); };
-  function lsRow(h){
-    const st = LS_STYLES.map(k => h.style === k ? 1 : 0);
-    return [...FEATS.map((_, j) => h.z?.[j] || 0), ...LS_ANA.map(k => (h.ana || []).includes(k) ? 1 : 0),
-      h.gate <= 0.2 ? 1 : 0, h.gate >= 0.8 ? 1 : 0, ...st, Math.max(-3, Math.min(3, Math.log(Math.max(h.pm, 1e-4) / Math.max(h.pk, 1e-4))))];
-  }
   // 正則化つきロジスティック回帰（オフセット＝オッズから見た確率のlogit。係数は x を標準化した単位）
   function lsLogit(X, off, y, lam){
     const n = X.length, K = X[0].length;
@@ -776,49 +960,7 @@ const Learn = (() => {
     return { b, mu, sd };
   }
   function lsPredRow(m, x, off){ let e = m.b[0] + m.b[m.b.length - 1] * off; x.forEach((v, k) => e += m.b[k + 1] * (v - m.mu[k]) / m.sd[k]); return 1 / (1 + Math.exp(-e)); }
-  function lsData(recs){
-    const out = [];
-    recs.forEach(r => {
-      const H = r.h.filter(h => h.pos && h.pk > 0); if (H.length < 5) return;
-      const s = H.reduce((a, h) => a + h.pk, 0), pk = H.map(h => h.pk / s), t3 = top3FromMarket(pk);
-      H.forEach((h, i) => { if (!isLong(h)) return; out.push({ date: r.date, x: lsRow(h), oW: logitF(pk[i]), o3: logitF(t3[i]), yW: h.pos === 1 ? 1 : 0, y3: h.pos <= 3 ? 1 : 0, odds: h.odds }); });
-    });
-    return out;
-  }
-  function lsFit(recs, lam = 30){
-    const D = lsData(recs);
-    if (D.length < 800) return { enabled: false, n: D.length, reason: "穴馬のデータが800頭未満" };
-    const dates = [...new Set(D.map(d => d.date))].sort(); const cut = dates[Math.floor(dates.length * 0.7)];
-    const tr = D.filter(d => d.date < cut), te = D.filter(d => d.date >= cut);
-    const ll = (ps, ys) => -ps.reduce((a, p, i) => a + (ys[i] ? Math.log(p) : Math.log(1 - p)), 0) / ps.length;
-    const evalOne = (key, offKey) => {
-      const m = lsLogit(tr.map(d => d.x), tr.map(d => d[offKey]), tr.map(d => d[key]), lam);
-      const base = lsLogit(tr.map(() => []), tr.map(d => d[offKey]), tr.map(d => d[key]), lam);   // オッズだけ（くせの補正のみ）
-      const p = te.map(d => lsPredRow(m, d.x, d[offKey])), p0 = te.map(d => lsPredRow(base, [], d[offKey])), y = te.map(d => d[key]);
-      // 1頭ごとの改善量の平均と標準誤差：偶然でなく良くなったか（改善が標準誤差の2倍以上）を判定
-      const dif = p.map((q, i) => (y[i] ? Math.log(q) - Math.log(p0[i]) : Math.log(1 - q) - Math.log(1 - p0[i])));
-      const md = dif.reduce((a, b) => a + b, 0) / dif.length, sdd = Math.sqrt(dif.reduce((a, b) => a + (b - md) ** 2, 0) / Math.max(1, dif.length - 1)) / Math.sqrt(dif.length);
-      return { ll: ll(p, y), ll0: ll(p0, y), p, p0, z: sdd > 0 ? md / sdd : 0 };
-    };
-    const W = evalOne("yW", "oW"), T = evalOne("y3", "o3");
-    // 後半での回収率（単勝）：穴馬の中で「予測の1着率×オッズ」が1.1以上の馬を100円ずつ買った場合
-    let inv = 0, ret = 0, inv0 = 0, ret0 = 0;
-    te.forEach((d, i) => { if (W.p[i] * d.odds >= 1.1){ inv += 100; if (d.yW) ret += d.odds * 100; } if (W.p0[i] * d.odds >= 1.1){ inv0 += 100; if (d.yW) ret0 += d.odds * 100; } });
-    const valid = { n: D.length, nTest: te.length, from: cut, llWin: +W.ll.toFixed(4), llWin0: +W.ll0.toFixed(4), llTop3: +T.ll.toFixed(4), llTop30: +T.ll0.toFixed(4), zWin: +W.z.toFixed(2), zTop3: +T.z.toFixed(2),
-      bets: inv / 100, roi: inv ? +(ret / inv).toFixed(3) : null, bets0: inv0 / 100, roi0: inv0 ? +(ret0 / inv0).toFixed(3) : null };
-    const winOK = W.z >= 2, topOK = T.z >= 2;
-    // 確かめに通った方だけ、全データで学習し直して使う
-    const mW = winOK ? lsLogit(D.map(d => d.x), D.map(d => d.oW), D.map(d => d.yW), lam) : null;
-    const m3 = topOK ? lsLogit(D.map(d => d.x), D.map(d => d.o3), D.map(d => d.y3), lam) : null;
-    const coef = m => m ? LS_NAMES.map((k, j) => [k, +(m.b[j + 1]).toFixed(3)]).filter(([, v]) => Math.abs(v) >= 0.05).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 12) : [];
-    return { enabled: winOK || topOK, n: D.length, win: mW, top3: m3, valid, coefWin: coef(mW), coefTop3: coef(m3) };
-  }
-  // 予想のとき：出走馬（穴馬だけ）について、1着・3着以内の確率を返す（使えない・穴馬でないときは null）
-  function lsPredict(model, h, pkWin, pkTop3){
-    if (!model?.enabled || !isLong(h)) return null;
-    const x = lsRow(h);
-    return { win: model.win ? lsPredRow(model.win, x, logitF(pkWin)) : null, top3: model.top3 ? lsPredRow(model.top3, x, logitF(pkTop3)) : null };
-  }
+
 
   // ===== 馬体重（増減）の効き：過去の全出走から推定 =====
   // オッズ（人気）で説明できる分を差し引いたうえで、馬体重の増減が「1着」「3着内」にどれだけ効くかをロジスティック回帰で推定。
@@ -881,6 +1023,6 @@ const Learn = (() => {
     return out;
   }
 
-  return { RV, report, clean, posFill, lsFit, lsPredict, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
+  return { RV, report, clean, posFill, crossCompact, crossReport, crossTickets, crossFitBeta, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
 })();
 if (typeof module !== "undefined") module.exports = Learn;

@@ -2395,11 +2395,45 @@ const Learn = (() => {
     return L;
   }
 
-  function fit(recs){
-    const K = FEATS.length, th = new Float64Array(2 + K); th[0] = PRIOR.a; th[1] = PRIOR.b;
+  // 統合の比率 a, b と要素の補正 c を、上位3着の尤度が最大になるように推定する。
+  // 目的関数は凸（Plackett–Luce＋正規分布の事前分布）なので、ニュートン法で数回の反復で最適解に着く（前の方法より約10倍速い）。
+  // 制約（0≦a,b≦1.5、a+b≧1）に当たったときだけ、前と同じ方法（制約つきの勾配法）で仕上げる。
+  function nllHess(recs, th, g, Hm){
+    const K = FEATS.length, D = 2 + K; let L = 0;
+    g.fill(0); Hm.fill(0);
+    const mu = new Float64Array(D);
+    for (const r of recs){
+      if (r.h.length < 2 || !r.order?.length) continue;
+      const { n, X, idx } = prep(r);
+      const u = new Float64Array(n);
+      for (let i = 0; i < n; i++){ let s2 = 0; for (let j = 0; j < D; j++) s2 += th[j] * X[i * D + j]; u[i] = s2; }
+      const used = new Uint8Array(n), e = new Float64Array(n);
+      for (let st = 0; st < idx.length; st++){
+        const wi = idx[st], lam = LAM[st];
+        let mx = -1e9; for (let i = 0; i < n; i++) if (!used[i]) mx = Math.max(mx, lam * u[i]);
+        let Z = 0; for (let i = 0; i < n; i++){ e[i] = used[i] ? 0 : Math.exp(lam * u[i] - mx); Z += e[i]; }
+        L -= lam * u[wi] - mx - Math.log(Z);
+        mu.fill(0);
+        for (let i = 0; i < n; i++) if (e[i] > 0){ const p = e[i] / Z; for (let j = 0; j < D; j++) mu[j] += p * X[i * D + j]; }
+        for (let j = 0; j < D; j++) g[j] += lam * (mu[j] - X[wi * D + j]);
+        const l2 = lam * lam;
+        for (let i = 0; i < n; i++) if (e[i] > 0){ const p = e[i] / Z;
+          for (let j = 0; j < D; j++){ const dj = X[i * D + j] - mu[j]; if (dj === 0) continue; const pj = l2 * p * dj; for (let k = j; k < D; k++) Hm[j * D + k] += pj * (X[i * D + k] - mu[k]); } }
+        used[wi] = 1;
+      }
+    }
+    const pr = [[th[0] - PRIOR.a, PRIOR.sa], [th[1] - PRIOR.b, PRIOR.sb]];
+    pr.forEach(([d, s2], j) => { L += d * d / (2 * s2 * s2); g[j] += d / (s2 * s2); Hm[j * D + j] += 1 / (s2 * s2); });
+    for (let k = 0; k < K; k++){ const d = th[2 + k]; L += d * d / (2 * PRIOR.sc ** 2); g[2 + k] += d / PRIOR.sc ** 2; Hm[(2 + k) * D + 2 + k] += 1 / PRIOR.sc ** 2; }
+    for (let j = 0; j < D; j++) for (let k = 0; k < j; k++) Hm[j * D + k] = Hm[k * D + j];
+    return L;
+  }
+  const feasible = th => th[0] >= 0 && th[0] <= 1.5 && th[1] >= 0 && th[1] <= 1.5 && th[0] + th[1] >= AB_MIN - 1e-9;
+  function fitAdam(recs, th, iters){
+    const K = FEATS.length;
     const g = new Float64Array(2 + K), m = new Float64Array(2 + K), v = new Float64Array(2 + K);
     const lr = 0.02;
-    for (let t = 1; t <= 600; t++){
+    for (let t = 1; t <= iters; t++){
       nll(recs, th, g);
       for (let j = 0; j < th.length; j++){
         m[j] = 0.9 * m[j] + 0.1 * g[j]; v[j] = 0.999 * v[j] + 0.001 * g[j] * g[j];
@@ -2407,6 +2441,34 @@ const Learn = (() => {
       }
       th[0] = clamp(th[0], 0, 1.5); th[1] = clamp(th[1], 0, 1.5);
       if (th[0] + th[1] < AB_MIN){ const d = (AB_MIN - th[0] - th[1]) / 2; th[0] += d; th[1] += d; }
+    }
+    return th;
+  }
+  function fit(recs){
+    const K = FEATS.length, D = 2 + K, th = new Float64Array(D); th[0] = PRIOR.a; th[1] = PRIOR.b;
+    const g = new Float64Array(D), Hm = new Float64Array(D * D), tmp = new Float64Array(D);
+    let L = nllHess(recs, th, g, Hm);
+    for (let it = 0; it < 40; it++){
+      const H2 = Array.from({ length: D }, (_, j) => Array.from(Hm.subarray(j * D, j * D + D)));
+      const step = solve(H2, Array.from(g, x => -x));
+      if (!step.every(isFinite)) break;
+      let t = 1, ok = false;
+      for (let ls = 0; ls < 20; ls++){
+        for (let j = 0; j < D; j++) tmp[j] = th[j] + t * step[j];
+        const L2 = nll(recs, tmp, null);
+        if (L2 <= L + 1e-10){ ok = true; break; } t /= 2;
+      }
+      if (!ok) break;
+      th.set(tmp);
+      const mx = Math.max(...step.map(Math.abs)) * t;
+      L = nllHess(recs, th, g, Hm);
+      if (mx < 1e-7) break;
+    }
+    if (!feasible(th)){
+      // 制約に当たるとき：制約の内側へ戻してから、前と同じ方法で仕上げる
+      th[0] = clamp(th[0], 0, 1.5); th[1] = clamp(th[1], 0, 1.5);
+      if (th[0] + th[1] < AB_MIN){ const d = (AB_MIN - th[0] - th[1]) / 2; th[0] += d; th[1] += d; }
+      fitAdam(recs, th, 400);
     }
     return th;
   }
@@ -2442,7 +2504,8 @@ const Learn = (() => {
   }
 
   // 学習結果をまとめる
-  function build(recs, today){
+  // light：過去データの日ごとのモデル用（予想に要る統合の比率・要素の重み・穴パターンの加点だけ作る）
+  function build(recs, today, opt = {}){
     const th = fit(recs);
     const K = FEATS.length;
     const sens = recs.length ? recs.reduce((a, r) => a + (r.sens || 0.4), 0) / recs.length : 0.4;
@@ -2458,20 +2521,20 @@ const Learn = (() => {
       if (Math.abs(mult - 1) >= 0.02) weights[k] = +mult.toFixed(3);
     });
     const a = th[0], b = th[1];
+    const us = upsetStats(recs);
+    const base = { version: 2, updated: new Date().toISOString(), races: recs.length, upto: recs.reduce((m, r) => r.date > m ? r.date : m, "0000-00-00"),
+      calib: { a: +a.toFixed(3), b: +b.toFixed(3) }, weights, featCoef: Object.fromEntries(FEATS.map((k, j) => [k, +th[2 + j].toFixed(4)])), sens: +sens.toFixed(3), anaWeights: anaWeights(us) };
+    if (opt.light) return { ...base, light: true };
     const byDate = {};
     recs.forEach(r => (byDate[r.date] ||= []).push(r));
     const hist = Object.keys(byDate).sort().map(d => ({ date: d, races: byDate[d].length,
       model: +logloss(byDate[d], h => h.pm).toFixed(3), market: +logloss(byDate[d], h => h.pk).toFixed(3),
       blend: +logloss(byDate[d], h => Math.pow(h.pm, a) * Math.pow(h.pk, b)).toFixed(3) }));
-    return {
-      version: 2, updated: new Date().toISOString(), races: recs.length, upto: recs.reduce((m, r) => r.date > m ? r.date : m, "0000-00-00"),
-      calib: { a: +a.toFixed(3), b: +b.toFixed(3) },
-      weights, featCoef: Object.fromEntries(FEATS.map((k, j) => [k, +th[2 + j].toFixed(4)])),
+    return { ...base,
       metrics: { model: logloss(recs, h => h.pm), market: logloss(recs, h => h.pk), blend: logloss(recs, h => Math.pow(h.pm, a) * Math.pow(h.pk, b)) },
-      hist, bias: bias(recs, today || new Date().toISOString().slice(0, 10)), sens: +sens.toFixed(3),
-      upsets: recs.slice(-400).flatMap(analyzeUpsets).slice(-60), upsetStats: (() => { const us = upsetStats(recs); return { ...us, factors: us.factors.slice(0, 16) }; })(),
-      anaWeights: anaWeights(upsetStats(recs)), paper: paperStats(recs), longshot: lsFit(recs)
-    };
+      hist, bias: bias(recs, today || new Date().toISOString().slice(0, 10)),
+      upsets: recs.slice(-400).flatMap(analyzeUpsets).slice(-60), upsetStats: { ...us, factors: us.factors.slice(0, 16) },
+      paper: paperStats(recs) };
   }
 
   function merge(oldRecs, newRecs){
@@ -2877,6 +2940,140 @@ const Learn = (() => {
     return { ready: true, n: rows.length, conditions: COMBO_C.length, combos: combos.length, scopes, wf };
   }
 
+  // ===== 購入ルールの選び方そのものを確かめる（単勝・100円均等） =====
+  // ルール＝人気帯×オッズ帯×期待値の下限（180通り）。各期間について「それより前の期間だけ」で一番良かったルール
+  // （回収率の95%範囲の下限が最も高いもの・200点以上）を選び、その期間に実際に買ったらどうなったかを測る。
+  // 選んだルールをそのまま未来に持っていった成績だけが、実戦で期待できる回収率に近い。
+  function strategyReport(R, ranges, folds){
+    if (!folds.length) return null;
+    const POP = [[1, 3], [4, 7], [8, 12], [13, 99], [4, 99], [1, 99]], ODD = [[1, 5], [5, 10], [10, 20], [20, 50], [50, 9999], [1, 9999]], EVT = [0, 0.8, 0.9, 1.0, 1.1];
+    const rules = []; POP.forEach(p => ODD.forEach(o => EVT.forEach(t => rules.push({ p, o, t }))));
+    const rlabel = r => `${r.p[0] === 1 && r.p[1] === 99 ? "全人気" : r.p[1] === 99 ? `${r.p[0]}番人気以下` : `${r.p[0]}〜${r.p[1]}番人気`}・${r.o[0] === 1 && r.o[1] === 9999 ? "全オッズ" : r.o[1] === 9999 ? `${r.o[0]}倍以上` : `${r.o[0]}〜${r.o[1]}倍`}・期待値${r.t ? r.t + "以上" : "問わず"}`;
+    // 1頭ずつ：期待値は、そのレースを検証した期間の統合比率（最初の土台期間は最初の期間の比率）で計算
+    const abOf = d => { const f = folds.find(x => d >= x.from && d <= x.to); return f || folds[0]; };
+    const bets = [];
+    R.forEach(r => { const H = r.h.filter(h => h.pos != null && h.odds > 1); if (H.length < 5) return; const { a, b } = abOf(r.date);
+      const sk = H.reduce((x, h) => x + h.pk, 0), sm = H.reduce((x, h) => x + Math.max(h.pm, 1e-5), 0);
+      const q = H.map(h => Math.pow(Math.max(h.pm, 1e-5) / sm, a) * Math.pow(h.pk / sk, b)), sq = q.reduce((x, y) => x + y, 0);
+      H.forEach((h, i) => bets.push({ date: r.date, id: r.id, pop: h.pop || 99, odds: h.odds, ev: q[i] / sq * h.odds, ret: h.pos === 1 ? h.odds : 0 })); });
+    const match = (r, x) => x.pop >= r.p[0] && x.pop <= r.p[1] && x.odds >= r.o[0] && x.odds < r.o[1] && x.ev >= r.t;
+    const stat = xs => { const n = xs.length; if (!n) return { n: 0 }; const m = xs.reduce((s, x) => s + x.ret, 0) / n, v = xs.reduce((s, x) => s + (x.ret - m) ** 2, 0) / Math.max(1, n - 1), se = Math.sqrt(v / n);
+      let bal = 0, peak = 0, dd = 0; xs.forEach(x => { bal += (x.ret - 1) * 100; peak = Math.max(peak, bal); dd = Math.max(dd, peak - bal); });
+      return { n, roi: +m.toFixed(3), lo95: +Math.max(0, m - 1.96 * se).toFixed(3), hi95: +(m + 1.96 * se).toFixed(3), profit: Math.round(bal), maxDD: Math.round(dd) }; };
+    const out = [], picked = [];
+    ranges.forEach(g => {
+      const tr = bets.filter(x => x.date < g.from), te = bets.filter(x => x.date >= g.from && x.date <= g.to); if (!te.length) return;
+      let best = null; rules.forEach(r => { const s = stat(tr.filter(x => match(r, x))); if (s.n >= 200 && (!best || s.lo95 > best.s.lo95)) best = { r, s }; });
+      if (!best) return;
+      const got = te.filter(x => match(best.r, x)); picked.push(...got);
+      out.push({ from: g.from, to: g.to, rule: rlabel(best.r), trainROI: best.s.roi, trainN: best.s.n, ...stat(got) });
+    });
+    // 参考：検証期間全体で後から一番良かったルール（＝後知恵。実戦ではこれは選べない）
+    const testAll = bets.filter(x => x.date >= ranges[0].from);
+    let hind = null; rules.forEach(r => { const s = stat(testAll.filter(x => match(r, x))); if (s.n >= 200 && (!hind || s.roi > hind.s.roi)) hind = { r, s }; });
+    const all = stat(picked.sort((x, y) => (x.date + x.id).localeCompare(y.date + y.id)));
+    const lock = out[out.length - 1] || null;
+    return { rules: rules.length, folds: out, total: all, allPositive: out.length > 0 && out.every(f => f.n && f.roi >= 1), lock,
+      hindsight: hind ? { rule: rlabel(hind.r), ...hind.s } : null, base: stat(testAll) };
+  }
+
+  // ===== 券種ごとのずれ（クロスプール）：単勝オッズから計算した各券種の確率 × その券種の実際のオッズ =====
+  // 単勝の売上はいちばん大きく情報が集まるので、単勝オッズから「複勝・ワイド・馬連・馬単・3連複が当たる確率」を計算し、
+  // それぞれの券種のオッズと比べて、売れすぎ／売れなさすぎ（期待値が1を超える目）があるかを確かめる（Hausch–Ziembaの方法）。
+  // 確率は p ∝ (単勝オッズの逆数)^β（1着・2着・3着で別のβ。ベンターの方法）。βは各期間それより前のレースだけで決める。
+  const CT = ["単勝", "複勝", "ワイド", "馬連", "馬単", "三連複"];
+  const pairIdx = (i, j, n) => i * n + j;                       // 順序あり（馬単）・なし（i<j）共通の番号
+  const comb3 = (i, j, k) => k * (k - 1) * (k - 2) / 6 + j * (j - 1) / 2 + i;   // i<j<k の3頭の組の番号（メモリを使わない並べ方）
+  function crossCompact(r){
+    const res = r.result; if (!res?.pay || !r.comboOdds || !r.entries?.length) return null;
+    const rows = (res.rows || []).filter(x => /^\d+$/.test(String(x.pos)));
+    const E = r.entries.filter(e => e.odds > 1 && rows.some(x => x.num === e.num));
+    if (E.length < 5) return null;
+    const n = E.length, nums = E.map(e => e.num), at = {}; nums.forEach((m, i) => at[m] = i);
+    const order = (res.order || rows.slice().sort((a, b) => a.pos - b.pos).map(x => x.num)).slice(0, 3).map(m => at[m]);
+    if (order.length < 3 || order.some(i => i == null)) return null;
+    const C = r.comboOdds, P2 = new Float32Array(n * n), W2 = new Float32Array(n * n), U2 = new Float32Array(n * n), T3 = new Float32Array(n * (n - 1) * (n - 2) / 6);
+    const parse = k => k.split("-").map(m => at[+m]);
+    Object.entries(C.馬連 || {}).forEach(([k, v]) => { const [i, j] = parse(k); if (i != null && j != null) P2[pairIdx(Math.min(i, j), Math.max(i, j), n)] = v; });
+    Object.entries(C.ワイド || {}).forEach(([k, v]) => { const [i, j] = parse(k); if (i != null && j != null) W2[pairIdx(Math.min(i, j), Math.max(i, j), n)] = Array.isArray(v) ? v[0] : v; });
+    Object.entries(C.馬単 || {}).forEach(([k, v]) => { const [i, j] = parse(k); if (i != null && j != null) U2[pairIdx(i, j, n)] = v; });
+    Object.entries(C.三連複 || {}).forEach(([k, v]) => { const t = parse(k); if (t.every(x => x != null)){ t.sort((a, b) => a - b); T3[comb3(t[0], t[1], t[2])] = v; } });
+    const pay = {}; CT.forEach(t => { pay[t] = {}; Object.entries(res.pay[t] || {}).forEach(([k, v]) => { const t2 = k.split("-").map(m => at[+m]); if (t2.every(x => x != null)) pay[t][(t === "馬単" ? t2 : t2.sort((a, b) => a - b)).join("-")] = v / 100; }); });
+    return { date: r.date, id: r.id, n, odds: Float32Array.from(E, e => e.odds), plo: Float32Array.from(E, e => e.placeLo > 1 ? e.placeLo : 0), order, P2, W2, U2, T3, pay };
+  }
+  // 1着・2着・3着の選ばれ方の鋭さ β を、それぞれ尤度最大で決める（段ごとに独立に解ける）
+  function crossFitBeta(rows){
+    const ll = (st, b) => { let L = 0; rows.forEach(x => { const q = Array.from(x.odds, o => Math.pow(1 / o, b)); let Z = q.reduce((a, c) => a + c, 0); for (let s = 0; s < st; s++) Z -= q[x.order[s]]; L += Math.log(q[x.order[st]] / Z); }); return L; };
+    return [0, 1, 2].map(st => { let lo = 0.2, hi = 2; for (let k = 0; k < 40; k++){ const m1 = lo + (hi - lo) / 3, m2 = hi - (hi - lo) / 3; if (ll(st, m1) > ll(st, m2)) hi = m2; else lo = m1; } return +((lo + hi) / 2).toFixed(3); });
+  }
+  // 1レースの各券種の確率（順序つきの1〜3着を全部たどる）と、買える目の期待値・払戻
+  function crossTickets(x, beta, cb){
+    const n = x.n, q = beta.map(b => Array.from(x.odds, o => Math.pow(1 / o, b))), Z = q.map(a => a.reduce((s, c) => s + c, 0));
+    const p1 = q[0].map(v => v / Z[0]), top3 = new Float64Array(n), win2 = new Float64Array(n * n), in3 = new Float64Array(n * n), tri = new Float64Array(x.T3.length);
+    for (let i = 0; i < n; i++){ const pi = p1[i];
+      for (let j = 0; j < n; j++){ if (j === i) continue; const pj = q[1][j] / (Z[1] - q[1][i]), pij = pi * pj; win2[i * n + j] += pij;
+        for (let k = 0; k < n; k++){ if (k === i || k === j) continue; const pk = q[2][k] / (Z[2] - q[2][i] - q[2][j]), p = pij * pk;
+          top3[i] += p; top3[j] += p; top3[k] += p;
+          const a = Math.min(i, j), b = Math.max(i, j); in3[a * n + b] += p; const c1 = Math.min(i, k), d1 = Math.max(i, k); in3[c1 * n + d1] += p; const c2 = Math.min(j, k), d2 = Math.max(j, k); in3[c2 * n + d2] += p;
+          const s3 = [i, j, k].sort((u, v) => u - v); tri[comb3(s3[0], s3[1], s3[2])] += p; } } }
+    const R = (t, key) => x.pay[t][key] || 0;
+    for (let i = 0; i < n; i++){ cb(0, p1[i], x.odds[i], R("単勝", String(i))); if (x.plo[i] > 1) cb(1, top3[i], x.plo[i], R("複勝", String(i))); }
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++){ const k = `${i}-${j}`;
+      if (x.W2[i * n + j] > 1) cb(2, in3[i * n + j], x.W2[i * n + j], R("ワイド", k));
+      if (x.P2[i * n + j] > 1) cb(3, win2[i * n + j] + win2[j * n + i], x.P2[i * n + j], R("馬連", k)); }
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) if (i !== j && x.U2[i * n + j] > 1) cb(4, win2[i * n + j], x.U2[i * n + j], R("馬単", `${i}-${j}`));
+    for (let k = 2; k < n; k++) for (let j = 1; j < k; j++) for (let i = 0; i < j; i++){ const c = comb3(i, j, k), o = x.T3[c]; if (o > 1) cb(5, tri[c], o, R("三連複", `${i}-${j}-${k}`)); }
+  }
+  async function crossReport(rowsIn, opt = {}){
+    const rows = rowsIn.filter(Boolean).sort((a, b) => (a.date + a.id).localeCompare(b.date + b.id));
+    if (rows.length < 300) return { ready: false, n: rows.length };
+    const dates = [...new Set(rows.map(x => x.date))], testDates = dates.slice(Math.max(1, Math.floor(dates.length * 0.4))), per = Math.ceil(testDates.length / 5);
+    const ranges = []; for (let f = 0; f < 5; f++){ const fd = testDates.slice(f * per, (f + 1) * per); if (fd.length) ranges.push({ from: fd[0], to: fd[fd.length - 1] }); }
+    // 期間ごとのβ（それより前のレースだけで決める）。最初の土台期間のレースは1つ目の期間のβで計算
+    ranges.forEach(g => { g.beta = crossFitBeta(rows.filter(x => x.date < g.from)); });
+    const foldOf = d => ranges.findIndex(g => d >= g.from && d <= g.to);
+    const EVB = [0, 0.8, 1.0, 1.1, 1.3, 1.6, 2, 1e9], THR = [1.0, 1.1, 1.2, 1.3, 1.5, 2.0];
+    const bins = CT.map(() => EVB.slice(0, -1).map(() => ({ n: 0, hit: 0, ret: 0, ret2: 0, p: 0 })));
+    // 期待値0.9以上の目だけ1点ずつ残す（買い方の選び方の確かめ用）
+    const T = { fold: [], type: [], ev: [], ret: [], date: [] };
+    for (let r = 0; r < rows.length; r++){
+      const x = rows[r], f = foldOf(x.date), beta = (ranges[f] || ranges[0]).beta;
+      crossTickets(x, beta, (t, p, o, ret) => { const ev = p * o;
+        if (f >= 0){ const bi = EVB.findIndex((b, i) => ev >= b && ev < EVB[i + 1]); const B = bins[t][bi]; B.n++; B.p += p; if (ret > 0){ B.hit++; B.ret += ret; B.ret2 += ret * ret; } }
+        if (ev >= 0.9){ T.fold.push(f); T.type.push(t); T.ev.push(ev); T.ret.push(ret); T.date.push(r); } });
+      if (r % 200 === 199) await new Promise(res => setTimeout(res, 0));
+    }
+    const statOf = idx => { const n = idx.length; if (!n) return { n: 0 }; let s = 0, s2 = 0, hit = 0, bal = 0, peak = 0, dd = 0, streak = 0, maxStreak = 0;
+      idx.forEach(i => { const v = T.ret[i]; s += v; s2 += v * v; if (v > 0){ hit++; streak = 0; } else maxStreak = Math.max(maxStreak, ++streak); bal += (v - 1) * 100; peak = Math.max(peak, bal); dd = Math.max(dd, peak - bal); });
+      const m = s / n, se = Math.sqrt(Math.max(0, s2 / n - m * m) / n);
+      return { n, roi: +m.toFixed(3), lo95: +Math.max(0, m - 1.96 * se).toFixed(3), hi95: +(m + 1.96 * se).toFixed(3), hitRate: +(hit / n).toFixed(4), profit: Math.round(bal), maxDD: Math.round(dd), maxLose: maxStreak }; };
+    const N = T.ev.length, all = Array.from({ length: N }, (_, i) => i);
+    // 券種ごと：前の期間で一番良かった期待値の下限を選び、次の期間で買う（ウォークフォワード）
+    const wfType = t => { const picked = [], folds = [];
+      ranges.forEach((g, f) => {
+        const tr = all.filter(i => T.type[i] === t && rows[T.date[i]].date < g.from);
+        let best = null; THR.forEach(th => { const s = statOf(tr.filter(i => T.ev[i] >= th)); if (s.n >= 300 && s.roi > 1 && (!best || s.lo95 > best.s.lo95)) best = { th, s }; });
+        if (!best){ folds.push({ from: g.from, th: null, n: 0 }); return; }      // 前の期間でプラスの下限がなければ「買わない」
+        const te = all.filter(i => T.type[i] === t && T.fold[i] === f && T.ev[i] >= best.th); picked.push(...te);
+        folds.push({ from: g.from, th: best.th, trainROI: best.s.roi, ...statOf(te) });
+      });
+      return { total: statOf(picked.sort((a, b) => T.date[a] - T.date[b])), folds }; };
+    const types = CT.map((name, t) => ({ name, bins: bins[t].map((B, i) => ({ range: `${EVB[i]}〜${EVB[i + 1] >= 1e9 ? "" : EVB[i + 1]}`, n: B.n, pred: B.n ? +(B.p / B.n).toFixed(4) : null, hitRate: B.n ? +(B.hit / B.n).toFixed(4) : null,
+      roi: B.n ? +(B.ret / B.n).toFixed(3) : null, lo95: B.n ? +Math.max(0, B.ret / B.n - 1.96 * Math.sqrt(Math.max(0, B.ret2 / B.n - (B.ret / B.n) ** 2) / B.n)).toFixed(3) : null })).filter(b => b.n), wf: wfType(t) }));
+    // 全券種まとめて：各期間、前の期間で回収率の95%下限が一番高かった「券種×期待値の下限」を最大3つ選んで買う
+    const picked = [], folds = [];
+    ranges.forEach((g, f) => {
+      const cands = [];
+      CT.forEach((_, t) => THR.forEach(th => { const s = statOf(all.filter(i => T.type[i] === t && rows[T.date[i]].date < g.from && T.ev[i] >= th)); if (s.n >= 300) cands.push({ t, th, s }); }));
+      const sel = cands.filter(c => c.s.roi > 1).sort((a, b) => b.s.lo95 - a.s.lo95).filter((c, i, A) => A.findIndex(d => d.t === c.t) === i).slice(0, 3);
+      const te = all.filter(i => T.fold[i] === f && sel.some(c => c.t === T.type[i] && T.ev[i] >= c.th)); picked.push(...te);
+      folds.push({ from: g.from, to: g.to, beta: g.beta, rules: sel.map(c => `${CT[c.t]}・期待値${c.th}以上（前の期間 ${Math.round(c.s.roi * 100)}%）`), ...statOf(te) });
+    });
+    const races = rows.filter(x => foldOf(x.date) >= 0).length;
+    return { ready: true, n: rows.length, testRaces: races, from: ranges[0].from, ranges: ranges.map(g => ({ from: g.from, to: g.to, beta: g.beta })), types,
+      combined: { total: statOf(picked.sort((a, b) => T.date[a] - T.date[b])), folds, perRace: races ? +(picked.length / races).toFixed(1) : null } };
+  }
+
   async function report(recs, opt = {}){
     const folds = opt.folds || 5, initFrac = opt.initFrac ?? 0.4;
     const R = recs.filter(r => r.h?.length >= 5 && r.order?.length).slice().sort((a, b) => (a.date + a.id).localeCompare(b.date + b.id));
@@ -2902,22 +3099,9 @@ const Learn = (() => {
       await new Promise(res => setTimeout(res, 0));     // 画面を固めない
     }
     return { ok: true, total: R.length, from: testDates[0], strict, cleanTest, testAll: testAll.length, cleanAll: R.filter(clean).length,
-      ...finAcc(A), folds: foldRows, factors: { pop10: factorStats(R, 10, 99), pop4: factorStats(R, 4, 9) }, position: positionReport(R, ranges, 10), tempered: temperReport(R, ranges), ability: abilityReport(R, ranges, 10), combo: comboReport(R, ranges, 10) };
+      ...finAcc(A), folds: foldRows, factors: { pop10: factorStats(R, 10, 99), pop4: factorStats(R, 4, 9) }, position: positionReport(R, ranges, 10), tempered: temperReport(R, ranges), ability: abilityReport(R, ranges, 10), combo: comboReport(R, ranges, 10), strategy: strategyReport(R, ranges, foldRows.map(f => ({ from: f.from, to: f.to, a: f.a, b: f.b }))) };
   }
 
-  // ===== 穴馬モデル：人気薄（6番人気以下・15倍以上）だけを対象に、「オッズが見落としている分」を直接学習する =====
-  // 全体の確率の当てやすさでは、人気馬の比重が大きく穴馬の見極めが埋もれてしまうので、穴馬だけを別に学習する。
-  // 目的は回収率：オッズから見た確率に対して、どの特徴を持つ穴馬が「より来る／来ない」かを、1着・3着以内それぞれで推定。
-  // 過去の前半で学習 → 後半で確かめ、オッズだけより当たるようになったときだけ予想に使う（使えないと分かれば自動で止める）。
-  const LS_ANA = Object.keys(ANA_PTS);
-  const LS_STYLES = ["逃げ", "先行", "差し", "追込"];
-  const LS_NAMES = [...FEATS.map(k => "要素:" + k), ...LS_ANA.map(k => "穴:" + k), "枠:内", "枠:外", ...LS_STYLES.map(k => "脚質:" + k), "モデル÷オッズ"];
-  const logitF = p => { const q = Math.min(0.999, Math.max(1e-5, p)); return Math.log(q / (1 - q)); };
-  function lsRow(h){
-    const st = LS_STYLES.map(k => h.style === k ? 1 : 0);
-    return [...FEATS.map((_, j) => h.z?.[j] || 0), ...LS_ANA.map(k => (h.ana || []).includes(k) ? 1 : 0),
-      h.gate <= 0.2 ? 1 : 0, h.gate >= 0.8 ? 1 : 0, ...st, Math.max(-3, Math.min(3, Math.log(Math.max(h.pm, 1e-4) / Math.max(h.pk, 1e-4))))];
-  }
   // 正則化つきロジスティック回帰（オフセット＝オッズから見た確率のlogit。係数は x を標準化した単位）
   function lsLogit(X, off, y, lam){
     const n = X.length, K = X[0].length;
@@ -2940,49 +3124,7 @@ const Learn = (() => {
     return { b, mu, sd };
   }
   function lsPredRow(m, x, off){ let e = m.b[0] + m.b[m.b.length - 1] * off; x.forEach((v, k) => e += m.b[k + 1] * (v - m.mu[k]) / m.sd[k]); return 1 / (1 + Math.exp(-e)); }
-  function lsData(recs){
-    const out = [];
-    recs.forEach(r => {
-      const H = r.h.filter(h => h.pos && h.pk > 0); if (H.length < 5) return;
-      const s = H.reduce((a, h) => a + h.pk, 0), pk = H.map(h => h.pk / s), t3 = top3FromMarket(pk);
-      H.forEach((h, i) => { if (!isLong(h)) return; out.push({ date: r.date, x: lsRow(h), oW: logitF(pk[i]), o3: logitF(t3[i]), yW: h.pos === 1 ? 1 : 0, y3: h.pos <= 3 ? 1 : 0, odds: h.odds }); });
-    });
-    return out;
-  }
-  function lsFit(recs, lam = 30){
-    const D = lsData(recs);
-    if (D.length < 800) return { enabled: false, n: D.length, reason: "穴馬のデータが800頭未満" };
-    const dates = [...new Set(D.map(d => d.date))].sort(); const cut = dates[Math.floor(dates.length * 0.7)];
-    const tr = D.filter(d => d.date < cut), te = D.filter(d => d.date >= cut);
-    const ll = (ps, ys) => -ps.reduce((a, p, i) => a + (ys[i] ? Math.log(p) : Math.log(1 - p)), 0) / ps.length;
-    const evalOne = (key, offKey) => {
-      const m = lsLogit(tr.map(d => d.x), tr.map(d => d[offKey]), tr.map(d => d[key]), lam);
-      const base = lsLogit(tr.map(() => []), tr.map(d => d[offKey]), tr.map(d => d[key]), lam);   // オッズだけ（くせの補正のみ）
-      const p = te.map(d => lsPredRow(m, d.x, d[offKey])), p0 = te.map(d => lsPredRow(base, [], d[offKey])), y = te.map(d => d[key]);
-      // 1頭ごとの改善量の平均と標準誤差：偶然でなく良くなったか（改善が標準誤差の2倍以上）を判定
-      const dif = p.map((q, i) => (y[i] ? Math.log(q) - Math.log(p0[i]) : Math.log(1 - q) - Math.log(1 - p0[i])));
-      const md = dif.reduce((a, b) => a + b, 0) / dif.length, sdd = Math.sqrt(dif.reduce((a, b) => a + (b - md) ** 2, 0) / Math.max(1, dif.length - 1)) / Math.sqrt(dif.length);
-      return { ll: ll(p, y), ll0: ll(p0, y), p, p0, z: sdd > 0 ? md / sdd : 0 };
-    };
-    const W = evalOne("yW", "oW"), T = evalOne("y3", "o3");
-    // 後半での回収率（単勝）：穴馬の中で「予測の1着率×オッズ」が1.1以上の馬を100円ずつ買った場合
-    let inv = 0, ret = 0, inv0 = 0, ret0 = 0;
-    te.forEach((d, i) => { if (W.p[i] * d.odds >= 1.1){ inv += 100; if (d.yW) ret += d.odds * 100; } if (W.p0[i] * d.odds >= 1.1){ inv0 += 100; if (d.yW) ret0 += d.odds * 100; } });
-    const valid = { n: D.length, nTest: te.length, from: cut, llWin: +W.ll.toFixed(4), llWin0: +W.ll0.toFixed(4), llTop3: +T.ll.toFixed(4), llTop30: +T.ll0.toFixed(4), zWin: +W.z.toFixed(2), zTop3: +T.z.toFixed(2),
-      bets: inv / 100, roi: inv ? +(ret / inv).toFixed(3) : null, bets0: inv0 / 100, roi0: inv0 ? +(ret0 / inv0).toFixed(3) : null };
-    const winOK = W.z >= 2, topOK = T.z >= 2;
-    // 確かめに通った方だけ、全データで学習し直して使う
-    const mW = winOK ? lsLogit(D.map(d => d.x), D.map(d => d.oW), D.map(d => d.yW), lam) : null;
-    const m3 = topOK ? lsLogit(D.map(d => d.x), D.map(d => d.o3), D.map(d => d.y3), lam) : null;
-    const coef = m => m ? LS_NAMES.map((k, j) => [k, +(m.b[j + 1]).toFixed(3)]).filter(([, v]) => Math.abs(v) >= 0.05).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 12) : [];
-    return { enabled: winOK || topOK, n: D.length, win: mW, top3: m3, valid, coefWin: coef(mW), coefTop3: coef(m3) };
-  }
-  // 予想のとき：出走馬（穴馬だけ）について、1着・3着以内の確率を返す（使えない・穴馬でないときは null）
-  function lsPredict(model, h, pkWin, pkTop3){
-    if (!model?.enabled || !isLong(h)) return null;
-    const x = lsRow(h);
-    return { win: model.win ? lsPredRow(model.win, x, logitF(pkWin)) : null, top3: model.top3 ? lsPredRow(model.top3, x, logitF(pkTop3)) : null };
-  }
+
 
   // ===== 馬体重（増減）の効き：過去の全出走から推定 =====
   // オッズ（人気）で説明できる分を差し引いたうえで、馬体重の増減が「1着」「3着内」にどれだけ効くかをロジスティック回帰で推定。
@@ -3045,7 +3187,7 @@ const Learn = (() => {
     return out;
   }
 
-  return { RV, report, clean, posFill, lsFit, lsPredict, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
+  return { RV, report, clean, posFill, crossCompact, crossReport, crossTickets, crossFitBeta, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
 })();
 
 
@@ -3476,8 +3618,7 @@ function mergeImport(j){
     if (!h || !c.date || !c.text) return;
     h.notes = h.notes || {}; h.notes[c.date] = (h.notes[c.date] && h.notes[c.date] !== c.text ? h.notes[c.date] + "／" : "") + c.text; nh++;
   });
-  if (j.anaWeights) Engine.setAnaWeights(j.anaWeights);
-  if (j.modelWeights) Engine.setWeights(j.modelWeights);
+  // 旧方式の重みファイル（model_weights.json など）は使わない：学習は「学習・成績」の記録からだけ行う（二重の学習・未来の情報の混入を防ぐ）
   if (j.source) DB.meta.sources.push(j.source + (j.generated ? " " + j.generated : ""));
   return { nr, nh };
 }
@@ -4211,7 +4352,7 @@ function renderData(){
       <h3 style="font-size:15px">収集スクリプトの JSON を読み込む</h3>
       <p class="small">手元のPCで <span class="mono">python keiba_collector.py --sundays 2</span> を実行すると、今後の日曜JRA全レースの出馬表・各馬の全成績・追切評価を SQLite に保存し、<span class="mono">keiba_export.json</span> を書き出します。そのファイルをここで選んでください。読み込んだデータはこのブラウザに保存されます。</p>
       <input type="file" id="file" accept=".json,application/json">
-      <p class="small" style="margin-top:12px">またはJSONを貼り付け（収集スクリプトの出力、<span class="mono">analyze_upsets.py</span> が出す穴パターン係数 <span class="mono">{"anaWeights":{...}}</span> も可）：</p>
+      <p class="small" style="margin-top:12px">またはJSONを貼り付け（収集スクリプトの出力）：</p>
       <textarea id="paste" placeholder='{"races":[...],"horses":{...}}'></textarea>
       <div class="ctrls" style="margin-top:8px"><button class="btn primary" id="importBtn">貼り付けたJSONを取込</button><button class="btn" id="copyBtn">現在の馬DBをJSONでコピー</button><button class="btn" id="resetBtn">取込データを消去</button></div>
       <h3 style="font-size:15px;margin-top:18px">レース後コメント・SNSの反応を取り込む</h3>
@@ -4273,7 +4414,7 @@ function summarizeSim(r, sim){
     bet: planTxt(sim.plans?.[1000]), bet5: planTxt(sim.plans?.[5000]), k1: kp(sim.plans?.[1000]), k5: kp(sim.plans?.[5000]), evm1: evm(sim.plans?.[1000]),
     anaTop: (() => { const L = sim.cands?.list; if (!L) return null; const pop = {}; f.forEach(x => pop[x.num] = x.pop || 99);
       return L.filter(c => c.nums.some(n => pop[n] >= 6) && c.ev >= 1.0).sort((a, b) => b.evL - a.evL).slice(0, 3).map(c => ({ t: `${c.type} ${c.nums.join("-")}`, odds: c.odds, ev: +c.ev.toFixed(2), evL: +c.evL.toFixed(2), p: c.p })); })(),
-    calc: { a: +Bets.EXPS.a.toFixed(3), b: +Bets.EXPS.b.toFixed(3), manual: Bets.BETA != null, v: 4 },
+    calc: { a: +Bets.EXPS.a.toFixed(3), b: +Bets.EXPS.b.toFixed(3), manual: Bets.BETA != null, v: 4, logic: typeof LOGIC_VER !== "undefined" ? LOGIC_VER : null, locked: !!LOCK.info },
     favPop: f[w[0].i].pop ?? null, mktFav: (f.filter(x => x.odds > 1).sort((a, b) => a.odds - b.odds)[0] || {}).num ?? null, hasOdds: !!sim.cands, oddsAsOf: r.oddsAsOf || null, evTop, moves };
 }
 // ===== クラウド版（GitHub Pages）：データは data/*.json、更新は GitHub Actions に依頼 =====
@@ -4315,9 +4456,6 @@ async function cloudApi(path, opt){
     }
     try { const c = await staticJson("cushion.json"); const by = {}; Object.entries(c.obs || {}).forEach(([k, o]) => (by[k.split("|")[1]] ||= []).push(o.cushion));
       const all = Object.values(by).flat(); out.cushion = { venue: Object.fromEntries(Object.entries(by).map(([k, v]) => [k, +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(2)])), n: Object.fromEntries(Object.entries(by).map(([k, v]) => [k, v.length])), all: all.length ? +(all.reduce((a, b) => a + b, 0) / all.length).toFixed(2) : null }; } catch (e) {}
-    for (const [fn, key] of [["model_weights.json", "modelWeights"], ["upset_weights.json", "anaWeights"]]){
-      try { const j = await staticJson(fn); out[key] = j[key] || j; } catch (e) {}
-    }
     return out;
   }
   if (p === "/api/tweaks") return method === "GET" ? {} : { ok: true };
@@ -4473,14 +4611,137 @@ const BWEFF = { e: null };
 function applyBodyWeight(){
   try { BWEFF.e = Learn.bodyWeightEffects(DB.horses); Bets.setBodyWeightEffects(BWEFF.e); } catch (e) { console.error(e); }
 }
+// ===== 実戦テスト（ルール固定）：今の設定を固定し、これから先のレースの「発走前の推奨」だけで成績を測る =====
+const LEDGER = { r: null, busy: false };
+async function lockOn(){
+  if (!SERVER.enabled || SERVER.cloud || !SERVER.on){ toast("固定はPCのアプリで行います"); return; }
+  const model = BF.full || LEARN.saved || LEARN.model; if (!model?.calib){ toast("学習モデルがまだありません"); return; }
+  const info = { at: new Date().toISOString(), logic: typeof LOGIC_VER !== "undefined" ? LOGIC_VER : null, model, note: "固定中は学習モデル・予想と買い目の計算を変えない" };
+  const j = await api("/api/lock", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "lock", lock: info }) }).catch(e => ({ ok: false, message: e.message }));
+  if (!j?.ok){ toast("固定できませんでした：" + (j?.message || "")); return; }
+  LOCK.info = info; applyLearn(model); Object.keys(ST.sims).forEach(markStale);
+  toast("今の設定で固定しました。これから先のレースの「発走前の推奨」だけで成績を記録します（スマホ・クラウドにも反映されます）"); renderLearnTab();
+}
+async function lockOff(){
+  if (!LOCK.confirmOff){ LOCK.confirmOff = true; renderLearnTab(); setTimeout(() => { LOCK.confirmOff = false; if (ST.tab === "learn") renderLearnTab(); }, 8000); return; }
+  LOCK.confirmOff = false;
+  const j = await api("/api/lock", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "unlock" }) }).catch(() => null);
+  if (!j?.ok){ toast("解除できませんでした"); return; }
+  LOCK.info = null; LEDGER.r = null; const m = BF.full || LEARN.saved; if (m) applyLearn(m); Object.keys(ST.sims).forEach(markStale);
+  toast("固定を解除しました（記録は残ります）"); renderLearnTab();
+}
+// 固定した時刻より後に、固定したモデル・同じ計算の版で、発走前に作られた推奨だけを数える
+async function makeLedger(){
+  const L = LOCK.info; if (!L || LEDGER.busy) return;
+  LEDGER.busy = true; renderLearnTab();
+  const keepMode = CHECK_MODE.v; const seq = [];
+  let skipped = 0;
+  try {
+    const from = L.at.slice(0, 10);
+    const dates = [...new Set(Object.values(DB.races).filter(r => r.date >= from && r.result?.rows?.length && r.entries?.length).map(r => r.date))].sort();
+    CHECK_MODE.v = "pre";
+    for (const d of dates){
+      await loadServerSummary(d);
+      const c = computeCheck(d);
+      checkRows(d, "pre").filter(x => x.res && x.row).forEach(({ r, row }) => {
+        const ok = new Date(row.at) >= new Date(L.at) && new Date(row.at) <= raceStart(r) && row.calc && !row.calc.manual
+          && Math.abs(row.calc.a - L.model.calib.a) < 0.005 && Math.abs(row.calc.b - L.model.calib.b) < 0.005 && (!L.logic || row.calc.logic === L.logic);
+        if (!ok){ skipped++; return; }
+        const p = c.per[r.id]?.plans || {};
+        seq.push({ d, t: r.postTime || "", id: r.id, p1s: p["1000s"], p1: p["1000"] });
+      });
+    }
+  } finally { CHECK_MODE.v = keepMode; computeCheck(ST.date); }
+  seq.sort((a, b) => (a.d + a.t + a.id).localeCompare(b.d + b.t + b.id));
+  const weekOf = d => { const x = new Date(d + "T12:00:00"); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return iso(x); };
+  const stat = key => {
+    const xs = seq.filter(x => x[key]?.inv > 0).map(x => ({ d: x.d, inv: x[key].inv, ret: x[key].ret }));
+    if (!xs.length) return { n: 0 };
+    let inv = 0, ret = 0, hit = 0, bal = 0, peak = 0, dd = 0, streak = 0, maxLose = 0; const miles = [];
+    xs.forEach((x, i) => { inv += x.inv; ret += x.ret; if (x.ret > 0){ hit++; streak = 0; } else maxLose = Math.max(maxLose, ++streak);
+      bal += x.ret - x.inv; peak = Math.max(peak, bal); dd = Math.max(dd, peak - bal);
+      if ([100, 300, 500, 1000].includes(i + 1)) miles.push({ at: i + 1, roi: ret / inv }); });
+    const roi = ret / inv, se = Math.sqrt(xs.reduce((a, x) => a + (x.ret - roi * x.inv) ** 2, 0)) / inv;
+    const weeks = {}; xs.forEach(x => { const w = (weeks[weekOf(x.d)] ||= { races: 0, inv: 0, ret: 0, hit: 0 }); w.races++; w.inv += x.inv; w.ret += x.ret; if (x.ret > 0) w.hit++; });
+    let ci = 0, cr = 0; const wk = Object.keys(weeks).sort().map(k => { const w = weeks[k]; ci += w.inv; cr += w.ret; return { week: k, ...w, roi: w.ret / w.inv, cum: cr / ci }; });
+    return { n: xs.length, inv, ret, roi, lo95: Math.max(0, roi - 1.96 * se), hi95: roi + 1.96 * se, hitRate: hit / xs.length, maxLose, maxDD: dd, profit: bal, miles, weeks: wk };
+  };
+  LEDGER.r = { at: new Date().toISOString(), races: seq.length, skipped, all: stat("p1s"), bet: stat("p1") };
+  LEDGER.busy = false; renderLearnTab();
+}
+function lockPanel(){
+  const L = LOCK.info;
+  const canEdit = SERVER.enabled && !SERVER.cloud;
+  if (!L) return `<div class="learnbox"><h3>実戦テスト（ルール固定）</h3>
+    <p class="small">過去データでいくら良い成績が出ても、結果を見ながら作ったルールは未来では崩れやすいことが、検証レポートで分かっています。本当の実力は、<b>ルールを固定して、これから先のレースだけで</b>測ります。固定すると、学習モデル（統合の比率・要素の重み・穴パターン）と、予想・買い目の計算を変えずに、発走前の推奨（1,000円）の成績を記録します。学習の記録づけは続きますが、予想には使いません。</p>
+    ${canEdit ? `<div class="ctrls"><button class="btn primary" id="lockOn">今の設定で固定して実戦テストを始める</button></div>` : `<p class="small">固定はPCのアプリで行います。</p>`}</div>`;
+  const R = LEDGER.r, pct = x => x == null || !isFinite(x) ? "—" : Math.round(x * 100) + "%";
+  const logicChanged = L.logic && typeof LOGIC_VER !== "undefined" && L.logic !== LOGIC_VER;
+  const block = (S, title) => !S?.n ? `<p class="small"><b>${title}</b>：まだ購入したレースがありません。</p>` : `<p class="small"><b>${title}</b>：${S.n}レース・投資 ${yen(S.inv)}・払戻 ${yen(S.ret)}・収支 <b class="${S.profit >= 0 ? "pos" : "neg"}">${S.profit >= 0 ? "+" : "−"}${Math.abs(Math.round(S.profit)).toLocaleString()}円</b>・回収率 <b>${pct(S.roi)}</b>（95%の範囲 ${pct(S.lo95)}〜${pct(S.hi95)}）・的中率 ${pct(S.hitRate)}・最大連敗 ${S.maxLose}レース・最大の落ち込み ${yen(S.maxDD)}
+      ${S.miles.length ? `<br>中間評価：${S.miles.map(m => `${m.at}レース時点 ${pct(m.roi)}`).join("／")}` : ""}
+      <br>判定：${S.n < 30 ? "まだ判断できません（30レース未満は、95%の範囲も当てになりません）" : S.lo95 >= 1.4 ? "<b class='pos'>140%以上を証明</b>" : S.lo95 >= 1.1 ? "<b class='pos'>110%以上を証明</b>" : S.lo95 >= 1 ? "<b class='pos'>プラスを証明</b>" : S.hi95 < 1 ? "<b class='neg'>マイナスが確実</b>" : `まだ判断できません（目安：100・300・500・1,000レースで中間評価）`}</p>
+    <div class="tbl-wrap"><table><thead><tr><th>週</th><th class="r">レース</th><th class="r">投資</th><th class="r">払戻</th><th class="r">回収率</th><th class="r">的中</th><th class="r">累計の回収率</th></tr></thead><tbody>
+    ${S.weeks.slice(-12).reverse().map(w => `<tr><td>${esc(w.week)}〜</td><td class="r num">${w.races}</td><td class="r num">${yen(w.inv)}</td><td class="r num">${yen(w.ret)}</td><td class="r num">${pct(w.roi)}</td><td class="r num">${w.hit}/${w.races}</td><td class="r num"><b>${pct(w.cum)}</b></td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="learnbox"><h3>実戦テスト（ルール固定中） <span class="small">${esc(new Date(L.at).toLocaleString("ja-JP"))} から</span></h3>
+    <p class="small">固定した学習モデル：統合 モデル${L.model.calib.a}・オッズ${L.model.calib.b}（${L.model.races}レースで学習）・計算の版 ${esc(L.logic || "—")}。数えるのは、固定した時刻より後に、固定したモデルと同じ計算の版で、<b>発走前に</b>作られた推奨だけです（手動設定の予想は数えません）。<b>評価期間中はルールを変えないでください。</b></p>
+    ${logicChanged ? `<p class="small neg"><b>アプリの予想・買い目の計算が、固定したときの版（${esc(L.logic)}）から変わっています（今は ${esc(LOGIC_VER)}）。</b>今の版で作った推奨は実戦テストに数えません。テストを続けるなら、固定したときの版に戻すか、固定し直して最初から測り直してください。</p>` : ""}
+    <div class="ctrls"><button class="btn primary" id="lockLedger" ${LEDGER.busy ? "disabled" : ""}>${LEDGER.busy ? "集計中…" : "実戦テストの成績を集計する"}</button>
+      ${canEdit ? `<button class="btn" id="lockOff">${LOCK.confirmOff ? "もう一度押すと解除します" : "固定を解除"}</button>` : ""}</div>
+    ${R ? `<p class="small">対象 ${R.races}レース（固定前の設定・発走後・手動設定などで数えなかった予想 ${R.skipped}件）</p>${block(R.all, "1,000円・全レース（見送り推奨も購入）")}${block(R.bet, "1,000円・勝負レースだけ")}` : ""}
+  </div>`;
+}
+// ===== 券種ごとのずれ（クロスプール）の確かめ：過去データの全開催日の確定オッズ・払戻を読み込んで計算 =====
+const CROSS = { r: null, busy: false, msg: "" };
+async function makeCross(){
+  if (CROSS.busy) return; CROSS.busy = true; CROSS.msg = "準備中"; renderLearnTab();
+  try {
+    const rows = [], seen = new Set();
+    Object.values(DB.races).forEach(r => { const c = Learn.crossCompact(r); if (c){ rows.push(c); seen.add(r.id); } });
+    if (SERVER.enabled && !SERVER.cloud && SERVER.on){
+      const st = await bfRefresh();
+      const days = [...new Set([...Object.keys(st?.processed || {}), ...(st?.pending || [])])].sort();
+      for (let i = 0; i < days.length; i++){
+        CROSS.msg = `${i + 1}/${days.length}開催日を読み込み中`; if (i % 5 === 0 && ST.tab === "learn") renderLearnTab();
+        const j = await api(`/api/backfill/day?date=${days[i]}&races=1`, { timeout: 120000 }).catch(() => null); if (!j?.races) continue;
+        j.races.forEach(r => { if (seen.has(r.id)) return; const c = Learn.crossCompact({ ...r, date: r.date || j.date }); if (c){ rows.push(c); seen.add(r.id); } });
+      }
+    }
+    CROSS.msg = `${rows.length.toLocaleString()}レースで計算中`; if (ST.tab === "learn") renderLearnTab();
+    await new Promise(r => setTimeout(r, 30));
+    CROSS.r = await Learn.crossReport(rows);
+  } catch (e) { toast("計算できませんでした：" + e.message); }
+  CROSS.busy = false; if (ST.tab === "learn") renderLearnTab();
+}
+function crossPanel(){
+  const R = CROSS.r, pct = x => x == null ? "—" : Math.round(x * 100) + "%";
+  const btn = `<div class="ctrls"><button class="btn primary" id="mkCross" ${CROSS.busy ? "disabled" : ""}>${CROSS.busy ? `計算中…（${esc(CROSS.msg)}）` : R ? "作り直す" : "券種ごとのずれを確かめる（数分）"}</button></div>`;
+  const head = `<div class="learnbox"><h3>12. 券種ごとのずれ（複勝・ワイド・馬連・馬単・3連複）</h3>
+    <p class="small">単勝の売上はいちばん大きく、情報がいちばん集まります。そこで<b>単勝オッズから各券種が当たる確率を計算し、その券種の実際のオッズと比べて</b>、売れなさすぎ（期待値が1を超える目）が本当に儲かるかを確かめます（米国の研究で利益が出たと報告されている方法）。確率は p ∝ (1/単勝オッズ)<sup>β</sup> で、1着・2着・3着で別のβを、各期間それより前のレースだけで決めます。期待値と払戻は券種ごとに対応させています（複勝は確定オッズの下限で判定し、払戻は実際の確定払戻）。
+    <b>注意：買う判断に確定オッズを使っているので、実戦では締切直前のオッズで判断する必要があります</b>（払戻は確定オッズで決まるので、回収率の計算そのものは正確です）。モデルの重みは変えません。</p>`;
+  if (!R) return head + btn + "</div>";
+  if (!R.ready) return head + `<p class="small">券種のオッズと払戻がそろったレースが${R.n}レースで、まだ足りません（300レース以上で計算）。</p>` + btn + "</div>";
+  const wfCell = W => W.total.n ? `${W.total.n.toLocaleString()}点・<b>${pct(W.total.roi)}</b>（${pct(W.total.lo95)}〜${pct(W.total.hi95)}）・的中率${(W.total.hitRate * 100).toFixed(1)}%` : "買える目なし（前の期間でプラスのルールがない）";
+  const C = R.combined, RG = [...new Set(R.types.flatMap(T => T.bins.map(b => b.range)))].sort((x, y) => parseFloat(x) - parseFloat(y));
+  return head + `<p class="small">${R.n.toLocaleString()}レース（検証 ${R.testRaces.toLocaleString()}レース・${esc(R.from)}以降・5期間）。期間ごとのβ（1着・2着・3着）：${R.ranges.map(g => g.beta.join("/")).join("　")}</p>
+    <div class="tbl-wrap"><table><thead><tr><th>券種</th>${RG.map(rg => `<th class="r">期待値${esc(rg)}</th>`).join("")}<th>前の期間で選んだ基準で次の期間に買った成績</th></tr></thead><tbody>
+    ${R.types.map(T => `<tr><td>${T.name}</td>${RG.map(rg => { const b = T.bins.find(x => x.range === rg); return `<td class="r num small">${b ? `${b.n.toLocaleString()}点<br><b>${pct(b.roi)}</b>` : "—"}</td>`; }).join("")}<td class="small">${wfCell(T.wf)}</td></tr>`).join("")}
+    </tbody></table></div>
+    <p class="small">表の数字は、検証期間で「その期待値の帯の目を全部100円ずつ買った」ときの回収率。期待値が高い帯ほど回収率も高ければ、ずれは本物です。</p>
+    <p class="small"><b>全券種まとめた仮想の買い方（ウォークフォワード）</b>：各期間、前の期間で回収率がプラスで95%下限が高かった「券種×期待値の下限」を最大3つ選び、次の期間に買った成績 → ${C.total.n ? `${C.total.n.toLocaleString()}点（1レース平均${C.perRace}点）・回収率 <b>${pct(C.total.roi)}</b>（95%の範囲 ${pct(C.total.lo95)}〜${pct(C.total.hi95)}）・的中率 ${(C.total.hitRate * 100).toFixed(1)}%・収支 ${yen(C.total.profit)}・最大の落ち込み ${yen(C.total.maxDD)}・最大連敗 ${C.total.maxLose}点。
+      判定：${C.total.lo95 >= 1.4 ? "<b class='pos'>140%以上を証明</b>" : C.total.lo95 >= 1.1 ? "<b class='pos'>110%以上を証明</b>" : C.total.lo95 >= 1 ? "<b class='pos'>プラスを証明</b>" : C.total.roi >= 1 ? "プラスだが偶然の範囲" : "マイナス"}` : "買える目がありませんでした（どの期間も、前の期間でプラスになる基準がなかった）"}</p>
+    <div class="tbl-wrap"><table><thead><tr><th>期間</th><th>前の期間で選んだ買い方</th><th class="r">点数</th><th class="r">回収率</th><th class="r">95%の範囲</th><th class="r">収支</th></tr></thead><tbody>
+    ${C.folds.map(f => `<tr><td>${esc(f.from)}〜${esc(f.to)}</td><td class="small">${f.rules.length ? f.rules.map(esc).join("<br>") : "買わない"}</td><td class="r num">${f.n || 0}</td><td class="r num">${f.n ? pct(f.roi) : "—"}</td><td class="r num small">${f.n ? `${pct(f.lo95)}〜${pct(f.hi95)}` : "—"}</td><td class="r num">${f.n ? yen(f.profit) : "—"}</td></tr>`).join("")}</tbody></table></div>` + btn + "</div>";
+}
 // ===== 検証レポート（未来の情報を使わない確かめ） =====
 const REPORT = { r: null, busy: false };
 async function makeReport(){
   if (REPORT.busy) return; REPORT.busy = true; renderLearnTab();
   try {
-    const full = SERVER.cloud ? await staticJson("learn.json", 120000) : await api("/api/learn?full=1", { timeout: 120000 });
+    // PCでは過去データの処理が持っている記録（最新）をそのまま使う（同じ記録を二重に読み込んでメモリを使わないように）
+    let recs = !SERVER.cloud ? BF.recs : null;
+    if (!recs){ const full = SERVER.cloud ? await staticJson("learn.json", 120000) : await api("/api/learn?full=1", { timeout: 300000 }); recs = full.records || []; if (!SERVER.cloud && !BF.recs) BF.recs = recs; }
     await new Promise(r => setTimeout(r, 30));
-    REPORT.r = await Learn.report(full.records || []);
+    REPORT.r = await Learn.report(recs);
   } catch (e) { toast("レポートを作れませんでした：" + e.message); }
   REPORT.busy = false; renderLearnTab();
 }
@@ -4513,11 +4774,25 @@ async function fillPositions(){
       BF.full = model; if (!simBusy) applyLearn(model);
       await api("/api/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, append: changed, bulk: true }), timeout: 120000 });
     }
+    BF.recs = recs;      // 付け足し後の記録を、以後の処理・レポートで使う1つのコピーにする
     toast(`${changed.length.toLocaleString()}レースの記録に位置取りの材料を付け足しました（材料がないレース${recs.filter(need).length - changed.length}件）`);
     POSFILL.busy = false; BF.pause = wasPaused; if (!wasPaused) bfProcessLoop();
     await makeReport();
   } catch (e) { toast("付け足しできませんでした：" + e.message); }
   finally { POSFILL.busy = false; BF.pause = wasPaused; if (ST.tab === "learn") renderLearnTab(); }
+}
+function strategyPanel(S){
+  if (!S) return "";
+  const roi = x => x == null ? "—" : Math.round(x * 100) + "%";
+  const goal = t => t.n ? (t.lo95 >= 1.4 ? "<b class='pos'>140%を証明</b>" : t.lo95 >= 1.1 ? "<b class='pos'>110%を証明</b>" : t.lo95 >= 1 ? "<b class='pos'>プラスを証明</b>" : t.roi >= 1 ? "プラスだが偶然の範囲" : "マイナス") : "—";
+  const T = S.total;
+  return `<h4>11. 購入ルールの選び方を確かめる（単勝・100円均等・ウォークフォワード）</h4>
+    <p class="small">人気帯×オッズ帯×期待値の下限の組み合わせ（${S.rules}通り）から、<b>各期間について「それより前の期間だけ」で一番良かったルール</b>（回収率の95%範囲の下限が最も高いもの・200点以上）を選び、その期間に実際に買った成績です。最後の期間は、どの選択にも使われていない「ロック期間」にあたります。回収率の目標は、95%の範囲の<b>下限</b>が超えて初めて「達成できる」と言えます。</p>
+    <div class="tbl-wrap"><table><thead><tr><th>期間</th><th>前の期間で選ばれたルール</th><th class="r">選んだ時点の回収率</th><th class="r">その期間の点数</th><th class="r">回収率</th><th class="r">95%の範囲</th><th class="r">収支</th><th class="r">最大の落ち込み</th></tr></thead><tbody>
+    ${S.folds.map((f, i) => `<tr><td>${esc(f.from)}〜${esc(f.to)}${i === S.folds.length - 1 ? "<br><span class='small'>（ロック期間）</span>" : ""}</td><td class="small">${esc(f.rule)}</td><td class="r num">${roi(f.trainROI)}（${f.trainN}点）</td><td class="r num">${f.n}</td><td class="r num ${f.roi >= 1 ? "pos" : "neg"}"><b>${roi(f.roi)}</b></td><td class="r num small">${roi(f.lo95)}〜${roi(f.hi95)}</td><td class="r num">${yen(f.profit)}</td><td class="r num">${yen(f.maxDD)}</td></tr>`).join("")}
+    <tr><td><b>合計</b></td><td></td><td></td><td class="r num"><b>${T.n}</b></td><td class="r num ${T.roi >= 1 ? "pos" : "neg"}"><b>${roi(T.roi)}</b></td><td class="r num small">${roi(T.lo95)}〜${roi(T.hi95)}</td><td class="r num">${yen(T.profit)}</td><td class="r num">${yen(T.maxDD)}</td></tr></tbody></table></div>
+    <p class="small">判定：${goal(T)}${S.allPositive ? "・全期間プラス" : "・プラスでない期間あり"}。参考：全馬の単勝を買った場合 ${roi(S.base.roi)}（${S.base.n.toLocaleString()}点）。
+    ${S.hindsight ? `後から見て一番良かったルールは「${esc(S.hindsight.rule)}」の ${roi(S.hindsight.roi)}（${S.hindsight.n}点・95%の範囲 ${roi(S.hindsight.lo95)}〜${roi(S.hindsight.hi95)}）ですが、<b>これは結果を見てから選んだ後知恵で、実戦では選べません</b>。上の表の「前の期間で選んだルール」の成績との差が、過去データだけで買い方を決めたときの見かけの上乗せです。` : ""}</p>`;
 }
 function comboPanel(C, pct1, zt){
   if (!C) return "";
@@ -4641,22 +4916,8 @@ function reportPanel(){
     <p class="small">どの期間でも同じ向きの結果なら信頼できます。期間によって良かったり悪かったりする差は、偶然の可能性が高いです。</p>
     ${positionPanel(R.position, pct1, zt)}
     ${abilityPanel(R.ability, pct1, zt)}
-    ${comboPanel(R.combo, pct1, zt)}` + btn + "</div>";
-}
-function longshotPanel(){
-  const L = LEARN.model?.longshot; if (!L) return "";
-  const v = L.valid;
-  if (!v) return `<div class="learnbox"><h3>穴馬モデル</h3><p class="small">穴馬（6番人気以下・15倍以上）のデータが${L.n}頭です。800頭以上たまると学習と確かめを始めます。</p></div>`;
-  const imp = (a, b) => a < b ? "オッズだけより良い" : "オッズだけより悪い";
-  return `<div class="learnbox"><h3>穴馬モデル <span class="small">${L.enabled ? "<b class='pos'>使用中</b>" : "未使用（確かめに通っていない）"}</span></h3>
-    <p class="small">穴馬だけを対象に、要素の点数・穴パターン・枠・脚質・モデルとオッズの差から、オッズが見落としている分を学習します。古い7割で学習し、新しい3割（${esc(v.from)}以降・${v.nTest.toLocaleString()}頭）で確かめ、<b>オッズだけより偶然でなく良くなったとき（z≧2）だけ</b>予想に使います。</p>
-    <div class="tbl-wrap"><table><thead><tr><th></th><th class="r">確かめの成績（小さいほど良い）</th><th class="r">オッズだけ</th><th class="r">z</th><th>判定</th></tr></thead><tbody>
-      <tr><td>1着</td><td class="r num">${v.llWin}</td><td class="r num">${v.llWin0}</td><td class="r num">${v.zWin}</td><td>${imp(v.llWin, v.llWin0)}${L.win ? "・使用中" : ""}</td></tr>
-      <tr><td>3着以内</td><td class="r num">${v.llTop3}</td><td class="r num">${v.llTop30}</td><td class="r num">${v.zTop3}</td><td>${imp(v.llTop3, v.llTop30)}${L.top3 ? "・使用中" : ""}</td></tr>
-    </tbody></table></div>
-    <p class="small">確かめの期間に、穴馬モデルで「期待値1.1以上」と判定した単勝を買っていた場合：${v.bets}頭・回収率 ${v.roi != null ? Math.round(v.roi * 100) + "%" : "—"}（穴馬全${v.n.toLocaleString()}頭で学習）。${!L.enabled ? "今のところ、穴馬の見極めはオッズを上回れていないため使っていません。データが増えるたびに自動で学習・確かめ直し、上回れば自動で使い始めます。" : ""}</p>
-    ${L.enabled && (L.coefWin?.length || L.coefTop3?.length) ? `<p class="small"><b>効いている特徴</b>（＋は来やすい、−は来にくい）：${[...(L.coefTop3 || []), ...(L.coefWin || [])].slice(0, 10).map(([k, c]) => `${esc(k)} ${c > 0 ? "+" : ""}${c}`).join("・")}</p>` : ""}
-  </div>`;
+    ${comboPanel(R.combo, pct1, zt)}
+    ${strategyPanel(R.strategy)}` + btn + "</div>";
 }
 function bodyWeightPanel(){
   const e = BWEFF.e; if (!e) return "";
@@ -4677,7 +4938,7 @@ async function loadServerDB(){
       j.races.forEach(r => { const old = DB.races[r.id], tw = tweaks[r.id];
         if (tw && (tw.odds || tw.place) && r.oddsAsOf && r.oddsAsOf !== old?.oddsAsOf){ delete tw.odds; delete tw.place; cleared = true; } });
       if (cleared) persist();
-      mergeImport({ races: j.races, horses: j.horses, modelWeights: j.modelWeights, anaWeights: j.anaWeights });
+      mergeImport({ races: j.races, horses: j.horses });
       Object.assign(SEED.track, j.track || {});
       if (j.cushion) CUSHION.avg = j.cushion;
       applyBodyWeight();
@@ -4759,7 +5020,7 @@ async function serverInit(){
     const j = await loadServerDB();
     await loadLearn();
     // 保存されているモデルが記録の一部だけで学習したもの（前の版の不具合で空のモデルが保存された場合など）なら、全部の記録で作り直す
-    api("/api/learn?count=1").then(async c => { if (c?.records && (LEARN.model?.races || 0) < c.records * 0.9){ if (!BF.recs) await bfLoadRecs(); else await ensureFullModel(BF.recs); } }).catch(e => console.error(e));
+    api("/api/learn?count=1").then(async c => { if (c?.records && ((LEARN.saved || LEARN.model)?.races || 0) < c.records * 0.9){ if (!BF.recs) await bfLoadRecs(); else await ensureFullModel(BF.recs); } }).catch(e => console.error(e));
     startAutoRefresh();
     bfRefresh().then(s => { if (s && (s.running || s.pending?.length)) bfEnsure(); });
     refreshCloudInfo().then(() => renderUpd());
@@ -4777,9 +5038,14 @@ async function serverInit(){
   if (!Object.keys(ST.sims).length) runSim(true);
 }
 // ===== 学習（答え合わせの蓄積から、統合の仕方・要素の効き・馬場の偏りを更新） =====
-const LEARN = { model: null, base: null };
+const LOGIC_VER = "e4f12ea6";
+const LEARN = { model: null, base: null, saved: null };
+// 実戦テスト（ルール固定）：固定した学習モデル。固定中は、全部の記録での学習は続けても予想には固定したモデルを使う
+const LOCK = { info: null, confirmOff: false };
 function applyLearn(m){
   if (!m || !m.calib) return;
+  // 実戦テスト中は、過去データ用の日ごとのモデル（light）以外は、固定したモデルに置き換える
+  if (LOCK.info?.model && !m.light && m !== LOCK.info.model) m = LOCK.info.model;
   LEARN.model = m;
   if ((m.version || 1) >= 2) Bets.setCalibration({ ...m.calib, races: m.races });   // 旧版（上位3着をそのまま当てはめた a+b<1 の値）は使わない
   if (!LEARN.base) LEARN.base = { ...Engine.WEIGHTS };
@@ -4787,15 +5053,7 @@ function applyLearn(m){
   Object.entries(m.weights || {}).forEach(([k, v]) => { w[k] = (w[k] ?? 1) * v; });
   Engine.setWeights(w);
   Engine.setAnaWeights(m.anaWeights || {});   // 学習がない（空の）モデルのときは初期値に戻す（前のモデルの値を持ち越さない）
-  // 穴馬モデル：後半のデータで確かめに通ったときだけ使う
-  Bets.setLongshot(m.longshot?.enabled ? (ctx, pmWin, pkWin) => {
-    const N = ctx.N, W = Engine.WEIGHTS, t3 = Learn.top3FromMarket(pkWin);
-    return ctx.field.map((f, i) => {
-      const h = { pop: f.pop, odds: f.odds, gate: (f.num - 1) / Math.max(1, N - 1), style: f.style, ana: f.ana || [], pm: pmWin[i], pk: pkWin[i],
-        z: Learn.FEATS.map(k => (f.adj?.[k] || 0) / (k === "能力" ? 1 : (W[k] ?? 1) || 1)) };
-      return Learn.lsPredict(m.longshot, h, pkWin[i], t3[i]);
-    });
-  } : null);
+  Bets.setLongshot(null);   // 穴馬モデルは確かめに通らなかったため廃止（検証レポートの6・9・10番で同じことをより厳しく確かめています）
   updateLearnChip();
 }
 function updateLearnChip(){
@@ -4834,14 +5092,30 @@ async function bfLoadRecs(){
 // 今使っているモデルが、記録の一部だけで学習したもの（空のモデルなど）になっていたら、全部の記録で作り直して保存する
 async function ensureFullModel(recs){
   if (!recs?.length) return;
-  const cur = BF.full || LEARN.model;
+  const cur = BF.full || LEARN.saved || LEARN.model;
   if (cur && (cur.races || 0) >= recs.length * 0.9) { if (!BF.full) BF.full = cur; return; }
   const latest = recs.reduce((m, r) => r.date > m ? r.date : m, "");
-  BF.full = Learn.build(recs, latest);
+  BF.full = Learn.build(recs, latest); LEARN.saved = BF.full;
   if (!simBusy) applyLearn(BF.full);
   Object.keys(ST.sims).forEach(markStale);
   await api("/api/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: BF.full, append: [] }), timeout: 120000 }).catch(e => console.error(e));
   toast(`学習モデルを全部の記録（${recs.length.toLocaleString()}レース）で作り直しました。予想し直すと反映されます`);
+}
+// ===== 動作状況の記録（落ちたときの原因調べ用）：エラーとメモリの使用量を、PCのアプリの data/client_log.txt に残す =====
+const DIAG = { last: null };
+function diagSnapshot(){
+  const mem = performance?.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null;
+  return { t: new Date().toISOString(), memMB: mem, records: BF.recs?.length ?? null, horses: Object.keys(DB.horses || {}).length, races: Object.keys(DB.races || {}).length, sims: Object.keys(ST.sims || {}).length, bf: BF.proc ? BF.msg : "" };
+}
+function diagSend(kind, extra){
+  if (!SERVER.enabled || SERVER.cloud || !SERVER.on) return;
+  DIAG.last = diagSnapshot();
+  fetch("/api/clientlog", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, ...DIAG.last, ...(extra || {}) }) }).catch(() => {});
+}
+if (typeof window !== "undefined" && window.addEventListener){
+  window.addEventListener("error", e => diagSend("error", { msg: String(e.message || e).slice(0, 300), at: `${e.filename || ""}:${e.lineno || ""}` }));
+  window.addEventListener("unhandledrejection", e => diagSend("rejection", { msg: String(e.reason?.message || e.reason).slice(0, 300) }));
+  setInterval(() => diagSend("heartbeat"), 5 * 60 * 1000);
 }
 async function bfProcessLoop(){
   if (BF.proc || BF.pause || !SERVER.enabled || SERVER.cloud || !SERVER.on) return;
@@ -4894,7 +5168,7 @@ async function bfProcessDay(j, left){
   try {
     // その日より前の結果だけで学習したモデル（未来の結果で学習したモデルで過去を予想しない）。
     // 使うのはこの処理の予想の間だけで、1レースごとに元のモデル（全部の記録で学習）に戻す＝画面で同時に予想しても混ざらない
-    const wf = Learn.build(BF.recs.filter(r => r.date < d), d);
+    const wf = Learn.build(BF.recs.filter(r => r.date < d), d, { light: true });
     if (!BF.full) await ensureFullModel(BF.recs);
     // ① 予想（この時点のモデル＝この日より前の結果だけで学習したもの）
     for (let i = 0; i < races.length; i++){
@@ -4980,11 +5254,16 @@ function renderLearnTab(){
     </div>` : ""}
     ${m ? upsetPanel(d) : ""}
     ${m ? learnPanel() : ""}
+    ${lockPanel()}
     ${reportPanel()}
-    ${longshotPanel()}
+    ${crossPanel()}
     ${bodyWeightPanel()}
     ${bfPanel()}`;
   const mr = $("#mkReport"); if (mr) mr.onclick = makeReport;
+  const mc = $("#mkCross"); if (mc) mc.onclick = makeCross;
+  const lk = $("#lockOn"); if (lk) lk.onclick = lockOn;
+  const lo = $("#lockOff"); if (lo) lo.onclick = lockOff;
+  const ll = $("#lockLedger"); if (ll) ll.onclick = makeLedger;
   const pfb = $("#posFill"); if (pfb) pfb.onclick = fillPositions;
   const bs1 = $("#bfStart"); if (bs1) bs1.onclick = bfStart;
   const bs2 = $("#bfStop"); if (bs2) bs2.onclick = bfStop;
@@ -4995,7 +5274,10 @@ function renderLearnTab(){
 async function loadLearn(){
   try {
     const m = SERVER.cloud ? await staticJson("learn_model.json") : SERVER.enabled ? await api("/api/learn") : null;
-    if (m && m.calib){ applyLearn(m); Object.keys(ST.sims).forEach(markStale); }
+    if (m && m.calib) LEARN.saved = m;
+    try { const L = SERVER.cloud ? await staticJson("lock.json") : SERVER.enabled ? await api("/api/lock") : null; LOCK.info = L?.model?.calib ? L : null; } catch (e) { LOCK.info = null; }
+    const use = LOCK.info?.model || (m && m.calib ? m : null);
+    if (use){ applyLearn(use); Object.keys(ST.sims).forEach(markStale); }
   } catch (e) {}
 }
 async function runLearn(d){
@@ -5014,7 +5296,7 @@ async function runLearn(d){
   const byD = {}; todo.forEach(r => (byD[r.date] ||= []).push(r));
   let recs = [];
   for (const d0 of Object.keys(byD).sort()){
-    const wf = Learn.build((full.records || []).filter(x => x.date < d0), d0);
+    const wf = Learn.build((full.records || []).filter(x => x.date < d0), d0, { light: true });
     while (simBusy) await new Promise(res => setTimeout(res, 100));
     simBusy = true; const keep = LEARN.model; applyLearn(wf);
     try { recs = recs.concat(await Learn.recordsForRaces(Engine, byD[d0], DB.horses, trackOf, 2000, betsOf, LEARN.base || Engine.WEIGHTS, wf.upto)); }

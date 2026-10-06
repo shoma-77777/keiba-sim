@@ -286,13 +286,6 @@ def collect_db():
         out["dates"].append({"date": ymd, "updated": j.get("updated"), "races": len(j.get("races", []))})
     try: out["cushion"] = cushion_avg(json.loads(CUSHION_FILE.read_text(encoding="utf-8")) if CUSHION_FILE.exists() else {})
     except Exception: pass
-    for fn, key in (("model_weights.json", "modelWeights"), ("upset_weights.json", "anaWeights")):
-        p = HERE / fn
-        if p.exists():
-            try:
-                j = json.loads(p.read_text(encoding="utf-8")); v = j.get(key, j)
-                if isinstance(v, dict) and v: out[key] = v
-            except Exception: pass
     return out
 
 class Handler(SimpleHTTPRequestHandler):
@@ -320,8 +313,11 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path == "/api/backfill/status": return self._json(bf.status())
         if u.path == "/api/backfill/day":
             ymd = re.sub(r"\D", "", (q.get("date") or [""])[0])[:8]
-            j = bf.day_data(ymd) if len(ymd) == 8 else None
+            j = bf.day_data(ymd, races_only=bool(q.get("races"))) if len(ymd) == 8 else None
             return self._json(j or {"error": "no data"}, 200 if j else 404)
+        if u.path == "/api/lock":
+            fp = DATA / "lock.json"
+            return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {})
         if u.path == "/api/learn" and q.get("count"):
             fp = DATA / "learn.json"
             n = len(json.loads(fp.read_text(encoding="utf-8")).get("records", [])) if fp.exists() else 0
@@ -386,6 +382,29 @@ class Handler(SimpleHTTPRequestHandler):
                 except Exception: pass
                 return self._json({"ok": True})
             return self._json({"ok": False}, 404)
+        if u.path == "/api/lock":
+            n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8") if n else "{}"
+            try:
+                j = json.loads(body or "{}"); fp = DATA / "lock.json"
+                if j.get("action") == "lock" and isinstance(j.get("lock"), dict) and (j["lock"].get("model") or {}).get("calib"):
+                    fp.write_text(json.dumps(j["lock"], ensure_ascii=False), encoding="utf-8"); log("実戦テスト：今の設定で固定しました")
+                elif j.get("action") == "unlock" and fp.exists() and fp.read_text(encoding="utf-8").strip() not in ("", "{}"):
+                    hp = DATA / "lock_history.json"
+                    hist = json.loads(hp.read_text(encoding="utf-8")) if hp.exists() else []
+                    hist.append({**json.loads(fp.read_text(encoding="utf-8")), "endedAt": dt.datetime.now().isoformat(timespec="seconds")})
+                    hp.write_text(json.dumps(hist, ensure_ascii=False), encoding="utf-8"); fp.write_text("{}", encoding="utf-8"); log("実戦テスト：固定を解除しました")   # 空にする（クラウドの固定も解除されるように）
+                else: return self._json({"ok": False, "message": "指定が正しくありません"}, 400)
+                threading.Thread(target=lambda: _safe(lambda: _push_after(None)), daemon=True).start()   # スマホ・クラウドにも反映
+                return self._json({"ok": True})
+            except Exception as ex: return self._json({"ok": False, "message": str(ex)}, 400)
+        if u.path == "/api/clientlog":
+            n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(min(n, 20000)).decode("utf-8", "replace")
+            try:
+                lp = DATA / "client_log.txt"
+                if lp.exists() and lp.stat().st_size > 300_000: lp.write_text(lp.read_text(encoding="utf-8")[-150_000:], encoding="utf-8")   # 大きくなりすぎないように
+                with open(lp, "a", encoding="utf-8") as f: f.write(body.replace("\n", " ") + "\n")
+            except Exception: pass
+            return self._json({"ok": True})
         if u.path in ("/api/backfill/start", "/api/backfill/stop", "/api/backfill/done", "/api/backfill/reprocess"):
             n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8") if n else "{}"
             try: j = json.loads(body or "{}")

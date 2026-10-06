@@ -148,11 +148,12 @@ def _loop():
         with LOCK: ST.update(running=False, phase="", cur=None)
 
 
-def day_data(ymd):
-    """その日のレースと、その日より前の出走だけに絞った出走馬データ（予想・学習に使う）"""
+def day_data(ymd, races_only=False):
+    """その日のレースと、その日より前の出走だけに絞った出走馬データ（予想・学習に使う）。races_only：出走馬の成績を付けない（軽い）"""
     p = PAST / f"day_{ymd}.json"
     if not p.exists(): return None
     j = json.loads(p.read_text(encoding="utf-8")); date = j["date"]
+    if races_only: return {"date": date, "races": [r for r in j["races"] if r.get("entries")]}
     con = _db(); horses = {}
     ids = j.get("horseIds") or []
     for k in range(0, len(ids), 500):
