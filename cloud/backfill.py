@@ -64,7 +64,8 @@ def stop():
 def resume_if_active():
     """アプリを起動し直したとき、途中だった取得を続きから再開する"""
     pr = load_prog()
-    if pr.get("active") and pr.get("from") and pr.get("to"):
+    # 「起動したら自動で続ける」をオンにしたときだけ再開する（勝手に動き続けないように）
+    if pr.get("autoResume") and pr.get("active") and pr.get("from") and pr.get("to"):
         with LOCK:
             if ST["running"]: return
             ST.update(running=True, stop=False, startedAt=dt.datetime.now().isoformat(timespec="seconds"))
@@ -165,6 +166,14 @@ def day_data(ymd, races_only=False):
     return {"date": date, "races": [r for r in j["races"] if r.get("entries")], "horses": horses}
 
 
+def set_auto(on):
+    pr = load_prog(); pr["autoResume"] = bool(on); save_prog(pr)
+
+
+def unmark_all():
+    pr = load_prog(); n = len(pr.get("processed", {})); pr["processed"] = {}; save_prog(pr); return n
+
+
 def unmark(dates):
     """前の版で作った記録を作り直すため、指定した開催日を「予想・学習がまだ」に戻す（取得したデータはそのまま）"""
     pr = load_prog(); p = pr.setdefault("processed", {}); n = 0
@@ -189,6 +198,6 @@ def status():
     if pr.get("from") and pr.get("to"):
         days_total = (min(dt.date.fromisoformat(pr["to"]), dt.date.today() - dt.timedelta(days=1)) - dt.date.fromisoformat(pr["from"])).days + 1
     with LOCK: st = dict(ST); st["log"] = list(ST["log"][-15:])
-    return {**st, "from": pr.get("from"), "to": pr.get("to"), "active": pr.get("active"), "fetchDone": pr.get("fetchDone"),
+    return {**st, "from": pr.get("from"), "to": pr.get("to"), "active": pr.get("active"), "fetchDone": pr.get("fetchDone"), "autoResume": bool(pr.get("autoResume")),
             "daysChecked": len(pr.get("fetched", {})), "daysTotal": days_total, "raceDays": len(fetched), "races": sum(fetched.values()),
             "horses": nh, "pending": sorted(k for k in fetched if k not in processed), "processed": processed}
