@@ -1127,6 +1127,9 @@ const Bets = (() => {
     const x = (race?.result?.rows || []).find(x => x.num === num), m = x && /(\d{3})\(([+-]?\d+)\)/.exec(x.bw || "");
     return m ? { bw: +m[1], d: +m[2] } : null;
   }
+  // 穴馬モデル（Learn.lsFit で学習し、後半のデータで確かめに通ったときだけ使う）：穴馬の1着・3着以内の確率を置き換える
+  let LSF = null;
+  function setLongshot(fn){ LSF = typeof fn === "function" ? fn : null; }
   function bwShift(ctx){
     if (!BWE) return null;
     const sh = ctx.field.map(f => { const b = bwOf(ctx.race, f.num); if (!b) return { win: 0, top3: 0, keys: [] };
@@ -1153,13 +1156,16 @@ const Bets = (() => {
     const adjW = arr => BS ? arr.map((x, i) => shiftLogit(x, BS[i].win)) : arr;
     const adjP = arr => BS ? arr.map((x, i) => shiftLogit(x, BS[i].top3)) : arr;
     // 統合した確率に、馬体重の効き（オッズの見落とし分）を対数オッズで上乗せしてから正規化
-    const tWin = norm(adjW(norm(comb(m0.win, mWin).map((x, i) => m0.win[i] > 1e-6 ? x : 0), 1)), 1);
+    const LS = LSF ? LSF(ctx, m0.win, mWin) : null;     // [{win, top3} | null]（穴馬だけ）
+    const lsW = arr => LS ? arr.map((x, i) => LS[i]?.win != null ? LS[i].win : x) : arr;
+    const tWin = norm(lsW(adjW(norm(comb(m0.win, mWin).map((x, i) => m0.win[i] > 1e-6 ? x : 0), 1))), 1);
     let tPlace = null, mPl = null;
     if (hasPlace){
       const mid = f.map((x, i) => x.placeLo > 0 ? (x.placeLo + (x.placeHi || x.placeLo)) / 2 : null);
       const mx = Math.max(...mid.filter(Boolean));
       mPl = norm(mid.map(v => 1 / (v || mx * 2)), placeK);
-      tPlace = norm(adjP(norm(comb(m0.place, mPl).map((x, i) => m0.place[i] > 1e-6 ? x : 0), placeK)), placeK).map(x => Math.min(0.97, x));
+      const lsP = arr => LS && placeK === 3 ? arr.map((x, i) => LS[i]?.top3 != null ? LS[i].top3 : x) : arr;
+      tPlace = norm(lsP(adjP(norm(comb(m0.place, mPl).map((x, i) => m0.place[i] > 1e-6 ? x : 0), placeK))), placeK).map(x => Math.min(0.97, x));
     }
     for (let it = 0; it < 6; it++){
       if (tPlace){
@@ -1177,7 +1183,7 @@ const Bets = (() => {
     const combH = (pm, pk) => pm.map((x, i) => x > 1e-6 ? Math.pow(x, ha) * Math.pow(Math.max(pk[i], 1e-5), hb) : 0);
     const halfWin = norm(adjW(norm(combH(m0.win, mWin), 1)), 1);
     const halfPlace = mPl ? norm(adjP(norm(combH(m0.place, mPl), placeK)), placeK).map(x => Math.min(0.97, x)) : null;
-    return { w, ess: R * R / s2, modelWin: m0.win, marketWin: mWin, finalWin: tWin, halfWin, halfPlace, bw: BS };
+    return { w, ess: R * R / s2, modelWin: m0.win, marketWin: mWin, finalWin: tWin, halfWin, halfPlace, bw: BS, ls: LS };
   }
 
   // 候補の買い目を列挙（期待値 = 統合確率 × 払戻倍率）
@@ -1351,7 +1357,7 @@ const Bets = (() => {
     return { expReturn: sum / tw, staked, hitRate: hit / tw, profitRate: profit / tw, avgHitPay: hit ? hitSum / hit : 0, maxPay };
   }
 
-  return { candidates, plan, EV_MIN, setMarketBeta, setCalibration, get BETA(){ return BETA; }, get CAL(){ return CAL; }, get EXPS(){ return exps(); }, setBodyWeightEffects, get BWE(){ return BWE; }, bwOf };
+  return { candidates, plan, EV_MIN, setMarketBeta, setCalibration, get BETA(){ return BETA; }, get CAL(){ return CAL; }, get EXPS(){ return exps(); }, setBodyWeightEffects, get BWE(){ return BWE; }, bwOf, setLongshot, get LS(){ return !!LSF; } };
 })();
 
 
@@ -2409,7 +2415,7 @@ const Learn = (() => {
       metrics: { model: logloss(recs, h => h.pm), market: logloss(recs, h => h.pk), blend: logloss(recs, h => Math.pow(h.pm, a) * Math.pow(h.pk, b)) },
       hist, bias: bias(recs, today || new Date().toISOString().slice(0, 10)), sens: +sens.toFixed(3),
       upsets: recs.slice(-400).flatMap(analyzeUpsets).slice(-60), upsetStats: (() => { const us = upsetStats(recs); return { ...us, factors: us.factors.slice(0, 16) }; })(),
-      anaWeights: anaWeights(upsetStats(recs)), paper: paperStats(recs)
+      anaWeights: anaWeights(upsetStats(recs)), paper: paperStats(recs), longshot: lsFit(recs)
     };
   }
 
@@ -2439,6 +2445,134 @@ const Learn = (() => {
       out.push(record(race, ctx, pm, res, betsOf ? betsOf(r) : null, Engine.WEIGHTS, baseW || Engine.WEIGHTS));
     }
     return out;
+  }
+
+
+
+  // ===== 検証レポート：今のAIが「どこまで穴馬を見抜けているか」を、未来の情報を使わずに測る =====
+  // 記録を日付で前後に分け、前の期間だけで統合の比率（a, b）を学習 → 後の期間で評価する（アウトオブサンプル）。
+  // 単勝は確定オッズ＝実際の払戻なので、単勝の回収率は正確。複勝は記録に払戻がないため率だけを見る。
+  function report(recs, splitFrac = 0.6){
+    const R = recs.filter(r => r.h?.length >= 5 && r.order?.length).slice().sort((a, b) => (a.date + a.id).localeCompare(b.date + b.id));
+    if (R.length < 100) return { ok: false, n: R.length };
+    const dates = [...new Set(R.map(r => r.date))]; const cut = dates[Math.floor(dates.length * splitFrac)];
+    const train = R.filter(r => r.date < cut), test = R.filter(r => r.date >= cut);
+    const th = fit(train); const a = th[0], b = th[1];
+    const band = p => p <= 3 ? "1〜3番人気" : p <= 7 ? "4〜7番人気" : p <= 12 ? "8〜12番人気" : "13番人気以下";
+    const BANDS = ["1〜3番人気", "4〜7番人気", "8〜12番人気", "13番人気以下"];
+    const T = {}; BANDS.forEach(k => T[k] = { n: 0, win: 0, top3: 0, ret: 0, rec: { n: 0, win: 0, top3: 0, ret: 0 }, mark: { n: 0, win: 0, top3: 0, ret: 0 } });
+    const calB = [0, 0.02, 0.05, 0.1, 0.2, 0.35, 1.01], cal = calB.slice(0, -1).map((lo, i) => ({ lo, hi: calB[i + 1], n: 0, p: 0, pk: 0, win: 0 }));
+    const evB = [0, 0.6, 0.8, 1.0, 1.1, 1.3, 1.6, 99], evs = evB.slice(0, -1).map((lo, i) => ({ lo, hi: evB[i + 1], n: 0, win: 0, ret: 0 }));
+    const cap = { 4: [], 10: [] };    // 実際に3着以内に来た穴馬の「穴ランキング」での順位（4番人気以下／10番人気以下）
+    let rnd = { 4: 0, 10: 0 };
+    test.forEach(r => {
+      const H = r.h.filter(h => h.pos != null && h.odds > 1); if (H.length < 5) return;
+      const sk = H.reduce((x, h) => x + h.pk, 0);
+      const q = H.map(h => Math.pow(Math.max(h.pm, 1e-5), a) * Math.pow(h.pk / sk, b)); const sq = q.reduce((x, y) => x + y, 0);
+      const P = q.map(x => x / sq);
+      const top = P.indexOf(Math.max(...P));     // 統合確率の1位＝本命（◎の代わり）
+      H.forEach((h, i) => {
+        const pop = h.pop || 99, B = T[band(pop)], hit3 = h.pos <= 3, w = h.pos === 1;
+        B.n++; if (w) { B.win++; B.ret += h.odds; } if (hit3) B.top3++;
+        if (P[i] * h.odds >= 1.1 && P[i] >= 0.02){ B.rec.n++; if (w){ B.rec.win++; B.rec.ret += h.odds; } if (hit3) B.rec.top3++; }   // AIが推奨（単勝の期待値1.1以上）
+        if (i === top){ B.mark.n++; if (w){ B.mark.win++; B.mark.ret += h.odds; } if (hit3) B.mark.top3++; }
+        const c = cal.find(x => P[i] >= x.lo && P[i] < x.hi); if (c){ c.n++; c.p += P[i]; c.pk += h.pk / sk; if (w) c.win++; }
+        const ev = P[i] * h.odds, e = evs.find(x => ev >= x.lo && ev < x.hi); if (e){ e.n++; if (w){ e.win++; e.ret += h.odds; } }
+      });
+      // 穴ランキング：その人気帯以下の馬を「モデル÷オッズ」（市場より何倍高く評価しているか）で並べる
+      [4, 10].forEach(minPop => {
+        const L = H.map((h, i) => ({ h, s: h.pm / Math.max(h.pk / sk, 1e-6) })).filter(x => (x.h.pop || 99) >= minPop).sort((x, y) => y.s - x.s);
+        L.forEach((x, k) => { if (x.h.pos <= 3){ cap[minPop].push({ rank: k + 1, of: L.length, pop: x.h.pop }); } });
+      });
+    });
+    const capStat = arr => { if (!arr.length) return null; const at = k => arr.filter(x => x.rank <= k).length; const exp = k => arr.reduce((s, x) => s + Math.min(1, k / x.of), 0);
+      return { n: arr.length, meanRank: +(arr.reduce((s, x) => s + x.rank, 0) / arr.length).toFixed(1), meanOf: +(arr.reduce((s, x) => s + x.of, 0) / arr.length).toFixed(1),
+        at: [3, 5, 10, 20].map(k => ({ k, hit: at(k), rate: +(at(k) / arr.length).toFixed(3), random: +(exp(k) / arr.length).toFixed(3) })) }; };
+    const fin = o => ({ n: o.n, winRate: o.n ? +(o.win / o.n).toFixed(4) : null, top3Rate: o.n ? +(o.top3 / o.n).toFixed(4) : null, winROI: o.n ? +(o.ret / o.n).toFixed(3) : null });
+    return { ok: true, races: R.length, trainRaces: train.length, testRaces: test.length, cut, calib: { a: +a.toFixed(3), b: +b.toFixed(3) },
+      bands: BANDS.map(k => ({ band: k, all: fin(T[k]), rec: fin(T[k].rec), mark: fin(T[k].mark) })),
+      calibration: cal.filter(c => c.n).map(c => ({ range: `${Math.round(c.lo * 100)}〜${Math.round(Math.min(c.hi, 1) * 100)}%`, n: c.n, pred: +(c.p / c.n).toFixed(4), market: +(c.pk / c.n).toFixed(4), actual: +(c.win / c.n).toFixed(4) })),
+      ev: evs.filter(e => e.n).map(e => ({ range: `${e.lo}〜${e.hi >= 99 ? "" : e.hi}`, n: e.n, winRate: +(e.win / e.n).toFixed(4), roi: +(e.ret / e.n).toFixed(3) })),
+      capture: { pop4: capStat(cap[4]), pop10: capStat(cap[10]) } };
+  }
+
+  // ===== 穴馬モデル：人気薄（6番人気以下・15倍以上）だけを対象に、「オッズが見落としている分」を直接学習する =====
+  // 全体の確率の当てやすさでは、人気馬の比重が大きく穴馬の見極めが埋もれてしまうので、穴馬だけを別に学習する。
+  // 目的は回収率：オッズから見た確率に対して、どの特徴を持つ穴馬が「より来る／来ない」かを、1着・3着以内それぞれで推定。
+  // 過去の前半で学習 → 後半で確かめ、オッズだけより当たるようになったときだけ予想に使う（使えないと分かれば自動で止める）。
+  const LS_ANA = Object.keys(ANA_PTS);
+  const LS_STYLES = ["逃げ", "先行", "差し", "追込"];
+  const LS_NAMES = [...FEATS.map(k => "要素:" + k), ...LS_ANA.map(k => "穴:" + k), "枠:内", "枠:外", ...LS_STYLES.map(k => "脚質:" + k), "モデル÷オッズ"];
+  const logitF = p => { const q = Math.min(0.999, Math.max(1e-5, p)); return Math.log(q / (1 - q)); };
+  function lsRow(h){
+    const st = LS_STYLES.map(k => h.style === k ? 1 : 0);
+    return [...FEATS.map((_, j) => h.z?.[j] || 0), ...LS_ANA.map(k => (h.ana || []).includes(k) ? 1 : 0),
+      h.gate <= 0.2 ? 1 : 0, h.gate >= 0.8 ? 1 : 0, ...st, Math.max(-3, Math.min(3, Math.log(Math.max(h.pm, 1e-4) / Math.max(h.pk, 1e-4))))];
+  }
+  // 正則化つきロジスティック回帰（オフセット＝オッズから見た確率のlogit。係数は x を標準化した単位）
+  function lsLogit(X, off, y, lam){
+    const n = X.length, K = X[0].length;
+    const mu = new Array(K).fill(0), sd = new Array(K).fill(1);
+    for (let k = 0; k < K; k++){ let s = 0; for (const x of X) s += x[k]; mu[k] = s / n; let v = 0; for (const x of X) v += (x[k] - mu[k]) ** 2; sd[k] = Math.sqrt(v / n) || 1; }
+    const Z = X.map(x => [1, ...x.map((v, k) => (v - mu[k]) / sd[k])]);
+    let b = new Array(K + 2).fill(0); b[K + 1] = 1;               // 最後がオフセットの係数（初期値1）
+    for (let it = 0; it < 25; it++){
+      const g = new Array(K + 2).fill(0), H = Array.from({ length: K + 2 }, () => new Array(K + 2).fill(0));
+      for (let i = 0; i < n; i++){
+        const z = [...Z[i], off[i]]; let e = 0; for (let k = 0; k < K + 2; k++) e += b[k] * z[k];
+        const p = 1 / (1 + Math.exp(-e)), w = p * (1 - p);
+        for (let k = 0; k < K + 2; k++){ g[k] += (y[i] - p) * z[k]; for (let l = 0; l < K + 2; l++) H[k][l] += w * z[k] * z[l]; }
+      }
+      for (let k = 1; k <= K; k++){ g[k] -= lam * b[k]; H[k][k] += lam; }      // 特徴の係数だけ0に引き寄せる
+      H[0][0] += 1e-6; H[K + 1][K + 1] += 1e-6;
+      const st = solve(H, g); b = b.map((v, k) => v + st[k]);
+      if (Math.max(...st.map(Math.abs)) < 1e-7) break;
+    }
+    return { b, mu, sd };
+  }
+  function lsPredRow(m, x, off){ let e = m.b[0] + m.b[m.b.length - 1] * off; x.forEach((v, k) => e += m.b[k + 1] * (v - m.mu[k]) / m.sd[k]); return 1 / (1 + Math.exp(-e)); }
+  function lsData(recs){
+    const out = [];
+    recs.forEach(r => {
+      const H = r.h.filter(h => h.pos && h.pk > 0); if (H.length < 5) return;
+      const s = H.reduce((a, h) => a + h.pk, 0), pk = H.map(h => h.pk / s), t3 = top3FromMarket(pk);
+      H.forEach((h, i) => { if (!isLong(h)) return; out.push({ date: r.date, x: lsRow(h), oW: logitF(pk[i]), o3: logitF(t3[i]), yW: h.pos === 1 ? 1 : 0, y3: h.pos <= 3 ? 1 : 0, odds: h.odds }); });
+    });
+    return out;
+  }
+  function lsFit(recs, lam = 30){
+    const D = lsData(recs);
+    if (D.length < 800) return { enabled: false, n: D.length, reason: "穴馬のデータが800頭未満" };
+    const dates = [...new Set(D.map(d => d.date))].sort(); const cut = dates[Math.floor(dates.length * 0.7)];
+    const tr = D.filter(d => d.date < cut), te = D.filter(d => d.date >= cut);
+    const ll = (ps, ys) => -ps.reduce((a, p, i) => a + (ys[i] ? Math.log(p) : Math.log(1 - p)), 0) / ps.length;
+    const evalOne = (key, offKey) => {
+      const m = lsLogit(tr.map(d => d.x), tr.map(d => d[offKey]), tr.map(d => d[key]), lam);
+      const base = lsLogit(tr.map(() => []), tr.map(d => d[offKey]), tr.map(d => d[key]), lam);   // オッズだけ（くせの補正のみ）
+      const p = te.map(d => lsPredRow(m, d.x, d[offKey])), p0 = te.map(d => lsPredRow(base, [], d[offKey])), y = te.map(d => d[key]);
+      // 1頭ごとの改善量の平均と標準誤差：偶然でなく良くなったか（改善が標準誤差の2倍以上）を判定
+      const dif = p.map((q, i) => (y[i] ? Math.log(q) - Math.log(p0[i]) : Math.log(1 - q) - Math.log(1 - p0[i])));
+      const md = dif.reduce((a, b) => a + b, 0) / dif.length, sdd = Math.sqrt(dif.reduce((a, b) => a + (b - md) ** 2, 0) / Math.max(1, dif.length - 1)) / Math.sqrt(dif.length);
+      return { ll: ll(p, y), ll0: ll(p0, y), p, p0, z: sdd > 0 ? md / sdd : 0 };
+    };
+    const W = evalOne("yW", "oW"), T = evalOne("y3", "o3");
+    // 後半での回収率（単勝）：穴馬の中で「予測の1着率×オッズ」が1.1以上の馬を100円ずつ買った場合
+    let inv = 0, ret = 0, inv0 = 0, ret0 = 0;
+    te.forEach((d, i) => { if (W.p[i] * d.odds >= 1.1){ inv += 100; if (d.yW) ret += d.odds * 100; } if (W.p0[i] * d.odds >= 1.1){ inv0 += 100; if (d.yW) ret0 += d.odds * 100; } });
+    const valid = { n: D.length, nTest: te.length, from: cut, llWin: +W.ll.toFixed(4), llWin0: +W.ll0.toFixed(4), llTop3: +T.ll.toFixed(4), llTop30: +T.ll0.toFixed(4), zWin: +W.z.toFixed(2), zTop3: +T.z.toFixed(2),
+      bets: inv / 100, roi: inv ? +(ret / inv).toFixed(3) : null, bets0: inv0 / 100, roi0: inv0 ? +(ret0 / inv0).toFixed(3) : null };
+    const winOK = W.z >= 2, topOK = T.z >= 2;
+    // 確かめに通った方だけ、全データで学習し直して使う
+    const mW = winOK ? lsLogit(D.map(d => d.x), D.map(d => d.oW), D.map(d => d.yW), lam) : null;
+    const m3 = topOK ? lsLogit(D.map(d => d.x), D.map(d => d.o3), D.map(d => d.y3), lam) : null;
+    const coef = m => m ? LS_NAMES.map((k, j) => [k, +(m.b[j + 1]).toFixed(3)]).filter(([, v]) => Math.abs(v) >= 0.05).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 12) : [];
+    return { enabled: winOK || topOK, n: D.length, win: mW, top3: m3, valid, coefWin: coef(mW), coefTop3: coef(m3) };
+  }
+  // 予想のとき：出走馬（穴馬だけ）について、1着・3着以内の確率を返す（使えない・穴馬でないときは null）
+  function lsPredict(model, h, pkWin, pkTop3){
+    if (!model?.enabled || !isLong(h)) return null;
+    const x = lsRow(h);
+    return { win: model.win ? lsPredRow(model.win, x, logitF(pkWin)) : null, top3: model.top3 ? lsPredRow(model.top3, x, logitF(pkTop3)) : null };
   }
 
   // ===== 馬体重（増減）の効き：過去の全出走から推定 =====
@@ -2502,7 +2636,7 @@ const Learn = (() => {
     return out;
   }
 
-  return { RV, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
+  return { RV, report, lsFit, lsPredict, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
 })();
 
 
@@ -3133,7 +3267,9 @@ function mixRes(cells, N){
 }
 let simBusy = false;
 async function runSim(silent, opt = {}){
-  const r = opt.id ? DB.races[opt.id] : curRace(); if (!r?.entries?.length || simBusy) return;
+  const r = opt.id ? DB.races[opt.id] : curRace(); if (!r?.entries?.length) return;
+  // 一括予想・過去データの処理が同時に動いても、レースを飛ばさないよう順番待ちする（画面のボタンからの実行は、計算中なら無視）
+  if (simBusy){ if (!opt.id) return; while (simBusy) await new Promise(res => setTimeout(res, 50)); if (!DB.races[r.id]) return; }
   simBusy = true;
   const RUNS = opt.runs || ST.runs, isCur = r.id === ST.raceId;
   const btn = isCur ? $("#runBtn") : null; if (btn){ btn.disabled = true; btn.textContent = "計算中…"; }
@@ -3928,6 +4064,65 @@ const BWEFF = { e: null };
 function applyBodyWeight(){
   try { BWEFF.e = Learn.bodyWeightEffects(DB.horses); Bets.setBodyWeightEffects(BWEFF.e); } catch (e) { console.error(e); }
 }
+// ===== 検証レポート（未来の情報を使わない確かめ） =====
+const REPORT = { r: null, busy: false };
+async function makeReport(){
+  if (REPORT.busy) return; REPORT.busy = true; renderLearnTab();
+  try {
+    const full = SERVER.cloud ? await staticJson("learn.json", 120000) : await api("/api/learn?full=1", { timeout: 120000 });
+    await new Promise(r => setTimeout(r, 30));
+    REPORT.r = Learn.report(full.records || []);
+  } catch (e) { toast("レポートを作れませんでした：" + e.message); }
+  REPORT.busy = false; renderLearnTab();
+}
+function reportPanel(){
+  const R = REPORT.r;
+  const btn = `<div class="ctrls"><button class="btn primary" id="mkReport" ${REPORT.busy ? "disabled" : ""}>${REPORT.busy ? "計算中…" : R ? "作り直す" : "検証レポートを作る"}</button></div>`;
+  const head = `<div class="learnbox"><h3>検証レポート <span class="small">今のAIがどこまで穴馬を見抜けているか（未来の情報を使わない確かめ）</span></h3>
+    <p class="small">学習済みの記録を日付で前後に分け、<b>前の期間だけ</b>でモデルとオッズの統合の比率を学習し、<b>後の期間</b>で成績を測ります。単勝は確定オッズ＝実際の払戻なので回収率は正確です（複勝は記録に払戻がないため率のみ）。
+    期待値は券種ごとに「その券種が当たる確率 × その券種のオッズ」で計算しています（単勝＝1着率×単勝、複勝＝3着内率×複勝の下限、馬連・ワイド・馬単・3連複＝その組み合わせが当たる確率×その組み合わせのオッズ）。</p>`;
+  if (!R) return head + btn + "</div>";
+  if (!R.ok) return head + `<p class="small">記録が${R.n}レースで、まだ足りません（100レース以上で作れます）。</p>` + btn + "</div>";
+  const pct1 = x => x == null ? "—" : (x * 100).toFixed(1) + "%", roi = x => x == null ? "—" : Math.round(x * 100) + "%";
+  const cap = (c, title) => c ? `<p class="small"><b>${title}</b>：実際に3着以内に来た ${c.n}頭が、AIの穴ランキング（モデル÷オッズの順、その人気帯の${c.meanOf}頭中）で平均 <b>${c.meanRank}位</b>。</p>
+    <div class="tbl-wrap"><table><thead><tr><th></th>${c.at.map(x => `<th class="r">上位${x.k}以内</th>`).join("")}</tr></thead><tbody>
+    <tr><td>AIの穴ランキング</td>${c.at.map(x => `<td class="r num"><b>${pct1(x.rate)}</b>（${x.hit}頭）</td>`).join("")}</tr>
+    <tr><td class="small">適当に並べた場合</td>${c.at.map(x => `<td class="r num small">${pct1(x.random)}</td>`).join("")}</tr></tbody></table></div>` : "";
+  return head + `<p class="small">学習 ${R.trainRaces}レース（${esc(R.cut)}より前）→ 検証 <b>${R.testRaces}レース</b>（${esc(R.cut)}以降）。前の期間で学習した統合の比率：モデル${R.calib.a}・オッズ${R.calib.b}</p>
+    <h4>① 人気帯別（検証期間）</h4>
+    <div class="tbl-wrap"><table><thead><tr><th>人気帯</th><th class="r">頭数</th><th class="r">勝率</th><th class="r">複勝率</th><th class="r">単勝回収率</th><th class="r">AI推奨（単勝の期待値1.1以上）</th><th class="r">AIの本命</th></tr></thead><tbody>
+    ${R.bands.map(b => `<tr><td>${b.band}</td><td class="r num">${b.all.n}</td><td class="r num">${pct1(b.all.winRate)}</td><td class="r num">${pct1(b.all.top3Rate)}</td><td class="r num">${roi(b.all.winROI)}</td>
+      <td class="r num small">${b.rec.n ? `${b.rec.n}頭・勝率${pct1(b.rec.winRate)}・回収率<b>${roi(b.rec.winROI)}</b>` : "—"}</td>
+      <td class="r num small">${b.mark.n ? `${b.mark.n}回・勝率${pct1(b.mark.winRate)}・複勝率${pct1(b.mark.top3Rate)}・回収率<b>${roi(b.mark.winROI)}</b>` : "—"}</td></tr>`).join("")}
+    </tbody></table></div>
+    <h4>② 穴馬捕捉率（AIが拾えなかった穴馬の記録）</h4>
+    ${cap(R.capture.pop4, "4番人気以下")}${cap(R.capture.pop10, "10番人気以下")}
+    <p class="small">「適当に並べた場合」より大きく上回っていれば、材料から穴馬を見抜く力がある（最終選定の改善で伸びる）。同じくらいなら、材料そのものを改善する必要がある、という判断になります。</p>
+    <h4>③ 確率のキャリブレーション（AIの「◯%」は本当に◯%か・1着）</h4>
+    <div class="tbl-wrap"><table><thead><tr><th>AIの予測</th><th class="r">頭数</th><th class="r">AIの予測平均</th><th class="r">オッズの予測平均</th><th class="r">実際の勝率</th></tr></thead><tbody>
+    ${R.calibration.map(c => `<tr><td>${c.range}</td><td class="r num">${c.n}</td><td class="r num">${pct1(c.pred)}</td><td class="r num">${pct1(c.market)}</td><td class="r num"><b>${pct1(c.actual)}</b></td></tr>`).join("")}
+    </tbody></table></div>
+    <h4>④ 期待値の帯ごとの実際の回収率（単勝・検証期間）</h4>
+    <div class="tbl-wrap"><table><thead><tr><th>AIの期待値</th><th class="r">頭数</th><th class="r">勝率</th><th class="r">実際の回収率</th></tr></thead><tbody>
+    ${R.ev.map(e => `<tr><td>${e.range}</td><td class="r num">${e.n}</td><td class="r num">${pct1(e.winRate)}</td><td class="r num"><b>${roi(e.roi)}</b></td></tr>`).join("")}
+    </tbody></table></div>
+    <p class="small">期待値1.1以上の帯の実際の回収率が100%を超えていれば「1.1」という買う基準は正しく働いています。下回っていれば、AIの確率がまだ過大で、基準を上げるかモデルの改善が必要です。</p>` + btn + "</div>";
+}
+function longshotPanel(){
+  const L = LEARN.model?.longshot; if (!L) return "";
+  const v = L.valid;
+  if (!v) return `<div class="learnbox"><h3>穴馬モデル</h3><p class="small">穴馬（6番人気以下・15倍以上）のデータが${L.n}頭です。800頭以上たまると学習と確かめを始めます。</p></div>`;
+  const imp = (a, b) => a < b ? "オッズだけより良い" : "オッズだけより悪い";
+  return `<div class="learnbox"><h3>穴馬モデル <span class="small">${L.enabled ? "<b class='pos'>使用中</b>" : "未使用（確かめに通っていない）"}</span></h3>
+    <p class="small">穴馬だけを対象に、要素の点数・穴パターン・枠・脚質・モデルとオッズの差から、オッズが見落としている分を学習します。古い7割で学習し、新しい3割（${esc(v.from)}以降・${v.nTest.toLocaleString()}頭）で確かめ、<b>オッズだけより偶然でなく良くなったとき（z≧2）だけ</b>予想に使います。</p>
+    <div class="tbl-wrap"><table><thead><tr><th></th><th class="r">確かめの成績（小さいほど良い）</th><th class="r">オッズだけ</th><th class="r">z</th><th>判定</th></tr></thead><tbody>
+      <tr><td>1着</td><td class="r num">${v.llWin}</td><td class="r num">${v.llWin0}</td><td class="r num">${v.zWin}</td><td>${imp(v.llWin, v.llWin0)}${L.win ? "・使用中" : ""}</td></tr>
+      <tr><td>3着以内</td><td class="r num">${v.llTop3}</td><td class="r num">${v.llTop30}</td><td class="r num">${v.zTop3}</td><td>${imp(v.llTop3, v.llTop30)}${L.top3 ? "・使用中" : ""}</td></tr>
+    </tbody></table></div>
+    <p class="small">確かめの期間に、穴馬モデルで「期待値1.1以上」と判定した単勝を買っていた場合：${v.bets}頭・回収率 ${v.roi != null ? Math.round(v.roi * 100) + "%" : "—"}（穴馬全${v.n.toLocaleString()}頭で学習）。${!L.enabled ? "今のところ、穴馬の見極めはオッズを上回れていないため使っていません。データが増えるたびに自動で学習・確かめ直し、上回れば自動で使い始めます。" : ""}</p>
+    ${L.enabled && (L.coefWin?.length || L.coefTop3?.length) ? `<p class="small"><b>効いている特徴</b>（＋は来やすい、−は来にくい）：${[...(L.coefTop3 || []), ...(L.coefWin || [])].slice(0, 10).map(([k, c]) => `${esc(k)} ${c > 0 ? "+" : ""}${c}`).join("・")}</p>` : ""}
+  </div>`;
+}
 function bodyWeightPanel(){
   const e = BWEFF.e; if (!e) return "";
   if (!e.win || !Object.keys(e.win).length) return `<div class="learnbox"><h3>馬体重の効き</h3><p class="small">過去の出走データ（馬体重つき）が${e.n}件で、推定にはまだ足りません（300件以上で推定）。</p></div>`;
@@ -4055,6 +4250,15 @@ function applyLearn(m){
   Object.entries(m.weights || {}).forEach(([k, v]) => { w[k] = (w[k] ?? 1) * v; });
   Engine.setWeights(w);
   if (m.anaWeights && Object.keys(m.anaWeights).length) Engine.setAnaWeights(m.anaWeights);
+  // 穴馬モデル：後半のデータで確かめに通ったときだけ使う
+  Bets.setLongshot(m.longshot?.enabled ? (ctx, pmWin, pkWin) => {
+    const N = ctx.N, W = Engine.WEIGHTS, t3 = Learn.top3FromMarket(pkWin);
+    return ctx.field.map((f, i) => {
+      const h = { pop: f.pop, odds: f.odds, gate: (f.num - 1) / Math.max(1, N - 1), style: f.style, ana: f.ana || [], pm: pmWin[i], pk: pkWin[i],
+        z: Learn.FEATS.map(k => (f.adj?.[k] || 0) / (k === "能力" ? 1 : (W[k] ?? 1) || 1)) };
+      return Learn.lsPredict(m.longshot, h, pkWin[i], t3[i]);
+    });
+  } : null);
   updateLearnChip();
 }
 function updateLearnChip(){
@@ -4079,7 +4283,8 @@ async function bfStart(){
 }
 async function bfStop(){ try { await api("/api/backfill/stop", { method: "POST" }); } catch (e) {} await bfRefresh(); renderLearnTab(); }
 function bfEnsure(){
-  if (!BF.timer) BF.timer = setInterval(async () => { await bfRefresh(); if (ST.tab === "learn") renderLearnTab(); bfProcessLoop(); }, 60000);
+  // 取得中は15秒ごとに状況を読み直す（学習・成績タブを開いているときだけ画面を更新）
+  if (!BF.timer) BF.timer = setInterval(async () => { await bfRefresh(); if (ST.tab === "learn" && !document.activeElement?.closest?.("#p-learn input")) renderLearnTab(); bfProcessLoop(); }, 15000);
   bfProcessLoop();
 }
 async function bfProcessLoop(){
@@ -4100,7 +4305,7 @@ async function bfProcessLoop(){
   } catch (e) { console.error(e); BF.msg = "処理が止まりました：" + e.message; }
   finally {
     // 処理が終わったら（止めたときも）、すべての記録で学習したモデルに戻して、これからの予想に使う
-    if (BF.recs?.length){ const latest = BF.recs.reduce((m, r) => r.date > m ? r.date : m, ""); applyLearn(Learn.build(BF.recs, latest)); }
+    if (BF.recs?.length){ const latest = BF.recs.reduce((m, r) => r.date > m ? r.date : m, ""); BF.full = Learn.build(BF.recs, latest); applyLearn(BF.full); }
     BF.proc = false; if (ST.tab === "learn") renderLearnTab();
   }
 }
@@ -4108,6 +4313,7 @@ async function bfPostLearn(){
   // 保存するのは、すべての記録で学習したモデル（今後の予想に使う）
   const latest = BF.recs.reduce((m, r) => r.date > m ? r.date : m, "");
   const model = Learn.build(BF.recs, latest || iso(new Date()));
+  BF.full = model; if (!simBusy) applyLearn(model);
   await api("/api/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, append: BF.pendRecs, bulk: true }), timeout: 120000 });
   BF.pendRecs = [];
 }
@@ -4119,12 +4325,17 @@ async function bfProcessDay(j, left){
   const races = racesOfDay(d);
   BF.msg = `${d.slice(0, 4)}/${d.slice(5).replace("-", "/")} を予想中（残り${left}開催日）`;
   try {
-    // その日より前の結果だけで学習したモデルに切り替える（未来の結果で学習したモデルで過去を予想しない）
-    applyLearn(Learn.build(BF.recs.filter(r => r.date < d), d));
+    // その日より前の結果だけで学習したモデル（未来の結果で学習したモデルで過去を予想しない）。
+    // 使うのはこの処理の予想の間だけで、1レースごとに元のモデル（全部の記録で学習）に戻す＝画面で同時に予想しても混ざらない
+    const wf = Learn.build(BF.recs.filter(r => r.date < d), d);
+    if (!BF.full) BF.full = LEARN.model;
     // ① 予想（この時点のモデル＝この日より前の結果だけで学習したもの）
     for (let i = 0; i < races.length; i++){
       if (BF.pause) return;
-      await runSim(true, { id: races[i].id, runs: BATCH_RUNS, onProgress: p => setUpdProgress((i + p) / races.length, `過去データ ${d}：${i + 1}/${races.length}レースを予想中（残り${left}開催日）`) });
+      while (simBusy || BATCH.running || CHECK_ALL.running) await bfSleep(200);
+      applyLearn(wf);
+      try { await runSim(true, { id: races[i].id, runs: BATCH_RUNS, onProgress: p => setUpdProgress((i + p) / races.length, `過去データ ${d}：${i + 1}/${races.length}レースを予想中（残り${left}開催日）`) }); }
+      finally { if (BF.full) applyLearn(BF.full); }
     }
     // ② 答え合わせ（確定オッズ・確定払戻で集計）
     const keepMode = CHECK_MODE.v; CHECK_MODE.v = "latest"; const c = computeCheck(d); CHECK_MODE.v = keepMode;
@@ -4133,7 +4344,11 @@ async function bfProcessDay(j, left){
     // ③ 学習（その日の結果を記録して、次の日からの予想に使う）
     const betsOf = r => { const p = c.per[r.id]; if (!p) return null; const pick = k => p.plans[k] ? [p.plans[k].inv, Math.round(p.plans[k].ret)] : [0, 0]; return { t1: pick("1000"), t5: pick("5000"), te: pick("e1000"), t1s: pick("1000s"), src: "backfill" }; };
     setUpdProgress(1, `過去データ ${d}：結果を学習中`);
-    const recs = await Learn.recordsForRaces(Engine, races.filter(r => r.result?.rows?.length), DB.horses, trackOf, 2000, betsOf, LEARN.base || Engine.WEIGHTS);
+    // 記録（モデルの確率など）も、その日より前のデータで学習したモデルの状態で作る（検証に未来の情報が混ざらないように）
+    while (simBusy || BATCH.running || CHECK_ALL.running) await bfSleep(200);
+    applyLearn(wf); let recs;
+    try { recs = await Learn.recordsForRaces(Engine, races.filter(r => r.result?.rows?.length), DB.horses, trackOf, 2000, betsOf, LEARN.base || Engine.WEIGHTS); }
+    finally { if (BF.full) applyLearn(BF.full); }
     BF.recs = Learn.merge(BF.recs, recs); BF.pendRecs.push(...recs);
     await api("/api/backfill/done", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date: ymdOf(d), result }) });
     if (BF.pendRecs.length >= 120 || left <= 1) await bfPostLearn();
@@ -4164,6 +4379,7 @@ function bfPanel(){
       ${s.running ? `<button class="btn" id="bfStop">取得を止める</button>` : `<button class="btn primary" id="bfStart">取得を${s.daysChecked ? "再開・期間を変更" : "開始"}</button>`}
       <button class="btn" id="bfPause">${BF.pause ? "予想・学習を再開" : "予想・学習を一時停止"}</button></div>
     ${s.from ? `<p class="small"><b>取得</b>：${s.running ? `取得中（${esc(s.cur || "")} ${esc(s.phase || "")}）` : s.fetchDone ? "完了" : "停止中"}・${s.daysChecked || 0}/${s.daysTotal || "—"}日を確認（${pct0}%）・開催${s.raceDays || 0}日・${(s.races || 0).toLocaleString()}レース・出走馬${(s.horses || 0).toLocaleString()}頭
+      ${s.running ? `<br><span class="small">ここまでの取得 ${(s.requests || 0).toLocaleString()}回。最初のほうの日は出走馬の成績を初めて取るので1日分に30分ほどかかります（馬がそろうにつれ速くなります）。1日分が終わるたびに数字が増えます。</span>` : ""}
       <br><b>予想・答え合わせ・学習</b>：${days.length}開催日（${nR.toLocaleString()}レース）済み・残り${(s.pending || []).length}開催日${BF.proc ? `・処理中（${esc(BF.msg)}）` : BF.pause ? "・一時停止中" : ""}${last ? `・今のモデルの比重 ${last.a}` : ""}</p>` : ""}
     ${days.length ? `<div class="tbl-wrap"><table><thead><tr><th>買い方</th><th class="r">購入R</th><th class="r">投資</th><th class="r">払戻</th><th class="r">回収率</th>${Object.keys(byYear).sort().map(y => `<th class="r">${y}年</th>`).join("")}</tr></thead><tbody>
       ${Object.keys(L).filter(k => sum[k]?.races).map(k => `<tr><td>${L[k]}</td><td class="r num">${sum[k].races.toLocaleString()}</td><td class="r num">${yen(sum[k].inv)}</td><td class="r num">${yen(sum[k].ret)}</td><td class="r num ${sum[k].ret >= sum[k].inv ? "pos" : "neg"}"><b>${rate(sum[k])}</b></td>${Object.keys(byYear).sort().map(y => `<td class="r num">${rate(byYear[y][k])}</td>`).join("")}</tr>`).join("")}
@@ -4197,8 +4413,11 @@ function renderLearnTab(){
     </div>` : ""}
     ${m ? upsetPanel(d) : ""}
     ${m ? learnPanel() : ""}
+    ${reportPanel()}
+    ${longshotPanel()}
     ${bodyWeightPanel()}
     ${bfPanel()}`;
+  const mr = $("#mkReport"); if (mr) mr.onclick = makeReport;
   const bs1 = $("#bfStart"); if (bs1) bs1.onclick = bfStart;
   const bs2 = $("#bfStop"); if (bs2) bs2.onclick = bfStop;
   const bs3 = $("#bfPause"); if (bs3) bs3.onclick = () => { BF.pause = !BF.pause; if (!BF.pause) bfProcessLoop(); renderLearnTab(); };

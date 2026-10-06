@@ -88,6 +88,9 @@ const Bets = (() => {
     const x = (race?.result?.rows || []).find(x => x.num === num), m = x && /(\d{3})\(([+-]?\d+)\)/.exec(x.bw || "");
     return m ? { bw: +m[1], d: +m[2] } : null;
   }
+  // 穴馬モデル（Learn.lsFit で学習し、後半のデータで確かめに通ったときだけ使う）：穴馬の1着・3着以内の確率を置き換える
+  let LSF = null;
+  function setLongshot(fn){ LSF = typeof fn === "function" ? fn : null; }
   function bwShift(ctx){
     if (!BWE) return null;
     const sh = ctx.field.map(f => { const b = bwOf(ctx.race, f.num); if (!b) return { win: 0, top3: 0, keys: [] };
@@ -114,13 +117,16 @@ const Bets = (() => {
     const adjW = arr => BS ? arr.map((x, i) => shiftLogit(x, BS[i].win)) : arr;
     const adjP = arr => BS ? arr.map((x, i) => shiftLogit(x, BS[i].top3)) : arr;
     // 統合した確率に、馬体重の効き（オッズの見落とし分）を対数オッズで上乗せしてから正規化
-    const tWin = norm(adjW(norm(comb(m0.win, mWin).map((x, i) => m0.win[i] > 1e-6 ? x : 0), 1)), 1);
+    const LS = LSF ? LSF(ctx, m0.win, mWin) : null;     // [{win, top3} | null]（穴馬だけ）
+    const lsW = arr => LS ? arr.map((x, i) => LS[i]?.win != null ? LS[i].win : x) : arr;
+    const tWin = norm(lsW(adjW(norm(comb(m0.win, mWin).map((x, i) => m0.win[i] > 1e-6 ? x : 0), 1))), 1);
     let tPlace = null, mPl = null;
     if (hasPlace){
       const mid = f.map((x, i) => x.placeLo > 0 ? (x.placeLo + (x.placeHi || x.placeLo)) / 2 : null);
       const mx = Math.max(...mid.filter(Boolean));
       mPl = norm(mid.map(v => 1 / (v || mx * 2)), placeK);
-      tPlace = norm(adjP(norm(comb(m0.place, mPl).map((x, i) => m0.place[i] > 1e-6 ? x : 0), placeK)), placeK).map(x => Math.min(0.97, x));
+      const lsP = arr => LS && placeK === 3 ? arr.map((x, i) => LS[i]?.top3 != null ? LS[i].top3 : x) : arr;
+      tPlace = norm(lsP(adjP(norm(comb(m0.place, mPl).map((x, i) => m0.place[i] > 1e-6 ? x : 0), placeK))), placeK).map(x => Math.min(0.97, x));
     }
     for (let it = 0; it < 6; it++){
       if (tPlace){
@@ -138,7 +144,7 @@ const Bets = (() => {
     const combH = (pm, pk) => pm.map((x, i) => x > 1e-6 ? Math.pow(x, ha) * Math.pow(Math.max(pk[i], 1e-5), hb) : 0);
     const halfWin = norm(adjW(norm(combH(m0.win, mWin), 1)), 1);
     const halfPlace = mPl ? norm(adjP(norm(combH(m0.place, mPl), placeK)), placeK).map(x => Math.min(0.97, x)) : null;
-    return { w, ess: R * R / s2, modelWin: m0.win, marketWin: mWin, finalWin: tWin, halfWin, halfPlace, bw: BS };
+    return { w, ess: R * R / s2, modelWin: m0.win, marketWin: mWin, finalWin: tWin, halfWin, halfPlace, bw: BS, ls: LS };
   }
 
   // 候補の買い目を列挙（期待値 = 統合確率 × 払戻倍率）
@@ -312,6 +318,6 @@ const Bets = (() => {
     return { expReturn: sum / tw, staked, hitRate: hit / tw, profitRate: profit / tw, avgHitPay: hit ? hitSum / hit : 0, maxPay };
   }
 
-  return { candidates, plan, EV_MIN, setMarketBeta, setCalibration, get BETA(){ return BETA; }, get CAL(){ return CAL; }, get EXPS(){ return exps(); }, setBodyWeightEffects, get BWE(){ return BWE; }, bwOf };
+  return { candidates, plan, EV_MIN, setMarketBeta, setCalibration, get BETA(){ return BETA; }, get CAL(){ return CAL; }, get EXPS(){ return exps(); }, setBodyWeightEffects, get BWE(){ return BWE; }, bwOf, setLongshot, get LS(){ return !!LSF; } };
 })();
 if (typeof module !== "undefined") module.exports = Bets;

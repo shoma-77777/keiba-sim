@@ -251,7 +251,7 @@ const Learn = (() => {
       metrics: { model: logloss(recs, h => h.pm), market: logloss(recs, h => h.pk), blend: logloss(recs, h => Math.pow(h.pm, a) * Math.pow(h.pk, b)) },
       hist, bias: bias(recs, today || new Date().toISOString().slice(0, 10)), sens: +sens.toFixed(3),
       upsets: recs.slice(-400).flatMap(analyzeUpsets).slice(-60), upsetStats: (() => { const us = upsetStats(recs); return { ...us, factors: us.factors.slice(0, 16) }; })(),
-      anaWeights: anaWeights(upsetStats(recs)), paper: paperStats(recs)
+      anaWeights: anaWeights(upsetStats(recs)), paper: paperStats(recs), longshot: lsFit(recs)
     };
   }
 
@@ -281,6 +281,134 @@ const Learn = (() => {
       out.push(record(race, ctx, pm, res, betsOf ? betsOf(r) : null, Engine.WEIGHTS, baseW || Engine.WEIGHTS));
     }
     return out;
+  }
+
+
+
+  // ===== 検証レポート：今のAIが「どこまで穴馬を見抜けているか」を、未来の情報を使わずに測る =====
+  // 記録を日付で前後に分け、前の期間だけで統合の比率（a, b）を学習 → 後の期間で評価する（アウトオブサンプル）。
+  // 単勝は確定オッズ＝実際の払戻なので、単勝の回収率は正確。複勝は記録に払戻がないため率だけを見る。
+  function report(recs, splitFrac = 0.6){
+    const R = recs.filter(r => r.h?.length >= 5 && r.order?.length).slice().sort((a, b) => (a.date + a.id).localeCompare(b.date + b.id));
+    if (R.length < 100) return { ok: false, n: R.length };
+    const dates = [...new Set(R.map(r => r.date))]; const cut = dates[Math.floor(dates.length * splitFrac)];
+    const train = R.filter(r => r.date < cut), test = R.filter(r => r.date >= cut);
+    const th = fit(train); const a = th[0], b = th[1];
+    const band = p => p <= 3 ? "1〜3番人気" : p <= 7 ? "4〜7番人気" : p <= 12 ? "8〜12番人気" : "13番人気以下";
+    const BANDS = ["1〜3番人気", "4〜7番人気", "8〜12番人気", "13番人気以下"];
+    const T = {}; BANDS.forEach(k => T[k] = { n: 0, win: 0, top3: 0, ret: 0, rec: { n: 0, win: 0, top3: 0, ret: 0 }, mark: { n: 0, win: 0, top3: 0, ret: 0 } });
+    const calB = [0, 0.02, 0.05, 0.1, 0.2, 0.35, 1.01], cal = calB.slice(0, -1).map((lo, i) => ({ lo, hi: calB[i + 1], n: 0, p: 0, pk: 0, win: 0 }));
+    const evB = [0, 0.6, 0.8, 1.0, 1.1, 1.3, 1.6, 99], evs = evB.slice(0, -1).map((lo, i) => ({ lo, hi: evB[i + 1], n: 0, win: 0, ret: 0 }));
+    const cap = { 4: [], 10: [] };    // 実際に3着以内に来た穴馬の「穴ランキング」での順位（4番人気以下／10番人気以下）
+    let rnd = { 4: 0, 10: 0 };
+    test.forEach(r => {
+      const H = r.h.filter(h => h.pos != null && h.odds > 1); if (H.length < 5) return;
+      const sk = H.reduce((x, h) => x + h.pk, 0);
+      const q = H.map(h => Math.pow(Math.max(h.pm, 1e-5), a) * Math.pow(h.pk / sk, b)); const sq = q.reduce((x, y) => x + y, 0);
+      const P = q.map(x => x / sq);
+      const top = P.indexOf(Math.max(...P));     // 統合確率の1位＝本命（◎の代わり）
+      H.forEach((h, i) => {
+        const pop = h.pop || 99, B = T[band(pop)], hit3 = h.pos <= 3, w = h.pos === 1;
+        B.n++; if (w) { B.win++; B.ret += h.odds; } if (hit3) B.top3++;
+        if (P[i] * h.odds >= 1.1 && P[i] >= 0.02){ B.rec.n++; if (w){ B.rec.win++; B.rec.ret += h.odds; } if (hit3) B.rec.top3++; }   // AIが推奨（単勝の期待値1.1以上）
+        if (i === top){ B.mark.n++; if (w){ B.mark.win++; B.mark.ret += h.odds; } if (hit3) B.mark.top3++; }
+        const c = cal.find(x => P[i] >= x.lo && P[i] < x.hi); if (c){ c.n++; c.p += P[i]; c.pk += h.pk / sk; if (w) c.win++; }
+        const ev = P[i] * h.odds, e = evs.find(x => ev >= x.lo && ev < x.hi); if (e){ e.n++; if (w){ e.win++; e.ret += h.odds; } }
+      });
+      // 穴ランキング：その人気帯以下の馬を「モデル÷オッズ」（市場より何倍高く評価しているか）で並べる
+      [4, 10].forEach(minPop => {
+        const L = H.map((h, i) => ({ h, s: h.pm / Math.max(h.pk / sk, 1e-6) })).filter(x => (x.h.pop || 99) >= minPop).sort((x, y) => y.s - x.s);
+        L.forEach((x, k) => { if (x.h.pos <= 3){ cap[minPop].push({ rank: k + 1, of: L.length, pop: x.h.pop }); } });
+      });
+    });
+    const capStat = arr => { if (!arr.length) return null; const at = k => arr.filter(x => x.rank <= k).length; const exp = k => arr.reduce((s, x) => s + Math.min(1, k / x.of), 0);
+      return { n: arr.length, meanRank: +(arr.reduce((s, x) => s + x.rank, 0) / arr.length).toFixed(1), meanOf: +(arr.reduce((s, x) => s + x.of, 0) / arr.length).toFixed(1),
+        at: [3, 5, 10, 20].map(k => ({ k, hit: at(k), rate: +(at(k) / arr.length).toFixed(3), random: +(exp(k) / arr.length).toFixed(3) })) }; };
+    const fin = o => ({ n: o.n, winRate: o.n ? +(o.win / o.n).toFixed(4) : null, top3Rate: o.n ? +(o.top3 / o.n).toFixed(4) : null, winROI: o.n ? +(o.ret / o.n).toFixed(3) : null });
+    return { ok: true, races: R.length, trainRaces: train.length, testRaces: test.length, cut, calib: { a: +a.toFixed(3), b: +b.toFixed(3) },
+      bands: BANDS.map(k => ({ band: k, all: fin(T[k]), rec: fin(T[k].rec), mark: fin(T[k].mark) })),
+      calibration: cal.filter(c => c.n).map(c => ({ range: `${Math.round(c.lo * 100)}〜${Math.round(Math.min(c.hi, 1) * 100)}%`, n: c.n, pred: +(c.p / c.n).toFixed(4), market: +(c.pk / c.n).toFixed(4), actual: +(c.win / c.n).toFixed(4) })),
+      ev: evs.filter(e => e.n).map(e => ({ range: `${e.lo}〜${e.hi >= 99 ? "" : e.hi}`, n: e.n, winRate: +(e.win / e.n).toFixed(4), roi: +(e.ret / e.n).toFixed(3) })),
+      capture: { pop4: capStat(cap[4]), pop10: capStat(cap[10]) } };
+  }
+
+  // ===== 穴馬モデル：人気薄（6番人気以下・15倍以上）だけを対象に、「オッズが見落としている分」を直接学習する =====
+  // 全体の確率の当てやすさでは、人気馬の比重が大きく穴馬の見極めが埋もれてしまうので、穴馬だけを別に学習する。
+  // 目的は回収率：オッズから見た確率に対して、どの特徴を持つ穴馬が「より来る／来ない」かを、1着・3着以内それぞれで推定。
+  // 過去の前半で学習 → 後半で確かめ、オッズだけより当たるようになったときだけ予想に使う（使えないと分かれば自動で止める）。
+  const LS_ANA = Object.keys(ANA_PTS);
+  const LS_STYLES = ["逃げ", "先行", "差し", "追込"];
+  const LS_NAMES = [...FEATS.map(k => "要素:" + k), ...LS_ANA.map(k => "穴:" + k), "枠:内", "枠:外", ...LS_STYLES.map(k => "脚質:" + k), "モデル÷オッズ"];
+  const logitF = p => { const q = Math.min(0.999, Math.max(1e-5, p)); return Math.log(q / (1 - q)); };
+  function lsRow(h){
+    const st = LS_STYLES.map(k => h.style === k ? 1 : 0);
+    return [...FEATS.map((_, j) => h.z?.[j] || 0), ...LS_ANA.map(k => (h.ana || []).includes(k) ? 1 : 0),
+      h.gate <= 0.2 ? 1 : 0, h.gate >= 0.8 ? 1 : 0, ...st, Math.max(-3, Math.min(3, Math.log(Math.max(h.pm, 1e-4) / Math.max(h.pk, 1e-4))))];
+  }
+  // 正則化つきロジスティック回帰（オフセット＝オッズから見た確率のlogit。係数は x を標準化した単位）
+  function lsLogit(X, off, y, lam){
+    const n = X.length, K = X[0].length;
+    const mu = new Array(K).fill(0), sd = new Array(K).fill(1);
+    for (let k = 0; k < K; k++){ let s = 0; for (const x of X) s += x[k]; mu[k] = s / n; let v = 0; for (const x of X) v += (x[k] - mu[k]) ** 2; sd[k] = Math.sqrt(v / n) || 1; }
+    const Z = X.map(x => [1, ...x.map((v, k) => (v - mu[k]) / sd[k])]);
+    let b = new Array(K + 2).fill(0); b[K + 1] = 1;               // 最後がオフセットの係数（初期値1）
+    for (let it = 0; it < 25; it++){
+      const g = new Array(K + 2).fill(0), H = Array.from({ length: K + 2 }, () => new Array(K + 2).fill(0));
+      for (let i = 0; i < n; i++){
+        const z = [...Z[i], off[i]]; let e = 0; for (let k = 0; k < K + 2; k++) e += b[k] * z[k];
+        const p = 1 / (1 + Math.exp(-e)), w = p * (1 - p);
+        for (let k = 0; k < K + 2; k++){ g[k] += (y[i] - p) * z[k]; for (let l = 0; l < K + 2; l++) H[k][l] += w * z[k] * z[l]; }
+      }
+      for (let k = 1; k <= K; k++){ g[k] -= lam * b[k]; H[k][k] += lam; }      // 特徴の係数だけ0に引き寄せる
+      H[0][0] += 1e-6; H[K + 1][K + 1] += 1e-6;
+      const st = solve(H, g); b = b.map((v, k) => v + st[k]);
+      if (Math.max(...st.map(Math.abs)) < 1e-7) break;
+    }
+    return { b, mu, sd };
+  }
+  function lsPredRow(m, x, off){ let e = m.b[0] + m.b[m.b.length - 1] * off; x.forEach((v, k) => e += m.b[k + 1] * (v - m.mu[k]) / m.sd[k]); return 1 / (1 + Math.exp(-e)); }
+  function lsData(recs){
+    const out = [];
+    recs.forEach(r => {
+      const H = r.h.filter(h => h.pos && h.pk > 0); if (H.length < 5) return;
+      const s = H.reduce((a, h) => a + h.pk, 0), pk = H.map(h => h.pk / s), t3 = top3FromMarket(pk);
+      H.forEach((h, i) => { if (!isLong(h)) return; out.push({ date: r.date, x: lsRow(h), oW: logitF(pk[i]), o3: logitF(t3[i]), yW: h.pos === 1 ? 1 : 0, y3: h.pos <= 3 ? 1 : 0, odds: h.odds }); });
+    });
+    return out;
+  }
+  function lsFit(recs, lam = 30){
+    const D = lsData(recs);
+    if (D.length < 800) return { enabled: false, n: D.length, reason: "穴馬のデータが800頭未満" };
+    const dates = [...new Set(D.map(d => d.date))].sort(); const cut = dates[Math.floor(dates.length * 0.7)];
+    const tr = D.filter(d => d.date < cut), te = D.filter(d => d.date >= cut);
+    const ll = (ps, ys) => -ps.reduce((a, p, i) => a + (ys[i] ? Math.log(p) : Math.log(1 - p)), 0) / ps.length;
+    const evalOne = (key, offKey) => {
+      const m = lsLogit(tr.map(d => d.x), tr.map(d => d[offKey]), tr.map(d => d[key]), lam);
+      const base = lsLogit(tr.map(() => []), tr.map(d => d[offKey]), tr.map(d => d[key]), lam);   // オッズだけ（くせの補正のみ）
+      const p = te.map(d => lsPredRow(m, d.x, d[offKey])), p0 = te.map(d => lsPredRow(base, [], d[offKey])), y = te.map(d => d[key]);
+      // 1頭ごとの改善量の平均と標準誤差：偶然でなく良くなったか（改善が標準誤差の2倍以上）を判定
+      const dif = p.map((q, i) => (y[i] ? Math.log(q) - Math.log(p0[i]) : Math.log(1 - q) - Math.log(1 - p0[i])));
+      const md = dif.reduce((a, b) => a + b, 0) / dif.length, sdd = Math.sqrt(dif.reduce((a, b) => a + (b - md) ** 2, 0) / Math.max(1, dif.length - 1)) / Math.sqrt(dif.length);
+      return { ll: ll(p, y), ll0: ll(p0, y), p, p0, z: sdd > 0 ? md / sdd : 0 };
+    };
+    const W = evalOne("yW", "oW"), T = evalOne("y3", "o3");
+    // 後半での回収率（単勝）：穴馬の中で「予測の1着率×オッズ」が1.1以上の馬を100円ずつ買った場合
+    let inv = 0, ret = 0, inv0 = 0, ret0 = 0;
+    te.forEach((d, i) => { if (W.p[i] * d.odds >= 1.1){ inv += 100; if (d.yW) ret += d.odds * 100; } if (W.p0[i] * d.odds >= 1.1){ inv0 += 100; if (d.yW) ret0 += d.odds * 100; } });
+    const valid = { n: D.length, nTest: te.length, from: cut, llWin: +W.ll.toFixed(4), llWin0: +W.ll0.toFixed(4), llTop3: +T.ll.toFixed(4), llTop30: +T.ll0.toFixed(4), zWin: +W.z.toFixed(2), zTop3: +T.z.toFixed(2),
+      bets: inv / 100, roi: inv ? +(ret / inv).toFixed(3) : null, bets0: inv0 / 100, roi0: inv0 ? +(ret0 / inv0).toFixed(3) : null };
+    const winOK = W.z >= 2, topOK = T.z >= 2;
+    // 確かめに通った方だけ、全データで学習し直して使う
+    const mW = winOK ? lsLogit(D.map(d => d.x), D.map(d => d.oW), D.map(d => d.yW), lam) : null;
+    const m3 = topOK ? lsLogit(D.map(d => d.x), D.map(d => d.o3), D.map(d => d.y3), lam) : null;
+    const coef = m => m ? LS_NAMES.map((k, j) => [k, +(m.b[j + 1]).toFixed(3)]).filter(([, v]) => Math.abs(v) >= 0.05).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 12) : [];
+    return { enabled: winOK || topOK, n: D.length, win: mW, top3: m3, valid, coefWin: coef(mW), coefTop3: coef(m3) };
+  }
+  // 予想のとき：出走馬（穴馬だけ）について、1着・3着以内の確率を返す（使えない・穴馬でないときは null）
+  function lsPredict(model, h, pkWin, pkTop3){
+    if (!model?.enabled || !isLong(h)) return null;
+    const x = lsRow(h);
+    return { win: model.win ? lsPredRow(model.win, x, logitF(pkWin)) : null, top3: model.top3 ? lsPredRow(model.top3, x, logitF(pkTop3)) : null };
   }
 
   // ===== 馬体重（増減）の効き：過去の全出走から推定 =====
@@ -344,6 +472,6 @@ const Learn = (() => {
     return out;
   }
 
-  return { RV, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
+  return { RV, report, lsFit, lsPredict, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
 })();
 if (typeof module !== "undefined") module.exports = Learn;
