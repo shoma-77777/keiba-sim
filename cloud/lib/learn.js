@@ -480,13 +480,14 @@ const Learn = (() => {
     const out = [];
     R.forEach(r => {
       const H = r.h.filter(h => h.pos && h.pk > 0); if (H.length < 5) return;
-      const s = H.reduce((a, h) => a + h.pk, 0), t3 = top3FromMarket(H.map(h => h.pk / s));
+      const s = H.reduce((a, h) => a + h.pk, 0), t3 = top3FromMarket(H.map(h => h.pk / s)), smm = H.reduce((a, h) => a + Math.max(h.pm, 1e-5), 0);
       const eps = H.map(h => h.pp?.[4] > 0 ? h.pp[0] : null), withEp = eps.filter(x => x != null).sort((a, b) => a - b);
       H.forEach((h, i) => {
         const ep = eps[i];
         const rel = ep != null && withEp.length > 1 ? withEp.indexOf(ep) / (withEp.length - 1) : null;   // このメンバーの中で、普段どれだけ前に行く馬か（0＝一番前）
         out.push({ date: r.date, pop: h.pop || 99, hit: h.pos <= 3, e: t3[i], style: h.style, early: h.early, c1: h.c1, has: h.pp?.[4] > 0, pp: h.pp, dd: h.dd, gate: h.gate,
-          nf: r.nf, nn: r.nn, N: H.length, wet: r.going && r.going !== "良" ? 1 : 0, rel });
+          nf: r.nf, nn: r.nn, N: H.length, wet: r.going && r.going !== "良" ? 1 : 0, rel, ab: h.ab || null, odds: h.odds, win: h.pos === 1,
+          under: Math.max(h.pm, 1e-5) / smm < h.pk / s });
       });
     });
     return out;
@@ -632,6 +633,86 @@ const Learn = (() => {
     return { ready: true, n: W.length, nTest: testW.length, nUnder: testU.length, single, means, wf };
   }
 
+  // ===== 条件の組み合わせ（2〜3項目）の探索：市場が見落としている穴馬の条件はあるか =====
+  // 組み合わせは数千通りあるので、偶然でも |z|≧2 が大量に出る。そこで
+  //  (1) 全部で何通り調べ、偶然なら何個くらい z≧2 が出るはずかを並べて示す
+  //  (2) 多重比較の補正（ボンフェローニ）をした基準 zB を超えたものだけを「偶然でない」とする
+  //  (3) 仮想モデル：各期間について「それより前のデータだけ」で良かった組み合わせを選び、次の期間で本当に来たかを確かめる（ウォークフォワード）
+  const invNorm = p => { // 標準正規分布の上側確率 p に対応する z（Acklamの近似）
+    const q = 1 - p, a = [-39.69683028665376, 220.9460984245205, -275.9285104469687, 138.357751867269, -30.66479806614716, 2.506628277459239],
+      b = [-54.47609879822406, 161.5858368580409, -155.6989798598866, 66.80131188771972, -13.28068155211507], c = [-0.007784894002430293, -0.3223964580411365, -2.400758277161838, -2.549732539343734, 4.374664141464968, 2.938163982698783], d = [0.007784695709041462, 0.3224671290700398, 2.445134137142996, 3.754408661907416];
+    const pl = 0.02425; let x;
+    if (q < pl){ const t = Math.sqrt(-2 * Math.log(q)); x = (((((c[0] * t + c[1]) * t + c[2]) * t + c[3]) * t + c[4]) * t + c[5]) / ((((d[0] * t + d[1]) * t + d[2]) * t + d[3]) * t + 1); }
+    else if (q <= 1 - pl){ const t = q - 0.5, r = t * t; x = (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * t / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1); }
+    else { const t = Math.sqrt(-2 * Math.log(1 - q)); x = -(((((c[0] * t + c[1]) * t + c[2]) * t + c[3]) * t + c[4]) * t + c[5]) / ((((d[0] * t + d[1]) * t + d[2]) * t + d[3]) * t + 1); }
+    return x;
+  };
+  const COMBO_C = [
+    ["前走 人気より3つ以上好走", x => x.ab[5] != null && x.ab[5] >= 3], ["前走 人気より5つ以上凡走", x => x.ab[5] != null && x.ab[5] <= -5],
+    ["距離延長200m以上", x => x.dd != null && x.dd >= 200], ["距離短縮200m以上", x => x.dd != null && x.dd <= -200],
+    ["先行馬が少ない（2割未満）", x => x.nf / x.N < 0.2], ["逃げ馬がいない", x => x.nn === 0],
+    ["内枠×普段前1/3", x => x.gate <= 0.2 && x.pp[0] < 0.35], ["前走後ろ半分→普段は前1/3", x => x.pp[1] != null && x.pp[1] >= 0.5 && x.pp[0] < 0.35],
+    ["普段前1/3", x => x.pp[0] < 0.35],
+    ["前走 上位1/4の着順", x => x.ab[0] != null && x.ab[0] <= 0.25], ["前走 下位半分の着順", x => x.ab[0] != null && x.ab[0] >= 0.5],
+    ["近3走 平均が上位1/3", x => x.ab[1] != null && x.ab[1] <= 0.33], ["近5走に上位1割の好走", x => x.ab[2] != null && x.ab[2] <= 0.1],
+    ["前走 着差0.5秒以内", x => x.ab[3] != null && x.ab[3] <= 0.5], ["前走 2秒以上の大敗", x => x.ab[3] != null && x.ab[3] >= 2],
+    ["前走は5番人気以内", x => x.ab[4] != null && x.ab[4] <= 5],
+    ["休み明け90日以上", x => x.ab[6] != null && x.ab[6] >= 90], ["中2週以内", x => x.ab[6] != null && x.ab[6] <= 14],
+    ["キャリア3戦以内", x => x.ab[7] <= 3], ["キャリア20戦以上", x => x.ab[7] >= 20],
+    ["降級", x => x.ab[8] != null && x.ab[8] < 0], ["昇級", x => x.ab[8] != null && x.ab[8] > 0], ["道悪", x => x.wet === 1]
+  ];
+  function comboReport(R, ranges, lo = 10){
+    const rows = posRows(R).filter(x => x.pop >= lo && x.ab && x.has);
+    if (rows.length < 2000) return { ready: false, n: rows.length };
+    const K = COMBO_C.length, M = COMBO_C.map(([, f]) => Uint8Array.from(rows, x => f(x) ? 1 : 0));
+    const combos = []; for (let i = 0; i < K; i++) for (let j = i + 1; j < K; j++){ combos.push([i, j]); for (let k = j + 1; k < K; k++) combos.push([i, j, k]); }
+    const label = c => c.map(i => COMBO_C[i][0]).join(" ＋ ");
+    const inR = (x, g) => x.date >= g.from && x.date <= g.to;
+    const foldOf = rows.map(x => ranges.findIndex(g => inR(x, g)));
+    // 期間ごとのくせ（Harvilleの穴の過小評価）を除いた期待値：検証期間はその期間の比、学習側は学習データ全体の比で割る
+    const er = new Float64Array(rows.length);
+    ranges.forEach((g, f) => { const idx = rows.map((x, i) => foldOf[i] === f ? i : -1).filter(i => i >= 0); const h = idx.filter(i => rows[i].hit).length, e = idx.reduce((a, i) => a + rows[i].e, 0); const r0 = e > 0 ? h / e : 1; idx.forEach(i => er[i] = rows[i].e * r0); });
+    const statOf = (c, idx, ex) => { let n = 0, hit = 0, E = 0, V = 0, w = 0, ret = 0;
+      for (const i of idx){ let ok = 1; for (const k of c) if (!M[k][i]){ ok = 0; break; } if (!ok) continue; n++; if (rows[i].hit) hit++; const e = ex[i]; E += e; V += e * (1 - Math.min(0.99, e)); if (rows[i].win){ w++; ret += rows[i].odds; } }
+      return { n, hit, exp: E, z: V > 0 ? (hit - E) / Math.sqrt(V) : 0, lift: (hit + 1) / (E + 1), win: w, ret }; };
+    const scopes = {};
+    const test = rows.map((x, i) => foldOf[i] >= 0 ? i : -1).filter(i => i >= 0);
+    for (const [key, pick] of [["all", () => true], ["under", i => rows[i].under]]){
+      const idx = test.filter(pick);
+      // 当てはまる馬がまったく同じ組み合わせ（片方の条件がもう片方に含まれる等）は1つにまとめる（短い方を残す）
+      const seen = new Map();
+      combos.map(c => ({ c, ...statOf(c, idx, er) })).filter(x => x.n >= 50 && x.exp >= 5)
+        .forEach(x => { const key = `${x.n}|${x.hit}|${x.exp.toFixed(4)}|${x.win}`; const o = seen.get(key); if (!o || x.c.length < o.c.length) seen.set(key, x); });
+      const res = [...seen.values()];
+      const nT = res.length, zB = nT ? invNorm(0.05 / (2 * nT)) : null;
+      const top = res.sort((a, b) => b.z - a.z).slice(0, 12).map(x => {
+        const per = ranges.map((g, f) => { const s2 = statOf(x.c, idx.filter(i => foldOf[i] === f), er); return s2.n >= 10 ? +s2.lift.toFixed(2) : null; });
+        const ls = per.filter(v => v != null), same = ls.length >= 3 && (ls.every(v => v > 1) || ls.every(v => v < 1));
+        return { label: label(x.c), n: x.n, hit: x.hit, exp: +x.exp.toFixed(1), lift: +x.lift.toFixed(2), z: +x.z.toFixed(2), per, same,
+          winROI: x.n ? +(x.ret / x.n).toFixed(2) : null, verdict: x.z >= zB && same ? "偶然でない（多重比較の補正後も）" : x.z >= zB ? "補正後も強いが期間で向きがばらつく" : "偶然の範囲（多重比較を考えると）" };
+      });
+      scopes[key] = { n: idx.length, nTests: nT, nZ2: res.filter(x => x.z >= 2).length, expFP: +(nT * 0.0228).toFixed(0), zB: zB != null ? +zB.toFixed(2) : null, top };
+    }
+    // 仮想モデル（ウォークフォワード）：前の期間だけで z≧2 の組み合わせを上位10個選ぶ → 次の期間で、どれかに当てはまる馬が本当に来たか
+    const wf = {};
+    for (const [key, pick] of [["all", () => true], ["under", i => rows[i].under]]){
+      let H = 0, E = 0, V = 0, n = 0, w = 0, ret = 0; const folds = [];
+      ranges.forEach((g, f) => {
+        const tr = rows.map((x, i) => x.date < g.from && pick(i) ? i : -1).filter(i => i >= 0); if (tr.length < 1500) return;
+        const h0 = tr.filter(i => rows[i].hit).length, e0 = tr.reduce((a, i) => a + rows[i].e, 0), r0 = e0 > 0 ? h0 / e0 : 1;
+        const ex = new Float64Array(rows.length); tr.forEach(i => ex[i] = rows[i].e * r0);
+        const sel = combos.map(c => ({ c, ...statOf(c, tr, ex) })).filter(x => x.n >= 80 && x.exp >= 8 && x.z >= 2 && x.lift > 1).sort((a, b) => b.z - a.z).slice(0, 10);
+        const te = rows.map((x, i) => foldOf[i] === f && pick(i) ? i : -1).filter(i => i >= 0);
+        const hitSet = te.filter(i => sel.some(s2 => s2.c.every(k => M[k][i])));
+        let h = 0, e = 0, v = 0, ww = 0, rr = 0; hitSet.forEach(i => { if (rows[i].hit) h++; e += er[i]; v += er[i] * (1 - Math.min(0.99, er[i])); if (rows[i].win){ ww++; rr += rows[i].odds; } });
+        H += h; E += e; V += v; n += hitSet.length; w += ww; ret += rr;
+        folds.push({ from: g.from, picked: sel.length, top: sel.slice(0, 3).map(s2 => label(s2.c)), n: hitSet.length, hit: h, exp: +e.toFixed(1), lift: +((h + 1) / (e + 1)).toFixed(2) });
+      });
+      wf[key] = { n, hit: H, exp: +E.toFixed(1), lift: +((H + 1) / (E + 1)).toFixed(2), z: V > 0 ? +((H - E) / Math.sqrt(V)).toFixed(2) : null, winROI: n ? +(ret / n).toFixed(2) : null, folds };
+    }
+    return { ready: true, n: rows.length, conditions: COMBO_C.length, combos: combos.length, scopes, wf };
+  }
+
   async function report(recs, opt = {}){
     const folds = opt.folds || 5, initFrac = opt.initFrac ?? 0.4;
     const R = recs.filter(r => r.h?.length >= 5 && r.order?.length).slice().sort((a, b) => (a.date + a.id).localeCompare(b.date + b.id));
@@ -657,7 +738,7 @@ const Learn = (() => {
       await new Promise(res => setTimeout(res, 0));     // 画面を固めない
     }
     return { ok: true, total: R.length, from: testDates[0], strict, cleanTest, testAll: testAll.length, cleanAll: R.filter(clean).length,
-      ...finAcc(A), folds: foldRows, factors: { pop10: factorStats(R, 10, 99), pop4: factorStats(R, 4, 9) }, position: positionReport(R, ranges, 10), tempered: temperReport(R, ranges), ability: abilityReport(R, ranges, 10) };
+      ...finAcc(A), folds: foldRows, factors: { pop10: factorStats(R, 10, 99), pop4: factorStats(R, 4, 9) }, position: positionReport(R, ranges, 10), tempered: temperReport(R, ranges), ability: abilityReport(R, ranges, 10), combo: comboReport(R, ranges, 10) };
   }
 
   // ===== 穴馬モデル：人気薄（6番人気以下・15倍以上）だけを対象に、「オッズが見落としている分」を直接学習する =====
