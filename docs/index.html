@@ -2192,13 +2192,28 @@ const Learn = (() => {
     return { pp: [r3(avg(pr.map(eo))), pr[0] ? r3(eo(pr[0])) : null, r3(avg(pr.slice(0, 3).map(eo))), pr[0] ? r3(lo(pr[0])) : null, pr.length],
       dd: runs[0]?.dist > 0 && distance > 0 ? distance - runs[0].dist : null };
   }
+  // 能力の内訳（レース前に分かる過去の成績）。ENG：Engine（クラスの表を使う）
+  let ENG = null;
+  const AB_NAMES = ["前走の着順（率）", "近3走の着順（率）", "近5走のベスト着順（率）", "前走の着差（秒）", "前走の人気", "前走の人気−着順（＋は人気より好走）", "前走からの日数", "出走数", "クラスの上下（＋は昇級）"];
+  function abOf(runsIn, race){
+    const runs = runsIn.filter(x => x.surface !== "障" && x.pos > 0 && x.field > 0);
+    if (!runs.length) return null;
+    const rate = x => (x.pos - 1) / Math.max(1, x.field - 1), avg = a => a.reduce((p, q) => p + q, 0) / a.length;
+    const L = runs[0], GB = ENG?.GRADE_BASE || {}, cur = ENG?.gradeOf ? ENG.gradeOf(race.name || "") : null;
+    const days = L.date && race.date ? Math.round((new Date(race.date) - new Date(L.date)) / 864e5) : null;
+    return [r3(rate(L)), r3(avg(runs.slice(0, 3).map(rate))), r3(Math.min(...runs.slice(0, 5).map(rate))), L.margin != null && isFinite(L.margin) ? r3(Math.min(5, Math.max(0, L.margin))) : null,
+      L.pop ?? null, L.pop != null ? L.pop - L.pos : null, days, runs.length, cur && GB[cur] != null && GB[L.grade] != null ? GB[cur] - GB[L.grade] : null];
+  }
   function frontCounts(pres){ const w = pres.filter(p => p.pp[4] > 0); return { nf: w.filter(p => p.pp[0] < 0.35).length, nn: w.filter(p => p.pp[0] < 0.12).length }; }
   // 前の版で作った記録に、位置取りの材料だけを付け足す（モデルの確率はそのまま）。race：出馬表と結果、horses：出走馬の成績
   function posFill(rec, race, horses, Engine){
     if (!race?.entries?.length || !race.result) return false;
     const byNum = {}; race.entries.forEach(e => byNum[e.num] = e);
     const runsOf = num => { const h = horses[byNum[num]?.horseId]; return (h?.runs || []).map(Engine.parseRun).filter(r => r.pos > 0 && r.field > 0 && (!race.date || !r.date || r.date < race.date)).sort((a, b) => b.date.localeCompare(a.date)); };
-    const pres = rec.h.map(h => preOf(runsOf(h.num), race.distance));
+    ENG = Engine;
+    const RU = rec.h.map(h => runsOf(h.num));
+    const pres = RU.map(runs => preOf(runs, race.distance));
+    rec.h.forEach((h, i) => { h.ab = abOf(RU[i], race); });
     const cF = cornerPos(race.result, false), cL = cornerPos(race.result, true);
     rec.h.forEach((h, i) => { h.pp = pres[i].pp; h.dd = pres[i].dd; h.c1 = cF[h.num] ?? null; h.c4 = cL[h.num] ?? null; });
     Object.assign(rec, frontCounts(pres)); rec.posFill = true;
@@ -2226,6 +2241,7 @@ const Learn = (() => {
     const l3 = rows.filter(x => x.l3f > 0).map(x => x.l3f).sort((a, b) => a - b);
     const cFirst = cornerPos(res, false), cLast = cornerPos(res, true);
     const pres = ctx.field.map(f => preOf(f.prof?.runs || [], race.distance));
+    const abs = ctx.field.map(f => abOf(f.prof?.runs || [], race));
     const { nf, nn } = frontCounts(pres);
     return {
       rv: RV, upto: upto || null, id: race.id, date: race.date, post: race.postTime || null, kai: race.kai || null, venue: race.venue, surface: race.surface, dist: race.distance, going: res.going || race.going || null, n: N, sens: +sens.toFixed(4), nf, nn,
@@ -2235,7 +2251,7 @@ const Learn = (() => {
         pos: fin[f.num] ? +fin[f.num].pos : null, time: fin[f.num]?.time || null, l3f: fin[f.num]?.l3f || null,
         l3rank: fin[f.num]?.l3f ? l3.indexOf(fin[f.num].l3f) + 1 : null, early: early[f.num] ?? null,
         gate: +(((f.num - 1) / Math.max(1, N - 1))).toFixed(3), style: f.style, ana: f.ana || [],
-        c1: cFirst[f.num] ?? null, c4: cLast[f.num] ?? null, pp: pres[i].pp, dd: pres[i].dd,
+        c1: cFirst[f.num] ?? null, c4: cLast[f.num] ?? null, pp: pres[i].pp, dd: pres[i].dd, ab: abs[i],
         z: FEATS.map(k => +((f.adj[k] || 0) / (Math.abs(wc(k)) > 1e-6 ? wc(k) : 1)).toFixed(3))
       })),
       wr: FEATS.map(k => +(wc(k) / (Math.abs(wb(k)) > 1e-6 ? wb(k) : 1)).toFixed(3)),
@@ -2465,7 +2481,7 @@ const Learn = (() => {
 
   // 結果の出ているレースについて、モデルの1着確率を計算して記録を作る（ブラウザでもNodeでも同じ）
   async function recordsForRaces(Engine, races, horses, trackOf, runs = 2500, betsOf, baseW, upto){
-    const out = [];
+    const out = []; ENG = Engine;
     for (const r of races){
       const res = r.result; if (!res || !r.entries?.length) continue;
       const fin = {}; (res.rows || []).forEach(x => fin[x.num] = x);
@@ -2707,6 +2723,79 @@ const Learn = (() => {
       byStyle, actualFront, single, model, periods: ranges.map(g => `${g.from}〜${g.to}`) };
   }
 
+  // ===== モデルの鋭さ（仮想モデル・予想には使わない）：モデルの確率を p^T で平らにしたら、大穴の過小評価は直るか／オッズに追いつくか =====
+  function temperReport(R, ranges){
+    const prepT = r => { const H = r.h.filter(h => h.pos != null && h.odds > 1); if (H.length < 5) return null; const w = H.findIndex(h => h.pos === 1); if (w < 0) return null;
+      const sk = H.reduce((a, h) => a + h.pk, 0), sm = H.reduce((a, h) => a + Math.max(h.pm, 1e-5), 0); return { date: r.date, LM: H.map(h => Math.log(Math.max(h.pm, 1e-5) / sm)), PK: H.map(h => h.pk / sk), w }; };
+    const P = R.map(prepT).filter(Boolean);
+    const llT = (xs, T) => { let L = 0; xs.forEach(x => { const q = x.LM.map(l => Math.exp(T * l)); const s = q.reduce((a, b) => a + b, 0); L -= Math.log(q[x.w] / s); }); return L / xs.length; };
+    const fitT = xs => { let lo = 0.1, hi = 2; for (let k = 0; k < 40; k++){ const m1 = lo + (hi - lo) / 3, m2 = hi - (hi - lo) / 3; if (llT(xs, m1) < llT(xs, m2)) hi = m2; else lo = m1; } return (lo + hi) / 2; };
+    const B = CAL_B.slice(0, -1).map((lo, i) => ({ lo, hi: CAL_B[i + 1], n: 0, p: 0, w: 0 }));
+    const folds = []; let n = 0, lm = 0, lt = 0, lk = 0;
+    ranges.forEach(g => {
+      const tr = P.filter(x => x.date < g.from), te = P.filter(x => x.date >= g.from && x.date <= g.to); if (tr.length < 50 || !te.length) return;
+      const T = fitT(tr), a = llT(te, 1), t = llT(te, T), k = te.reduce((s, x) => s - Math.log(x.PK[x.w]), 0) / te.length;
+      folds.push({ from: g.from, T: +T.toFixed(2), model: +a.toFixed(4), tempered: +t.toFixed(4), market: +k.toFixed(4) });
+      n += te.length; lm += a * te.length; lt += t * te.length; lk += k * te.length;
+      te.forEach(x => { const q = x.LM.map(l => Math.exp(T * l)); const s = q.reduce((a2, b2) => a2 + b2, 0); q.forEach((v, i) => { const p = v / s, b = B.find(b => p >= b.lo && p < b.hi); if (b){ b.n++; b.p += p; if (i === x.w) b.w++; } }); });
+    });
+    if (!n) return null;
+    return { folds, model: +(lm / n).toFixed(4), tempered: +(lt / n).toFixed(4), market: +(lk / n).toFixed(4),
+      calib: B.filter(b => b.n).map(b => ({ range: `${Math.round(b.lo * 100)}〜${Math.round(Math.min(b.hi, 1) * 100)}%`, n: b.n, pred: +(b.p / b.n).toFixed(4), actual: +(b.w / b.n).toFixed(4) })) };
+  }
+  // ===== 能力の内訳：10番人気以下の馬（とくにAIが市場より低く評価した馬）で、過去の成績のどれがオッズ以上に効くか =====
+  function abilityReport(R, ranges, lo = 10){
+    const rows = [];
+    R.forEach(r => {
+      const H = r.h.filter(h => h.pos && h.pk > 0); if (H.length < 5) return;
+      const s = H.reduce((a, h) => a + h.pk, 0), sm = H.reduce((a, h) => a + Math.max(h.pm, 1e-5), 0), t3 = top3FromMarket(H.map(h => h.pk / s));
+      H.forEach((h, i) => { if ((h.pop || 99) < lo || !("ab" in h)) return;
+        rows.push({ date: r.date, hit: h.pos <= 3, e: t3[i], ab: h.ab, under: Math.max(h.pm, 1e-5) / sm < h.pk / s }); });
+    });
+    const W = rows.filter(x => x.ab);
+    if (W.length < 300) return { n: W.length, ready: false };
+    const inR = (x, g) => x.date >= g.from && x.date <= g.to;
+    const testW = W.filter(x => ranges.some(g => inR(x, g)));
+    const mkRow = (sub, label, pred) => {
+      const S = sub.filter(pred), all = liftOf(S, r0Of(sub));
+      const per = ranges.map(g => { const F = sub.filter(x => inR(x, g)), SS = F.filter(pred); return SS.length >= 15 ? liftOf(SS, r0Of(F)).lift : null; });
+      const ls = per.filter(v => v != null), same = ls.length >= 3 && (ls.every(v => v > 1) || ls.every(v => v < 1));
+      return { label, ...all, per, verdict: all.z != null && Math.abs(all.z) >= 2 && same ? "全期間で同じ向き・偶然でない" : all.z != null && Math.abs(all.z) >= 2 ? "偶然でないが期間で向きがばらつく" : "偶然と区別できない" };
+    };
+    const a = x => x.ab;
+    const DEF = [
+      ["前走 上位1/4の着順", x => a(x)[0] != null && a(x)[0] <= 0.25], ["前走 下位半分の着順", x => a(x)[0] != null && a(x)[0] >= 0.5],
+      ["近3走 平均が上位1/3", x => a(x)[1] != null && a(x)[1] <= 0.33], ["近5走に上位1割の好走あり", x => a(x)[2] != null && a(x)[2] <= 0.1],
+      ["前走 着差0.5秒以内", x => a(x)[3] != null && a(x)[3] <= 0.5], ["前走 2秒以上の大敗", x => a(x)[3] != null && a(x)[3] >= 2],
+      ["前走 人気より3つ以上好走", x => a(x)[5] != null && a(x)[5] >= 3], ["前走 人気より5つ以上凡走", x => a(x)[5] != null && a(x)[5] <= -5],
+      ["前走は5番人気以内（人気急落）", x => a(x)[4] != null && a(x)[4] <= 5],
+      ["休み明け（90日以上）", x => a(x)[6] != null && a(x)[6] >= 90], ["中2週以内", x => a(x)[6] != null && a(x)[6] <= 14],
+      ["キャリア3戦以内", x => a(x)[7] <= 3], ["キャリア20戦以上", x => a(x)[7] >= 20],
+      ["降級（前走より下のクラス）", x => a(x)[8] != null && a(x)[8] < 0], ["昇級（前走より上のクラス）", x => a(x)[8] != null && a(x)[8] > 0]
+    ];
+    const testU = testW.filter(x => x.under);
+    const single = DEF.map(([label, pred]) => ({ all: mkRow(testW, label, pred), under: mkRow(testU, label, pred) })).filter(x => x.all.n >= 20);
+    // 来た馬と来なかった馬の平均（AIが市場より低く評価した10番人気以下）
+    const U = W.filter(x => x.under), mean = (xs, k) => { const v = xs.map(x => x.ab[k]).filter(v => v != null); return v.length ? +(v.reduce((p, q) => p + q, 0) / v.length).toFixed(2) : null; };
+    const means = AB_NAMES.map((k, j) => ({ k, hit: mean(U.filter(x => x.hit), j), non: mean(U.filter(x => !x.hit), j) }));
+    // 組み合わせ（ウォークフォワード）：オッズから見た3着内の見込みに、能力の内訳を足すと予測が良くなるか
+    const fill = (xs, med) => xs.map(x => AB_NAMES.map((_, j) => x.ab[j] ?? med[j]));
+    const logit = p => { const q = Math.min(0.999, Math.max(1e-5, p)); return Math.log(q / (1 - q)); };
+    const difs = [], folds = [];
+    ranges.forEach(g => {
+      const tr = W.filter(x => x.date < g.from), te = W.filter(x => inR(x, g)); if (tr.length < 1500 || !te.length) return;
+      const med = AB_NAMES.map((_, j) => { const v = tr.map(x => x.ab[j]).filter(v => v != null).sort((p, q) => p - q); return v.length ? v[Math.floor(v.length / 2)] : 0; });
+      const Xtr = fill(tr, med), Xte = fill(te, med), ytr = tr.map(x => x.hit ? 1 : 0);
+      const m = lsLogit(Xtr, tr.map(x => logit(x.e)), ytr, 30), m0 = lsLogit(tr.map(() => []), tr.map(x => logit(x.e)), ytr, 30);
+      const d = te.map((x, i) => { const p = lsPredRow(m, Xte[i], logit(x.e)), p0 = lsPredRow(m0, [], logit(x.e)); return x.hit ? Math.log(p / p0) : Math.log((1 - p) / (1 - p0)); });
+      const md = d.reduce((p, q) => p + q, 0) / d.length; difs.push(...d); folds.push({ from: g.from, n: te.length, gain: +(md * 1000).toFixed(2) });
+    });
+    let wf = null;
+    if (difs.length){ const md = difs.reduce((p, q) => p + q, 0) / difs.length, sd = Math.sqrt(difs.reduce((p, q) => p + (q - md) ** 2, 0) / Math.max(1, difs.length - 1));
+      wf = { n: difs.length, gain: +(md * 1000).toFixed(2), z: sd > 0 ? +(md / (sd / Math.sqrt(difs.length))).toFixed(2) : null, folds }; }
+    return { ready: true, n: W.length, nTest: testW.length, nUnder: testU.length, single, means, wf };
+  }
+
   async function report(recs, opt = {}){
     const folds = opt.folds || 5, initFrac = opt.initFrac ?? 0.4;
     const R = recs.filter(r => r.h?.length >= 5 && r.order?.length).slice().sort((a, b) => (a.date + a.id).localeCompare(b.date + b.id));
@@ -2732,7 +2821,7 @@ const Learn = (() => {
       await new Promise(res => setTimeout(res, 0));     // 画面を固めない
     }
     return { ok: true, total: R.length, from: testDates[0], strict, cleanTest, testAll: testAll.length, cleanAll: R.filter(clean).length,
-      ...finAcc(A), folds: foldRows, factors: { pop10: factorStats(R, 10, 99), pop4: factorStats(R, 4, 9) }, position: positionReport(R, ranges, 10) };
+      ...finAcc(A), folds: foldRows, factors: { pop10: factorStats(R, 10, 99), pop4: factorStats(R, 4, 9) }, position: positionReport(R, ranges, 10), tempered: temperReport(R, ranges), ability: abilityReport(R, ranges, 10) };
   }
 
   // ===== 穴馬モデル：人気薄（6番人気以下・15倍以上）だけを対象に、「オッズが見落としている分」を直接学習する =====
@@ -4325,7 +4414,7 @@ async function fillPositions(){
     while (BF.proc) await bfSleep(500);
     const full = await api("/api/learn?full=1", { timeout: 120000 });
     const recs = full.records || [], byId = new Map(recs.map(r => [r.id, r]));
-    const need = r => r && !r.h.some(h => h.pp);
+    const need = r => r && !r.h.some(h => "ab" in h);     // 位置取りの材料・能力の内訳のどちらかが欠けている記録
     const changed = [];
     Object.values(DB.races).forEach(r => { const rec = byId.get(r.id); if (need(rec) && Learn.posFill(rec, r, DB.horses, Engine)) changed.push(rec); });
     const st = await bfRefresh();
@@ -4339,7 +4428,8 @@ async function fillPositions(){
     }
     if (changed.length){
       const latest = recs.reduce((m, r) => r.date > m ? r.date : m, "");
-      const model = BF.full || LEARN.model || Learn.build(recs, latest);
+      const model = Learn.build(recs, latest);      // 全部の記録で学習したモデル（今使っているものが不完全でも上書きしないように）
+      BF.full = model; if (!simBusy) applyLearn(model);
       await api("/api/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, append: changed, bulk: true }), timeout: 120000 });
     }
     toast(`${changed.length.toLocaleString()}レースの記録に位置取りの材料を付け足しました（材料がないレース${recs.filter(need).length - changed.length}件）`);
@@ -4347,6 +4437,18 @@ async function fillPositions(){
     await makeReport();
   } catch (e) { toast("付け足しできませんでした：" + e.message); }
   finally { POSFILL.busy = false; BF.pause = wasPaused; if (ST.tab === "learn") renderLearnTab(); }
+}
+function abilityPanel(A, pct1, zt){
+  if (!A) return "";
+  const head = `<h4>9. 能力の内訳（10番人気以下・AIが市場より低く評価した馬を中心に）</h4>`;
+  if (!A.ready) return head + `<p class="small">能力の内訳（前走・近3走の着順、着差、前走の人気、間隔、キャリア、クラスの上下）は、この版から記録に残します。8番の下のボタンで今ある記録に付け足すと表示されます（今 ${A.n.toLocaleString()}頭）。</p>`;
+  const per = x => x.per.map(v => v == null ? "—" : "×" + v).join("／");
+  const cell = x => `<td class="r num">${x.n.toLocaleString()}</td><td class="r num ${x.lift > 1 ? "pos" : x.lift < 1 ? "neg" : ""}"><b>×${x.lift}</b></td><td class="r num">${zt(x.z)}</td>`;
+  return head + `<p class="small">検証期間の10番人気以下 ${A.nTest.toLocaleString()}頭（うちAIが市場より低く評価 ${A.nUnder.toLocaleString()}頭）。倍率は「オッズから見た3着以内の期待」に対して実際に何倍来たか（期間ごとのくせを除く）。</p>
+    <div class="tbl-wrap"><table><thead><tr><th>過去の成績</th><th class="r">頭数</th><th class="r">倍率</th><th class="r">z</th><th class="r">うちAIが低く評価：頭数</th><th class="r">倍率</th><th class="r">z</th><th class="r">期間別の倍率（低く評価した馬）</th><th>判定（低く評価した馬）</th></tr></thead><tbody>
+    ${A.single.map(x => `<tr><td>${esc(x.all.label)}</td>${cell(x.all)}${cell(x.under)}<td class="r num small">${per(x.under)}</td><td class="small">${x.under.verdict}</td></tr>`).join("")}</tbody></table></div>
+    <p class="small"><b>AIが市場より低く評価した10番人気以下：来た馬と来なかった馬の平均</b>：${A.means.map(m => `${esc(m.k)} ${m.hit ?? "—"}／${m.non ?? "—"}`).join("・")}</p>
+    ${A.wf ? `<p class="small"><b>組み合わせ（ウォークフォワード）</b>：オッズから見た3着以内の見込みに能力の内訳9項目を足して学習 → 次の期間で確かめ。1頭あたりの改善 <b>${A.wf.gain > 0 ? "+" : ""}${A.wf.gain}</b>（千分の1単位・z ${zt(A.wf.z)}）${Math.abs(A.wf.z ?? 0) >= 2 ? (A.wf.gain > 0 ? "<b class='pos'>オッズに上乗せあり</b>" : "<b class='neg'>かえって悪化</b>") : "：偶然と区別できない（オッズに上乗せなし）"}。期間別：${A.wf.folds.map(f => `${esc(f.from)}〜 ${f.gain > 0 ? "+" : ""}${f.gain}`).join("・")}</p>` : `<p class="small">組み合わせの検証は、材料のある10番人気以下が十分たまると表示されます。</p>`}`;
 }
 function positionPanel(P, pct1, zt){
   if (!P) return "";
@@ -4357,8 +4459,8 @@ function positionPanel(P, pct1, zt){
     <div class="tbl-wrap"><table><thead><tr><th>予想した脚質＼実際（${esc(P.confBasis)}）</th>${["逃げ", "先行", "差し", "追込"].map(k => `<th class="r">${k}</th>`).join("")}</tr></thead><tbody>
     ${["逃げ", "先行", "差し", "追込"].map(a => { const t = Object.values(c.m[a]).reduce((x, y) => x + y, 0); return `<tr><td>${a}（${t}頭）</td>${["逃げ", "先行", "差し", "追込"].map(b => `<td class="r num ${a === b ? "pos" : ""}">${t ? pct1(c.m[a][b] / t) : "—"}</td>`).join("")}</tr>`; }).join("")}</tbody></table></div>`;
   const M = P.model;
-  const fillBtn = SERVER.enabled && !SERVER.cloud && (!P.single || !M) ? `<div class="ctrls"><button class="btn" id="posFill" ${POSFILL.busy ? "disabled" : ""}>${POSFILL.busy ? `付け足し中…（${esc(POSFILL.msg)}）` : "位置取りの材料を今すぐ付け足す（数分）"}</button></div>
-    <p class="small">記録の作り直し（数時間）を待たずに、今ある記録に「前走・近3走の1角の位置、前走の4角の位置、距離の増減、先行馬・逃げ馬の頭数、実際の1角・4角の位置」だけを付け足して④⑤の表を出します。どれもその馬のそのレースより前の出走（と結果の通過順）から計算するので、未来の情報は入りません。</p>` : "";
+  const fillBtn = SERVER.enabled && !SERVER.cloud && (!P.single || !M || !REPORT.r?.ability?.ready) ? `<div class="ctrls"><button class="btn" id="posFill" ${POSFILL.busy ? "disabled" : ""}>${POSFILL.busy ? `付け足し中…（${esc(POSFILL.msg)}）` : "位置取り・能力の内訳の材料を今すぐ付け足す（数分）"}</button></div>
+    <p class="small">記録の作り直し（数時間）を待たずに、今ある記録に「前走・近3走の1角の位置、前走の4角の位置、距離の増減、先行馬・逃げ馬の頭数、実際の1角・4角の位置」と「能力の内訳（前走・近3走の着順、着差、前走の人気、間隔、キャリア、クラスの上下）」だけを付け足して、8・9の表を出します。どれもその馬のそのレースより前の出走（と結果の通過順）から計算するので、未来の情報は入りません。</p>` : "";
   return `<h4>8. 位置取り（脚質）の予想と穴馬</h4>
     <p class="small"><b>「実際に前に行った」はレース後に分かる結果</b>なので、どれだけ強く出ても、そのままでは買い目に使えません。お金になるのは「レース前の材料から前に行くと予想できた穴馬が、オッズの期待より来るか」だけです。下の表は検証期間（ウォークフォワード）の10番人気以下の馬で、期間ごとのくせを除いた倍率です。</p>
     ${tbl([...P.actualFront.filter(x => x.n), ...P.byStyle])}
@@ -4407,6 +4509,8 @@ function reportPanel(){
     ${R.strict ? `<b>検証には「その日より前のデータだけのモデル」で作ったと確認できる記録（${R.cleanTest.toLocaleString()}レース）だけを使っています。</b>` : `<b class="neg">注意：検証期間の記録のうち、「その日より前のデータだけのモデル」で作ったと確認できるものは${R.cleanTest.toLocaleString()}/${R.testAll.toLocaleString()}レースです</b>（前の版で作った記録は、モデルの確率に少し後の学習結果が混ざっている可能性があります。過去データの処理が自動で作り直しており、確認できる記録が200レースを超えると、それだけで測るように切り替わります）。`}</p>
     <h4>1. モデルはオッズに上乗せできているか（1着の当てやすさ・小さいほど良い）</h4>
     ${ll ? `<div class="tbl-wrap"><table><thead><tr><th>オッズだけ</th><th>モデルだけ</th><th>統合（実際に使う確率）</th><th>統合−オッズの改善</th></tr></thead><tbody><tr><td class="num">${ll.market}</td><td class="num">${ll.model}</td><td class="num"><b>${ll.blend}</b></td><td class="num">${ll.gain > 0 ? "+" : ""}${ll.gain}（z ${zt(ll.z)}）${sig(ll.z)}</td></tr></tbody></table></div>` : ""}
+    ${R.tempered ? `<p class="small"><b>モデルの鋭さを直した仮想モデル</b>（予想には使いません）：モデルだけの確率は大穴を低く・人気馬を高く出すくせ（自信過剰）があります。確率を p<sup>T</sup> で平らにする1つの数 T を、各期間それより前の記録で決めると T＝${R.tempered.folds.map(f => f.T).join("・")}（期間別）とほぼ一定で、当てやすさは モデル ${R.tempered.model} → <b>${R.tempered.tempered}</b>（オッズだけ ${R.tempered.market}）。
+      大穴のずれもほぼ直ります（${R.tempered.calib.slice(0, 2).map(c => `${c.range}の予測${pct1(c.pred)}→実際${pct1(c.actual)}`).join("、")}）。<b>大穴の過小評価は特定の要素ではなくモデル全体の鋭さのくせで、直してもオッズには届きません。</b>なお実際の予想は「統合」の確率を使い、統合の指数（モデル${R.folds.at(-1)?.a ?? "—"}）がこの鋭さの調整を含んでいるので、このくせは買い目には影響していません。</p>` : ""}
     <h4>2. 人気帯別（検証期間）</h4>
     <div class="tbl-wrap"><table><thead><tr><th>人気帯</th><th class="r">頭数</th><th class="r">勝率</th><th class="r">複勝率</th><th class="r">単勝回収率</th><th class="r">AI推奨（単勝の期待値1.1以上）</th><th class="r">AIの本命</th></tr></thead><tbody>
     ${R.bands.map(b => `<tr><td>${b.band}</td><td class="r num">${b.all.n.toLocaleString()}</td><td class="r num">${pct1(b.all.winRate)}</td><td class="r num">${pct1(b.all.top3Rate)}</td><td class="r num">${roi(b.all.winROI)}</td>
@@ -4438,7 +4542,8 @@ function reportPanel(){
     ${R.folds.map(f => `<tr><td>${esc(f.from)}〜${esc(f.to)}</td><td class="r num">${f.train.toLocaleString()}</td><td class="r num">${f.test}</td><td class="r num">${f.a}／${f.b}</td><td class="r num">${f.ll ? `${f.ll.gain > 0 ? "+" : ""}${f.ll.gain}（z ${zt(f.ll.z)}）` : "—"}</td><td class="r num">${f.bets11}頭${f.bets11 ? `・回収率${roi(f.roi11)}` : ""}</td><td class="r num">${f.cap4 ? `${pct1(f.cap4.rate)}（適当${pct1(f.cap4.random)}・人気順${pct1(f.cap4.market)}）` : "—"}</td></tr>`).join("")}
     </tbody></table></div>
     <p class="small">どの期間でも同じ向きの結果なら信頼できます。期間によって良かったり悪かったりする差は、偶然の可能性が高いです。</p>
-    ${positionPanel(R.position, pct1, zt)}` + btn + "</div>";
+    ${positionPanel(R.position, pct1, zt)}
+    ${abilityPanel(R.ability, pct1, zt)}` + btn + "</div>";
 }
 function longshotPanel(){
   const L = LEARN.model?.longshot; if (!L) return "";
@@ -4555,6 +4660,8 @@ async function serverInit(){
     try { const tw = await api("/api/tweaks"); if (tw && typeof tw === "object" && Object.keys(tw).length) tweaks = tw; } catch (e) {}
     const j = await loadServerDB();
     await loadLearn();
+    // 保存されているモデルが記録の一部だけで学習したもの（前の版の不具合で空のモデルが保存された場合など）なら、全部の記録で作り直す
+    api("/api/learn?count=1").then(async c => { if (c?.records && (LEARN.model?.races || 0) < c.records * 0.9){ if (!BF.recs) await bfLoadRecs(); else await ensureFullModel(BF.recs); } }).catch(e => console.error(e));
     startAutoRefresh();
     bfRefresh().then(s => { if (s && (s.running || s.pending?.length)) bfEnsure(); });
     refreshCloudInfo().then(() => renderUpd());
@@ -4619,14 +4726,33 @@ function bfEnsure(){
   if (!BF.timer) BF.timer = setInterval(async () => { await bfRefresh(); if (ST.tab === "learn" && !document.activeElement?.closest?.("#p-learn input")) renderLearnTab(); bfProcessLoop(); }, 15000);
   bfProcessLoop();
 }
+// 学習の記録を全部読み込む。読み込めなかったときは処理を止める（記録0件のまま進むと、空のモデルで予想・保存してしまうため）
+async function bfLoadRecs(){
+  const full = await api("/api/learn?full=1", { timeout: 300000 });
+  if (!full || !Array.isArray(full.records)) throw new Error("学習の記録を読み込めませんでした（あとで自動で再試行します）");
+  BF.recs = full.records;
+  await ensureFullModel(BF.recs);
+}
+// 今使っているモデルが、記録の一部だけで学習したもの（空のモデルなど）になっていたら、全部の記録で作り直して保存する
+async function ensureFullModel(recs){
+  if (!recs?.length) return;
+  const cur = BF.full || LEARN.model;
+  if (cur && (cur.races || 0) >= recs.length * 0.9) { if (!BF.full) BF.full = cur; return; }
+  const latest = recs.reduce((m, r) => r.date > m ? r.date : m, "");
+  BF.full = Learn.build(recs, latest);
+  if (!simBusy) applyLearn(BF.full);
+  Object.keys(ST.sims).forEach(markStale);
+  await api("/api/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: BF.full, append: [] }), timeout: 120000 }).catch(e => console.error(e));
+  toast(`学習モデルを全部の記録（${recs.length.toLocaleString()}レース）で作り直しました。予想し直すと反映されます`);
+}
 async function bfProcessLoop(){
   if (BF.proc || BF.pause || !SERVER.enabled || SERVER.cloud || !SERVER.on) return;
   let st = BF.status || await bfRefresh();
   // 前の版で作った過去データの記録（「その日より前のデータだけのモデル」で作ったと確認できないもの）は、開催日ごと作り直す
   if (!BF.reprocChecked && st && Object.keys(st.processed || {}).length){
-    BF.reprocChecked = true;
     try {
-      if (!BF.recs){ const full = await api("/api/learn?full=1", { timeout: 120000 }).catch(() => ({})); BF.recs = full.records || []; }
+      if (!BF.recs) await bfLoadRecs();
+      BF.reprocChecked = true;
       const dirty = new Set(BF.recs.filter(r => !Learn.clean(r) || (r.rv || 0) < Learn.RV).map(r => ymdOf(r.date)));
       const dates = Object.keys(st.processed).filter(y => dirty.has(y));
       if (dates.length){ await api("/api/backfill/reprocess", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dates }) }); BF.reproc = dates.length; st = await bfRefresh(); }
@@ -4635,7 +4761,7 @@ async function bfProcessLoop(){
   if (!st?.pending?.length) return;
   BF.proc = true;
   try {
-    if (!BF.recs){ const full = await api("/api/learn?full=1", { timeout: 120000 }).catch(() => ({})); BF.recs = full.records || []; }
+    if (!BF.recs) await bfLoadRecs();
     while (!BF.pause){
       const s = await bfRefresh(); const ymd = s?.pending?.[0]; if (!ymd) break;
       while (BATCH.running || simBusy || CHECK_ALL.running) await bfSleep(1000);   // 画面で一括予想などをしている間は待つ
@@ -4671,7 +4797,7 @@ async function bfProcessDay(j, left){
     // その日より前の結果だけで学習したモデル（未来の結果で学習したモデルで過去を予想しない）。
     // 使うのはこの処理の予想の間だけで、1レースごとに元のモデル（全部の記録で学習）に戻す＝画面で同時に予想しても混ざらない
     const wf = Learn.build(BF.recs.filter(r => r.date < d), d);
-    if (!BF.full) BF.full = LEARN.model;
+    if (!BF.full) await ensureFullModel(BF.recs);
     // ① 予想（この時点のモデル＝この日より前の結果だけで学習したもの）
     for (let i = 0; i < races.length; i++){
       if (BF.pause) return;

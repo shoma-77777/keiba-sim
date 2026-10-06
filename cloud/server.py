@@ -322,6 +322,10 @@ class Handler(SimpleHTTPRequestHandler):
             ymd = re.sub(r"\D", "", (q.get("date") or [""])[0])[:8]
             j = bf.day_data(ymd) if len(ymd) == 8 else None
             return self._json(j or {"error": "no data"}, 200 if j else 404)
+        if u.path == "/api/learn" and q.get("count"):
+            fp = DATA / "learn.json"
+            n = len(json.loads(fp.read_text(encoding="utf-8")).get("records", [])) if fp.exists() else 0
+            return self._json({"records": n})
         if u.path == "/api/learn":
             fp = DATA / ("learn.json" if q.get("full") else "learn_model.json")
             return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {})
@@ -408,14 +412,22 @@ class Handler(SimpleHTTPRequestHandler):
                     for r in j.get("append") or []:
                         o = m.get(r["id"]); m[r["id"]] = {**r, "bets": r.get("bets") or (o or {}).get("bets")}
                     recs = sorted(m.values(), key=lambda r: (r.get("date", ""), r.get("id", "")))
-                lp.write_text(json.dumps({"model": j["model"], "records": recs}, ensure_ascii=False), encoding="utf-8")
-                (DATA / "learn_model.json").write_text(json.dumps(j["model"], ensure_ascii=False), encoding="utf-8")
+                model = j.get("model")
+                # 記録の一部だけで学習したモデル（空のモデルなど）で、保存済みの記録全体のモデルを上書きしない
+                if not isinstance(model, dict) or (model.get("races") or 0) < len(recs) * 0.9:
+                    old_m = json.loads(lp.read_text(encoding="utf-8")).get("model") if lp.exists() else None
+                    log(f"学習モデルの保存を見送りました（{(model or {}).get('races')}レース分のモデル・記録は{len(recs)}レース）")
+                    model = old_m if isinstance(old_m, dict) and (old_m.get("races") or 0) >= (model or {}).get("races", 0) else model
+                    model_ok = False
+                else: model_ok = True
+                lp.write_text(json.dumps({"model": model, "records": recs}, ensure_ascii=False), encoding="utf-8")
+                if model_ok: (DATA / "learn_model.json").write_text(json.dumps(model, ensure_ascii=False), encoding="utf-8")
                 log(f"学習を更新しました（{len(recs)}レース分）")
                 global LAST_LEARN_PUSH
                 if time.time() - LAST_LEARN_PUSH > 1800 or not j.get("bulk"):   # 一括学習中はクラウドへの送信を30分に1回に抑える
                     LAST_LEARN_PUSH = time.time()
                     threading.Thread(target=lambda: _safe(lambda: _push_after(None)), daemon=True).start()
-                return self._json({"ok": True, "records": len(recs)})
+                return self._json({"ok": True, "records": len(recs), "modelSaved": model_ok})
             except Exception as ex:
                 return self._json({"ok": False, "message": str(ex)}, 400)
         if u.path in ("/api/tweaks", "/api/summary"):
