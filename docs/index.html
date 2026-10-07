@@ -5412,6 +5412,7 @@ function crossPanel(){
 const REPORT = { r: null, busy: false };
 // ===== 16. 本番テスト（封印）：見ていない期間を封印して、事前に決めたルールを最後に1回だけ確かめる =====
 const PREREG_ST = { d: null, busy: false, opening: false };
+const INC_TEST_FROM = "2025-10-01";   // 前走の出来事の本番テストの期間の始まり（出来事は2025-08から集める）
 async function loadPrereg(){ try { PREREG_ST.d = SERVER.cloud ? await staticJson("prereg.json", 20000).catch(() => ({})) : SERVER.enabled ? await api("/api/prereg") : null; } catch (e) { PREREG_ST.d = null; }
   if (PREREG_ST.d?.kind === "inc1" && SERVER.enabled && !SERVER.cloud) await loadIncidents();
   return PREREG_ST.d; }
@@ -5421,11 +5422,13 @@ async function prereg(action){
   if (PREREG_ST.busy) return; PREREG_ST.busy = true; renderLearnTab();
   try {
     if (action === "seal"){
-      const recs = BF.recs || []; const seen = [...new Set(recs.map(r => r.date))].sort();
+      // 前走の出来事のテスト：出来事の結果は、どの表でもまだ一度も見ていない（ルールは集める前の2026-10-07に固定）。
+      // そのため、出来事を集め始めた2025-08から2か月（前走の出来事がそろうまで）より後のすべての日をテスト期間にする。それより前の日を「見た日」とする
+      const recs = BF.recs || []; const seen = [...new Set(recs.map(r => r.date))].filter(d => d < INC_TEST_FROM).sort();
       if (seen.length < 20){ toast("記録が少なすぎます"); return; }
       const j = await api("/api/prereg", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "seal", seen, kind: "inc1", rules: Learn.INC_RULES, learnVer: typeof LOGIC_VER !== "undefined" ? LOGIC_VER : null }) });
       if (!j?.ok){ toast(j?.message || "封印できませんでした"); return; }
-      toast(`${seen.length}開催日を「見た日」として封印しました。ここから記録する日が本番テストの対象です（「予想・学習を進める」で記録を再開してください）`);
+      toast(`封印しました。${INC_TEST_FROM}以降のすべての日（記録済みの日も、これから記録する日も）が本番テストの対象です`);
     } else if (action === "open"){
       PREREG_ST.opening = true; await loadPrereg();
       const recs = BF.recs || (await api("/api/learn?full=1", { timeout: 300000 })).records || [];
@@ -5442,7 +5445,7 @@ async function prereg(action){
 function holdoutPanel(H){
   const d = PREREG_ST.d, roi = x => x == null ? "—" : Math.round(x * 100) + "%";
   const head = `<h4>16. 本番テスト（封印）</h4>
-    <p class="small">過去のデータは、何度も表を見て条件を考えるうちに「たまたま良かった条件」を選んでしまいます。そこで<b>今まで見た日を封印の基準にして、まだ見ていない日（取得してまだ記録していない日・これから増える日）を封印</b>し、検証レポートの1〜15番には一切使いません。
+    <p class="small">過去のデータは、何度も表を見て条件を考えるうちに「たまたま良かった条件」を選んでしまいます。そこで<b>テスト期間を封印</b>し、検証レポートの1〜15番には一切使いません。前走の出来事のテストでは、出来事の結果をどの表でもまだ見ていないため、<b>2025-10-01以降のすべての日</b>がテスト期間です（出来事は2025-08から集めて、前走の分をそろえます）。
     確かめるルールは<b>封印の時点で固定</b>します。今の版のルールは<b>JRA公式「競走中の出来事等」の前走の不利</b>（主ルール：前走で「被害馬」になった馬の単勝。ほか3つ）で、モデルの学習は使わず、決めたルールどおりに買った場合の実際の払戻で判定します。封印期間の記録がたまったら<b>1回だけ開封</b>します。開封したあとに条件を変えて開け直すことはできません（やり直すと新しい封印になり、前の結果は履歴に残ります）。</p>`;
   if (!d?.seen?.length) return head + (SERVER.enabled && !SERVER.cloud ? `<div class="ctrls"><button class="btn primary" data-prereg="seal" ${PREREG_ST.busy ? "disabled" : ""}>今までの記録を「見た日」として封印する</button></div>
     <p class="small">おすすめの順番：①「予想・学習を止める」の状態でここで封印 → ②「過去データで学習」で、まだ記録していない期間を<b>高速モード</b>で記録（予想・学習を進める）→ ③下の「競走中の出来事等を集める」で同じ期間（＋2か月前から）を集める → ④封印期間が十分たまったら開封。</p>` : "<p class='small'>封印はPCのアプリで行います。</p>");
