@@ -1055,6 +1055,44 @@ const Learn = (() => {
     }
     return { ok: n > 0, races: n, indep: n ? +(la / n).toFixed(4) : null, market: n ? +(lk / n).toFixed(4) : null, missRaces: nn, missIndep: nn ? +(ln / nn).toFixed(4) : null, missMarket: nn ? +(lnk / nn).toFixed(4) : null };
   }
+  // 確率の補正（自信過剰の修正）：u に掛ける1つの数 T を、学習期間の新しい側（25%）で決める
+  function fitTemp(U){ const ll = T => U.reduce((a, o) => { const p = softmax(o.u.map(v => v * T)); return a - Math.log(Math.max(p[o.w], 1e-12)); }, 0);
+    let lo = 0.2, hi = 1.6; for (let k = 0; k < 40; k++){ const m1 = lo + (hi - lo) / 3, m2 = hi - (hi - lo) / 3; if (ll(m1) < ll(m2)) hi = m2; else lo = m1; } return (lo + hi) / 2; }
+  function indFitCal(tr){
+    const ds = [...new Set(tr.map(x => x.date))], cut = ds[Math.floor(ds.length * 0.75)];
+    const A = tr.filter(x => x.date < cut), B = tr.filter(x => x.date >= cut);
+    let T = 1;
+    if (A.length >= 300 && B.length >= 100){ const mA = indFit(A); T = fitTemp(B.map(x => ({ u: indUtil(mA, x.X), w: x.win.indexOf(true) })).filter(o => o.w >= 0)); }
+    return { m: indFit(tr), T };
+  }
+  // 14. 市場の誤りを直接見分ける：市場の確率（log）を前提の材料として入れ、それ以外の材料で「市場からのずれ」だけを学習する（各期間それより前のレースだけ）。
+  // 上乗せ（市場だけのモデルとの差）が大きい馬ほど回収率が上がれば、市場が間違えるケースを見分けられている。
+  async function marketEdgeReport(fullRows, ranges){
+    const aug = x => ({ ...x, X: x.X.map((v, i) => [Math.log(Math.max(x.PK[i], 1e-6)), ...v]) });
+    const rows = fullRows.map(aug);
+    const EB = [0, 0.9, 1.0, 1.1, 1.25, 1e9], EBL = ["0.9倍未満", "0.9〜1.0倍", "1.0〜1.1倍", "1.1〜1.25倍", "1.25倍以上"];
+    const B = EB.slice(0, -1).map(() => ({ n: 0, hit: 0, ret: 0, ret2: 0, per: ranges.map(() => ({ n: 0, ret: 0 })) })), B10 = EB.slice(0, -1).map(() => ({ n: 0, hit: 0, ret: 0, ret2: 0, per: ranges.map(() => ({ n: 0, ret: 0 })) }));
+    const difs = [], folds = [];
+    for (let f = 0; f < ranges.length; f++){
+      const g = ranges[f], tr = rows.filter(x => x.date < g.from), te = rows.filter(x => x.date >= g.from && x.date <= g.to);
+      if (tr.length < 500 || !te.length) continue;
+      const m = indFit(tr), m0 = indFit(tr, [0]);
+      let fd = 0, fn = 0;
+      te.forEach(x => { const p = softmax(indUtil(m, x.X)), p0 = softmax(indUtil(m0, x.X)), w = x.win.indexOf(true);
+        if (w >= 0){ const d = Math.log(p[w]) - Math.log(p0[w]); difs.push(d); fd += d; fn++; }
+        p.forEach((q, i) => { const e = q / p0[i], bi = EB.findIndex((b, k) => e >= b && e < EB[k + 1]), ret = x.win[i] ? x.odds[i] : 0;
+          for (const BB of (x.odds[i] >= 10 ? [B, B10] : [B])){ const o = BB[bi]; o.n++; if (ret){ o.hit++; o.ret += ret; o.ret2 += ret * ret; } o.per[f].n++; o.per[f].ret += ret; } }); });
+      folds.push({ from: g.from, gain: fn ? +(fd / fn * 1000).toFixed(2) : null });
+      await new Promise(res => setTimeout(res, 0));
+    }
+    if (!difs.length) return null;
+    const md = difs.reduce((a, b) => a + b, 0) / difs.length, sd = Math.sqrt(difs.reduce((a, b) => a + (b - md) ** 2, 0) / Math.max(1, difs.length - 1));
+    const fin = BB => BB.map((o, i) => { if (!o.n) return { band: EBL[i], n: 0 }; const m = o.ret / o.n, se = Math.sqrt(Math.max(0, o.ret2 / o.n - m * m) / o.n);
+      return { band: EBL[i], n: o.n, hits: o.hit, roi: +m.toFixed(3), lo95: +Math.max(0, m - 1.96 * se).toFixed(3), hi95: +(m + 1.96 * se).toFixed(3), per: o.per.map(p => p.n >= 30 ? +(p.ret / p.n).toFixed(2) : null), perN: o.per.map(p => p.n) }; });
+    const final = indFit(rows);
+    return { races: difs.length, gain: +(md * 1000).toFixed(2), z: sd > 0 ? +(md / (sd / Math.sqrt(difs.length))).toFixed(2) : null, folds, bands: fin(B), bands10: fin(B10),
+      coef: final.cols.slice(1).map((c, j) => [IND_NAMES[c - 1], +final.th[j + 1].toFixed(3)]).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 10) };
+  }
   async function indepReport(R, ranges){
     const rows = indRows(R), fullRows = rows.filter(x => x.full);
     if (fullRows.length < 800) return { ready: false, n: fullRows.length };
@@ -1063,19 +1101,19 @@ const Learn = (() => {
     const mk = () => RB.slice(0, -1).map(() => ({ seq: [], top3: 0, odds: 0, per: ranges.map(() => ({ n: 0, ret: 0 })) }));
     const B = mk(), B10 = mk(), cal = CAL_B.slice(0, -1).map((lo, i) => ({ lo, hi: CAL_B[i + 1], n: 0, p: 0, w: 0 }));
     const mods = IND_MODULES.map(([name]) => ({ name, ll: 0, n: 0 }));
-    let n = 0, llA = 0, llK = 0, llM = 0, llU = 0; const folds = [];
+    let n = 0, llA = 0, llK = 0, llM = 0, llU = 0, llRaw = 0; const folds = [];
     for (let f = 0; f < ranges.length; f++){
       const g = ranges[f], tr = fullRows.filter(x => x.date < g.from), te = fullRows.filter(x => inR(x, g));
       if (tr.length < 500 || !te.length) continue;
-      const m = indFit(tr), mm = IND_MODULES.map(([, cols]) => indFit(tr, cols));
+      const { m, T } = indFitCal(tr), mm = IND_MODULES.map(([, cols]) => indFit(tr, cols));
       let fa = 0, fk = 0, fn = 0;
-      te.forEach(x => { const P = indPredict(m, x), w = x.win.indexOf(true);
-        if (w >= 0){ const a = -Math.log(P[w]), k = -Math.log(x.PK[w]); llA += a; llK += k; llM -= Math.log(x.PM[w]); llU += Math.log(x.n); fa += a; fk += k; n++; fn++;
+      te.forEach(x => { const U = indUtil(m, x.X), P = softmax(U.map(v => v * T)), P1 = softmax(U), w = x.win.indexOf(true);
+        if (w >= 0){ const a = -Math.log(P[w]), k = -Math.log(x.PK[w]); llA += a; llRaw -= Math.log(P1[w]); llK += k; llM -= Math.log(x.PM[w]); llU += Math.log(x.n); fa += a; fk += k; n++; fn++;
           mm.forEach((md, q) => { mods[q].ll -= Math.log(indPredict(md, x)[w]); mods[q].n++; }); }
         P.forEach((p, i) => { const c = cal.find(b => p >= b.lo && p < b.hi); if (c){ c.n++; c.p += p; if (x.win[i]) c.w++; }
           const ratio = p / x.PK[i], bi = RB.findIndex((b, k2) => ratio >= b && ratio < RB[k2 + 1]); const ret = x.win[i] ? x.odds[i] : 0;
           for (const BB of (x.odds[i] >= 10 ? [B, B10] : [B])){ const o = BB[bi]; o.seq.push(ret); o.odds += x.odds[i]; if (x.top3[i]) o.top3++; o.per[f].n++; o.per[f].ret += ret; } }); });
-      folds.push({ from: g.from, to: g.to, train: tr.length, test: te.length, gain: fn ? +((fk - fa) / fn).toFixed(4) : null });
+      folds.push({ from: g.from, to: g.to, train: tr.length, test: te.length, T: +T.toFixed(2), gain: fn ? +((fk - fa) / fn).toFixed(4) : null });
       await new Promise(res => setTimeout(res, 0));
     }
     if (!n) return { ready: false, n: fullRows.length };
@@ -1089,7 +1127,7 @@ const Learn = (() => {
     const bands = fin(B), use = bands.filter(b => b.n >= 100);
     const mono = use.length >= 3 ? (() => { let c = 0, t = 0; for (let i = 0; i < use.length; i++) for (let j = i + 1; j < use.length; j++){ t++; if (use[j].roi > use[i].roi) c++; } return +(c / t).toFixed(2); })() : null;
     const final = indFit(fullRows);
-    return { ready: true, n: fullRows.length, races: n, ll: { indep: +(llA / n).toFixed(4), market: +(llK / n).toFixed(4), engine: +(llM / n).toFixed(4), uniform: +(llU / n).toFixed(4) }, folds,
+    return { ready: true, n: fullRows.length, races: n, ll: { indep: +(llA / n).toFixed(4), raw: +(llRaw / n).toFixed(4), market: +(llK / n).toFixed(4), engine: +(llM / n).toFixed(4), uniform: +(llU / n).toFixed(4) }, folds, edge: await marketEdgeReport(fullRows, ranges),
       modules: mods.map(q => ({ name: q.name, ll: q.n ? +(q.ll / q.n).toFixed(4) : null })),
       calib: cal.filter(c => c.n).map(c => ({ range: `${Math.round(c.lo * 100)}〜${Math.round(Math.min(c.hi, 1) * 100)}%`, n: c.n, pred: +(c.p / c.n).toFixed(4), actual: +(c.w / c.n).toFixed(4) })),
       bands, bands10: fin(B10), mono,
