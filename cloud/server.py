@@ -318,6 +318,9 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path == "/api/lock":
             fp = DATA / "lock.json"
             return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {})
+        if u.path == "/api/prereg":
+            fp = DATA / "prereg.json"
+            return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {})
         if u.path == "/api/learn" and q.get("count"):
             fp = DATA / "learn.json"
             n = len(json.loads(fp.read_text(encoding="utf-8")).get("records", [])) if fp.exists() else 0
@@ -395,6 +398,27 @@ class Handler(SimpleHTTPRequestHandler):
                     hp.write_text(json.dumps(hist, ensure_ascii=False), encoding="utf-8"); fp.write_text("{}", encoding="utf-8"); log("実戦テスト：固定を解除しました")   # 空にする（クラウドの固定も解除されるように）
                 else: return self._json({"ok": False, "message": "指定が正しくありません"}, 400)
                 threading.Thread(target=lambda: _safe(lambda: _push_after(None)), daemon=True).start()   # スマホ・クラウドにも反映
+                return self._json({"ok": True})
+            except Exception as ex: return self._json({"ok": False, "message": str(ex)}, 400)
+        if u.path == "/api/prereg":
+            # 本番テストの封印：seal＝見た日とルールを固定（開封済みか未封印のときだけ。開封前に作り直すことはできない）／open＝結果を1回だけ保存
+            n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8") if n else "{}"
+            try:
+                j = json.loads(body or "{}"); fp = DATA / "prereg.json"
+                cur = json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {}
+                now = dt.datetime.now().isoformat(timespec="seconds")
+                if j.get("action") == "seal" and isinstance(j.get("seen"), list) and j["seen"]:
+                    if cur.get("seen") and not cur.get("opened"): return self._json({"ok": False, "message": "封印中です（開封するまで作り直せません）"}, 400)
+                    if cur.get("seen"):
+                        hp = DATA / "prereg_history.json"; hist = json.loads(hp.read_text(encoding="utf-8")) if hp.exists() else []
+                        hist.append(cur); hp.write_text(json.dumps(hist, ensure_ascii=False), encoding="utf-8")
+                    seen = sorted(set(str(x) for x in j["seen"]))
+                    fp.write_text(json.dumps({"sealedAt": now, "seen": seen, "from": seen[0], "rules": j.get("rules"), "learnVer": j.get("learnVer")}, ensure_ascii=False), encoding="utf-8")
+                    log(f"本番テスト：{len(seen)}開催日を見た日として封印しました")
+                elif j.get("action") == "open" and cur.get("seen") and not cur.get("opened") and isinstance(j.get("result"), dict):
+                    cur["opened"] = {"at": now, "result": j["result"]}; fp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8"); log("本番テスト：開封しました")
+                else: return self._json({"ok": False, "message": "指定が正しくありません"}, 400)
+                threading.Thread(target=lambda: _safe(lambda: _push_after(None)), daemon=True).start()
                 return self._json({"ok": True})
             except Exception as ex: return self._json({"ok": False, "message": str(ex)}, 400)
         if u.path == "/api/jra/probe":
