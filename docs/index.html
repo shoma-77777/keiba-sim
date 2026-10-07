@@ -5305,6 +5305,8 @@ function holdoutPanel(H){
     確かめるルールは<b>封印の時点で固定</b>します（主ルール：14番の穴候補〔10倍以上×上乗せ1.25倍以上〕の単勝。ほか4つ）。封印期間の記録がたまったら<b>1回だけ開封</b>し、各月を「その月より前の記録だけで学習したモデル」で予想して判定します。開封したあとに条件を変えて開け直すことはできません（やり直すと新しい封印になり、前の結果は履歴に残ります）。</p>`;
   if (!d?.seen?.length) return head + (SERVER.enabled && !SERVER.cloud ? `<div class="ctrls"><button class="btn primary" data-prereg="seal" ${PREREG_ST.busy ? "disabled" : ""}>今までの記録を「見た日」として封印する</button></div>
     <p class="small">おすすめの順番：①ここで封印 → ②「過去データで学習」で、まだ記録していない期間を<b>高速モード</b>で記録 → ③封印期間が1,000レース以上たまったら開封。</p>` : "<p class='small'>封印はPCのアプリで行います。</p>");
+  // 封印期間の件数は、レポートを作り直さなくても今の記録から数える（封印のあとに記録した日がすぐ反映されるように）
+  if (BF.recs?.length){ const hs = Learn.holdSplit(BF.recs, { seen: d.seen, from: d.from }).hold; H = { ...(H || {}), races: hs.length, from: hs.reduce((m, r) => !m || r.date < m ? r.date : m, null), to: hs.reduce((m, r) => r.date > m ? r.date : m, "") || null }; }
   const rules = (d.rules || Learn.PREREG).map(r => `<li>${r.primary ? "<b>主</b> " : ""}${esc(r.label)}</li>`).join("");
   const info = `<p class="small">封印 ${esc(d.sealedAt || "")}・見た日 ${d.seen.length}開催日（${esc(d.seen[0])}〜${esc(d.seen.at(-1))}）。封印期間の記録：<b>${(H?.races || 0).toLocaleString()}レース</b>${H?.from ? `（${esc(H.from)}〜${esc(H.to)}）` : ""}。</p><ul class="small">${rules}</ul>`;
   const res = d.opened?.result || H?.result;
@@ -5839,8 +5841,9 @@ async function bfProcessDay(j, left){
     try { recs = await Learn.recordsForRaces(Engine, races.filter(r => r.result?.rows?.length), DB.horses, trackOf, fast ? 200 : 2000, betsOf, LEARN.base || Engine.WEIGHTS, wf.upto); if (fast) recs.forEach(x => x.fast = 1); }
     finally { if (BF.full) applyLearn(BF.full); simBusy = false; }
     BF.recs = Learn.merge(BF.recs, recs); BF.pendRecs.push(...recs);
+    // 先に記録を保存してから「済み」にする（途中でアプリを閉じても、済みなのに記録がない日ができないように）
+    await bfPostLearn();
     await api("/api/backfill/done", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date: ymdOf(d), result }) });
-    if (BF.pendRecs.length >= 120 || left <= 1) await bfPostLearn();
     if (races.length){ const sp = (Date.now() - t0) / 1000 / races.length; BF.secPerRace = BF.secPerRace ? BF.secPerRace * 0.7 + sp * 0.3 : sp; LS.set("keibaBfSec", BF.secPerRace); }
   } finally {
     // 画面のデータから外す（メモリを使いすぎないように）
@@ -5898,7 +5901,7 @@ function bfPanel(){
     ${bfVersionBox(s)}
     ${s.from ? `<p class="small"><b>取得</b>：${s.running ? `取得中（${esc(s.cur || "")} ${esc(s.phase || "")}）` : s.fetchDone ? "完了" : "停止中"}・${s.daysChecked || 0}/${s.daysTotal || "—"}日を確認（${pct0}%）・開催${s.raceDays || 0}日・${(s.races || 0).toLocaleString()}レース・出走馬${(s.horses || 0).toLocaleString()}頭
       ${s.running ? `<br><span class="small">ここまでの取得 ${(s.requests || 0).toLocaleString()}回。最初のほうの日は出走馬の成績を初めて取るので1日分に30分ほどかかります（馬がそろうにつれ速くなります）。1日分が終わるたびに数字が増えます。</span>` : ""}
-      <br><b>予想・答え合わせ・学習</b>：${days.length}開催日（${nR.toLocaleString()}レース）済み・残り${(s.pending || []).length}開催日${BF.reproc ? `（うち${BF.reproc}開催日は、前の版で作った記録を「その日より前のデータだけのモデル」で作り直し中）` : ""}${BF.proc ? `・処理中（${esc(BF.msg)}）` : BF.pause ? "・一時停止中" : ""}${last ? `・今のモデルの比重 ${last.a}` : ""}</p>` : ""}
+      <br><b>予想・答え合わせ・学習</b>：${days.length}開催日（${nR.toLocaleString()}レース）済み・残り${(s.pending || []).length}開催日${BF.reproc ? `（うち${BF.reproc}開催日は、前の版で作った記録を「その日より前のデータだけのモデル」で作り直し中）` : ""}${BF.proc ? `・処理中（${esc(BF.msg)}）` : BF.pause ? "・一時停止中" : ""}${last?.a != null ? `・今のモデルの比重 ${last.a}` : ""}</p>` : ""}
     ${days.length ? `<div class="tbl-wrap"><table><thead><tr><th>買い方</th><th class="r">購入R</th><th class="r">投資</th><th class="r">払戻</th><th class="r">回収率</th>${Object.keys(byYear).sort().map(y => `<th class="r">${y}年</th>`).join("")}</tr></thead><tbody>
       ${Object.keys(L).filter(k => sum[k]?.races).map(k => `<tr><td>${L[k]}</td><td class="r num">${sum[k].races.toLocaleString()}</td><td class="r num">${yen(sum[k].inv)}</td><td class="r num">${yen(sum[k].ret)}</td><td class="r num ${sum[k].ret >= sum[k].inv ? "pos" : "neg"}"><b>${rate(sum[k])}</b></td>${Object.keys(byYear).sort().map(y => `<td class="r num">${rate(byYear[y][k])}</td>`).join("")}</tr>`).join("")}
       </tbody></table></div>` : ""}
