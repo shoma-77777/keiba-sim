@@ -386,7 +386,7 @@ const Learn = (() => {
       metrics: { model: logloss(recs, h => h.pm), market: logloss(recs, h => h.pk), blend: logloss(recs, h => Math.pow(h.pm, a) * Math.pow(h.pk, b)) },
       hist, bias: bias(recs, today || new Date().toISOString().slice(0, 10)),
       upsets: recs.slice(-400).flatMap(analyzeUpsets).slice(-60), upsetStats: { ...us, factors: us.factors.slice(0, 16) },
-      paper: paperStats(recs) };
+      paper: paperStats(recs), indep: (() => { try { return indBuild(recs); } catch (e) { return null; } })() };
   }
 
   function merge(oldRecs, newRecs){
@@ -927,44 +927,57 @@ const Learn = (() => {
   }
 
   // ===== 市場乖離型：オッズを一切使わない「独自勝率」モデル → 最後にだけ市場と比べる =====
-  // 材料（レース前に分かるもの・今回のオッズや人気は使わない）：要素の点数（人気変動・穴要素を除く）、能力の内訳、位置取り、前走の内容、枠、距離の増減、先行馬の割合。
-  // 上位3着の Plackett–Luce（2・3着は割り引き）を、各期間それより前のレースだけで学習（リッジ正則化・ニュートン法）。
+  // 材料（レース前に分かるもの・今回のオッズ／人気／人気から作る項目は使わない）を6つのモジュールに分け、
+  // それぞれ単体と、全部をまとめたものを、上位3着の Plackett–Luce（2・3着は割り引き）で学習する（各期間それより前のレースだけ・リッジ正則化・ニュートン法）。
   const IND_Z = FEATS.map((k, j) => [k, j]).filter(([k]) => k !== "人気変動" && k !== "穴要素");
   const IND_NAMES = [...IND_Z.map(([k]) => "要素:" + k), ...AB_NAMES, "能力の内訳なし", "普段の1角の位置", "前走の1角の位置", "近3走の1角の位置", "前走の4角の位置", "メンバー内で普段どれだけ前か", "位置取りの記録なし", ...CT_NAMES, "前走の内容なし", "枠", "距離の増減", "先行馬の割合"];
-  function indX(h, rel, r){
+  const IND_MODULES = [
+    ["A 基礎能力", ["要素:能力", "要素:スピード", "要素:血統", "近5走のベスト着順（率）", "出走数", "能力の内訳なし"]],
+    ["B 近走フォーム", ["要素:調子", "要素:ローテ", "前走の着順（率）", "近3走の着順（率）", "前走の着差（秒）", "前走の人気", "前走の人気−着順（＋は人気より好走）", "前走からの日数"]],
+    ["C 前走内容", [...CT_NAMES, "前走の内容なし", "前走の4角の位置"]],
+    ["D 今回条件", ["要素:距離", "要素:芝ダ", "要素:馬場", "要素:競馬場", "要素:回り", "要素:斤量", "要素:季節", "要素:当日馬場", "要素:レース傾向", "要素:年齢", "距離の増減", "クラスの上下（＋は昇級）"]],
+    ["E 展開・枠", ["普段の1角の位置", "前走の1角の位置", "近3走の1角の位置", "メンバー内で普段どれだけ前か", "位置取りの記録なし", "枠", "要素:枠", "先行馬の割合"]],
+    ["F 騎手・調教", ["要素:騎手", "要素:乗替", "要素:調教"]]
+  ].map(([name, cols]) => [name, cols.map(c => IND_NAMES.indexOf(c)).filter(i => i >= 0)]);
+  function indX(h, rel, nfRatio){
     const ab = h.ab, pp = h.pp?.[4] > 0 ? h.pp : null, ct = h.ct;
     const v = (x, d = 0) => x == null || !isFinite(x) ? d : x;
     return [...IND_Z.map(([, j]) => v(h.z?.[j])),
       ...(ab ? [v(ab[0], .5), v(ab[1], .5), v(ab[2], .5), Math.min(5, v(ab[3], 1)), Math.min(18, v(ab[4], 9)), Math.max(-15, Math.min(15, v(ab[5]))), Math.min(365, v(ab[6], 40)) / 30, Math.min(40, v(ab[7], 5)), v(ab[8]) / 6] : [.5, .5, .5, 1, 9, 0, 40 / 30, 0, 0]), ab ? 0 : 1,
       ...(pp ? [pp[0], v(pp[1], pp[0]), v(pp[2], pp[0]), v(pp[3], pp[0]), v(rel, .5)] : [.5, .5, .5, .5, .5]), pp ? 0 : 1,
       ...(ct ? [v(ct[0]), v(ct[1]), v(ct[2])] : [0, 0, 0]), ct ? 0 : 1,
-      h.gate, Math.max(-2, Math.min(2, v(h.dd) / 400)), (r.nf || 0) / Math.max(1, r.n || r.h.length)];
+      h.gate, Math.max(-2, Math.min(2, v(h.dd) / 400)), nfRatio];
   }
+  const relOf = H => { const eps = H.map(h => h.pp?.[4] > 0 ? h.pp[0] : null), w = eps.filter(x => x != null).sort((a, b) => a - b); return eps.map(e => e != null && w.length > 1 ? w.indexOf(e) / (w.length - 1) : null); };
   function indRows(R){
     return R.map(r => {
       const H = r.h.filter(h => h.pos != null && h.odds > 1); if (H.length < 5 || !r.order?.length) return null;
-      const eps = H.map(h => h.pp?.[4] > 0 ? h.pp[0] : null), withEp = eps.filter(x => x != null).sort((a, b) => a - b);
-      const X = H.map((h, i) => indX(h, eps[i] != null && withEp.length > 1 ? withEp.indexOf(eps[i]) / (withEp.length - 1) : null, r));
+      const rel = relOf(H), nfr = (r.nf || 0) / Math.max(1, H.length);
+      const X = H.map((h, i) => indX(h, rel[i], nfr));
       const idx = []; for (const num of r.order.slice(0, 3)){ const k = H.findIndex(h => h.num === num); if (k < 0 || idx.includes(k)) break; idx.push(k); }
       const sk = H.reduce((a, h) => a + h.pk, 0), sm = H.reduce((a, h) => a + Math.max(h.pm, 1e-5), 0);
-      return { date: r.date, id: r.id, X, idx, n: H.length, PK: H.map(h => h.pk / sk), PM: H.map(h => Math.max(h.pm, 1e-5) / sm), odds: H.map(h => h.odds), win: H.map(h => h.pos === 1), top3: H.map(h => h.pos <= 3), full: H.every(h => h.ab !== undefined && h.ct !== undefined) };
+      return { date: r.date, id: r.id, X, idx, n: H.length, PK: H.map(h => h.pk / sk), PM: H.map(h => Math.max(h.pm, 1e-5) / sm), odds: H.map(h => h.odds), win: H.map(h => h.pos === 1), top3: H.map(h => h.pos <= 3),
+        ct: H.map(h => h.ct || null), ab: H.map(h => h.ab || null), full: H.every(h => h.ab !== undefined && h.ct !== undefined) };
     }).filter(Boolean);
   }
-  function indFit(rows, lam = 2){
-    const D = IND_NAMES.length, mu = new Float64Array(D), sd = new Float64Array(D); let cnt = 0;
-    rows.forEach(x => x.X.forEach(v => { cnt++; v.forEach((a, j) => mu[j] += a); })); for (let j = 0; j < D; j++) mu[j] /= Math.max(1, cnt);
-    rows.forEach(x => x.X.forEach(v => v.forEach((a, j) => sd[j] += (a - mu[j]) ** 2))); for (let j = 0; j < D; j++) sd[j] = Math.sqrt(sd[j] / Math.max(1, cnt)) || 1;
-    const Z = rows.map(x => x.X.map(v => v.map((a, j) => (a - mu[j]) / sd[j])));
-    const th = new Float64Array(D);
-    const evalLL = (t, g, Hm) => { let L = 0; if (g){ g.fill(0); Hm.fill(0); } const m = new Float64Array(D);
-      rows.forEach((x, r) => { const Zr = Z[r], n = x.n, u = Zr.map(z => z.reduce((a, b, j) => a + t[j] * b, 0)), used = new Uint8Array(n);
+  // cols：使う材料の番号（モジュール単体の確かめ用）。戻り値の H は最適解でのヘッセ行列（予測の不確かさの計算に使う）
+  function indFit(rows, cols, lam = 2){
+    cols = cols || IND_NAMES.map((_, j) => j); const D = cols.length;
+    const mu = new Float64Array(D), sd = new Float64Array(D); let cnt = 0;
+    rows.forEach(x => x.X.forEach(v => { cnt++; for (let j = 0; j < D; j++) mu[j] += v[cols[j]]; })); for (let j = 0; j < D; j++) mu[j] /= Math.max(1, cnt);
+    rows.forEach(x => x.X.forEach(v => { for (let j = 0; j < D; j++) sd[j] += (v[cols[j]] - mu[j]) ** 2; })); for (let j = 0; j < D; j++) sd[j] = Math.sqrt(sd[j] / Math.max(1, cnt)) || 1;
+    const Z = rows.map(x => { const z = new Float64Array(x.n * D); x.X.forEach((v, i) => { for (let j = 0; j < D; j++) z[i * D + j] = stdClip((v[cols[j]] - mu[j]) / sd[j]); }); return z; });
+    const th = new Float64Array(D), m = new Float64Array(D);
+    const evalLL = (t, g, Hm) => { let L = 0; if (g){ g.fill(0); Hm.fill(0); }
+      for (let r = 0; r < rows.length; r++){ const x = rows[r], z = Z[r], n = x.n, u = new Float64Array(n), used = new Uint8Array(n), e = new Float64Array(n);
+        for (let i = 0; i < n; i++){ let s2 = 0; for (let j = 0; j < D; j++) s2 += t[j] * z[i * D + j]; u[i] = s2; }
         for (let st = 0; st < x.idx.length; st++){ const w = x.idx[st], lmb = LAM[st]; let mx = -1e9; for (let i = 0; i < n; i++) if (!used[i]) mx = Math.max(mx, lmb * u[i]);
-          let S = 0; const e = new Float64Array(n); for (let i = 0; i < n; i++) if (!used[i]){ e[i] = Math.exp(lmb * u[i] - mx); S += e[i]; }
+          let S = 0; for (let i = 0; i < n; i++){ e[i] = used[i] ? 0 : Math.exp(lmb * u[i] - mx); S += e[i]; }
           L -= lmb * u[w] - mx - Math.log(S);
-          if (g){ m.fill(0); for (let i = 0; i < n; i++) if (e[i]){ const p = e[i] / S; for (let j = 0; j < D; j++) m[j] += p * Zr[i][j]; }
-            for (let j = 0; j < D; j++) g[j] += lmb * (m[j] - Zr[w][j]);
-            for (let i = 0; i < n; i++) if (e[i]){ const p = lmb * lmb * e[i] / S; for (let j = 0; j < D; j++){ const dj = Zr[i][j] - m[j]; if (!dj) continue; for (let k = j; k < D; k++) Hm[j * D + k] += p * dj * (Zr[i][k] - m[k]); } } }
-          used[w] = 1; } });
+          if (g){ m.fill(0); for (let i = 0; i < n; i++) if (e[i]){ const p = e[i] / S; for (let j = 0; j < D; j++) m[j] += p * z[i * D + j]; }
+            for (let j = 0; j < D; j++) g[j] += lmb * (m[j] - z[w * D + j]);
+            for (let i = 0; i < n; i++) if (e[i]){ const p = lmb * lmb * e[i] / S; for (let j = 0; j < D; j++){ const dj = z[i * D + j] - m[j]; if (!dj) continue; const pj = p * dj; for (let k = j; k < D; k++) Hm[j * D + k] += pj * (z[i * D + k] - m[k]); } } }
+          used[w] = 1; } }
       for (let j = 0; j < D; j++){ L += lam * t[j] * t[j] / 2; if (g){ g[j] += lam * t[j]; Hm[j * D + j] += lam; } }
       if (g) for (let j = 0; j < D; j++) for (let k = 0; k < j; k++) Hm[j * D + k] = Hm[k * D + j];
       return L; };
@@ -975,39 +988,115 @@ const Learn = (() => {
       let t = 1, ok = false; for (let ls = 0; ls < 20; ls++){ for (let j = 0; j < D; j++) tmp[j] = th[j] + t * step[j]; if (evalLL(tmp, null, null) <= L + 1e-10){ ok = true; break; } t /= 2; }
       if (!ok) break; th.set(tmp); L = evalLL(th, g, Hm); if (Math.max(...step.map(Math.abs)) * t < 1e-7) break;
     }
-    return { th: Array.from(th), mu: Array.from(mu), sd: Array.from(sd) };
+    return { cols: Array.from(cols), th: Array.from(th), mu: Array.from(mu), sd: Array.from(sd), H: Hm };
   }
-  const indPredict = (m, x) => { const u = x.X.map(v => v.reduce((a, b, j) => a + m.th[j] * (b - m.mu[j]) / m.sd[j], 0)); const mx = Math.max(...u); const e = u.map(a => Math.exp(a - mx)); const s = e.reduce((a, b) => a + b, 0); return e.map(a => a / s); };
+  const stdClip = z => z > 4 ? 4 : z < -4 ? -4 : z;   // 学習のときにほとんど見なかった極端な値で、予測が暴れないように
+  const indUtil = (m, X) => X.map(v => { let s2 = 0; for (let j = 0; j < m.cols.length; j++) s2 += m.th[j] * stdClip((v[m.cols[j]] - m.mu[j]) / m.sd[j]); return s2; });
+  const softmax = u => { const mx = Math.max(...u), e = u.map(a => Math.exp(a - mx)), s = e.reduce((a, b) => a + b, 0); return e.map(a => a / s); };
+  const indPredict = (m, x) => softmax(indUtil(m, x.X));
+  // 予測の不確かさ用：係数の分布（ヘッセ行列の逆＝共分散）のコレスキー分解
+  function cholCov(Hm, D){
+    const inv = []; for (let k = 0; k < D; k++){ const e = new Array(D).fill(0); e[k] = 1; inv.push(solve(Array.from({ length: D }, (_, j) => Array.from(Hm.subarray(j * D, j * D + D))), e)); }
+    const S = Array.from({ length: D }, (_, i) => Array.from({ length: D }, (_, j) => (inv[i][j] + inv[j][i]) / 2)), Lc = Array.from({ length: D }, () => new Array(D).fill(0));
+    for (let i = 0; i < D; i++) for (let j = 0; j <= i; j++){ let s2 = S[i][j]; for (let k = 0; k < j; k++) s2 -= Lc[i][k] * Lc[j][k]; Lc[i][j] = i === j ? Math.sqrt(Math.max(s2, 1e-12)) : s2 / Lc[j][j]; }
+    return Lc.map(r => r.map(v => +v.toFixed(6)));
+  }
+  // 予想のとき：記録と同じ作り方で、出走馬の材料を作る（ctx：buildContext の結果）
+  function liveRows(ctx, race, Engine){
+    ENG = Engine;
+    const W = Engine.WEIGHTS, wc = k => (k === "能力" ? 1 : (W[k] ?? 1)) || 1;
+    const H = ctx.field.map(f => { const runs = f.prof?.runs || [], pre = preOf(runs, race.distance);
+      return { num: f.num, z: FEATS.map(k => (f.adj?.[k] || 0) / wc(k)), ab: abOf(runs, race), ct: ctOf(runs), pp: pre.pp, dd: pre.dd, gate: (f.num - 1) / Math.max(1, ctx.N - 1) }; });
+    const { nf } = frontCounts(H.map(h => ({ pp: h.pp })));
+    const rel = relOf(H), nfr = nf / Math.max(1, H.length);
+    return { H, X: H.map((h, i) => indX(h, rel[i], nfr)) };
+  }
+  // 独自勝率と、その95%の範囲（係数の不確かさから200回くじ引き）
+  function livePredict(model, ctx, race, Engine, draws = 200){
+    if (!model?.th) return null;
+    const { H, X } = liveRows(ctx, race, Engine);
+    const p = softmax(indUtil(model, X));
+    const D = model.th.length, samples = H.map(() => []);
+    let seed = 12345; const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    const gauss = () => { let u = 0, v = 0; while (u === 0) u = rnd(); while (v === 0) v = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+    if (model.chol) for (let d = 0; d < draws; d++){
+      const eps = Array.from({ length: D }, gauss), th = model.th.map((t, i) => { let s2 = t; for (let k = 0; k <= i; k++) s2 += model.chol[i][k] * eps[k]; return s2; });
+      softmax(indUtil({ ...model, th }, X)).forEach((q, i) => samples[i].push(q));
+    }
+    return H.map((h, i) => { const s = samples[i].sort((a, b) => a - b);
+      return { num: h.num, p: p[i], lo: s.length ? s[Math.floor(s.length * 0.025)] : null, hi: s.length ? s[Math.floor(s.length * 0.975)] : null, ct: h.ct, ab: h.ab }; });
+  }
+  // 全部の記録で学習した独自勝率モデル（予想の画面で使う）
+  function indBuild(recs){
+    const rows = indRows(recs).filter(x => x.full); if (rows.length < 800) return null;
+    const m = indFit(rows);
+    return { cols: m.cols, th: m.th.map(v => +v.toFixed(5)), mu: m.mu.map(v => +v.toFixed(5)), sd: m.sd.map(v => +v.toFixed(5)), chol: cholCov(m.H, m.cols.length), n: rows.length, upto: rows.reduce((a, x) => x.date > a ? x.date : a, "") };
+  }
   async function indepReport(R, ranges){
     const rows = indRows(R), fullRows = rows.filter(x => x.full);
     if (fullRows.length < 800) return { ready: false, n: fullRows.length };
     const inR = (x, g) => x.date >= g.from && x.date <= g.to;
-    const RB = [0, 0.67, 1, 1.5, 2, 3, 1e9], RBL = ["市場の2/3未満", "2/3〜1倍", "1〜1.5倍", "1.5〜2倍", "2〜3倍", "3倍以上"];
-    const mk = () => RB.slice(0, -1).map(() => ({ n: 0, win: 0, ret: 0, ret2: 0, odds: 0, top3: 0, per: ranges.map(() => ({ n: 0, ret: 0 })) }));
+    const RB = [0, 1, 1.2, 1.5, 2, 3, 1e9], RBL = ["市場以下（1倍未満）", "1〜1.2倍", "1.2〜1.5倍", "1.5〜2倍", "2〜3倍", "3倍以上"];
+    const mk = () => RB.slice(0, -1).map(() => ({ seq: [], top3: 0, odds: 0, per: ranges.map(() => ({ n: 0, ret: 0 })) }));
     const B = mk(), B10 = mk(), cal = CAL_B.slice(0, -1).map((lo, i) => ({ lo, hi: CAL_B[i + 1], n: 0, p: 0, w: 0 }));
-    let n = 0, llA = 0, llK = 0, llM = 0; const folds = []; let model = null;
+    const mods = IND_MODULES.map(([name]) => ({ name, ll: 0, n: 0 }));
+    let n = 0, llA = 0, llK = 0, llM = 0, llU = 0; const folds = [];
     for (let f = 0; f < ranges.length; f++){
       const g = ranges[f], tr = fullRows.filter(x => x.date < g.from), te = fullRows.filter(x => inR(x, g));
       if (tr.length < 500 || !te.length) continue;
-      const m = indFit(tr); model = m;
+      const m = indFit(tr), mm = IND_MODULES.map(([, cols]) => indFit(tr, cols));
       let fa = 0, fk = 0, fn = 0;
       te.forEach(x => { const P = indPredict(m, x), w = x.win.indexOf(true);
-        if (w >= 0){ const a = -Math.log(P[w]), k = -Math.log(x.PK[w]), mm = -Math.log(x.PM[w]); llA += a; llK += k; llM += mm; fa += a; fk += k; n++; fn++; }
+        if (w >= 0){ const a = -Math.log(P[w]), k = -Math.log(x.PK[w]); llA += a; llK += k; llM -= Math.log(x.PM[w]); llU += Math.log(x.n); fa += a; fk += k; n++; fn++;
+          mm.forEach((md, q) => { mods[q].ll -= Math.log(indPredict(md, x)[w]); mods[q].n++; }); }
         P.forEach((p, i) => { const c = cal.find(b => p >= b.lo && p < b.hi); if (c){ c.n++; c.p += p; if (x.win[i]) c.w++; }
           const ratio = p / x.PK[i], bi = RB.findIndex((b, k2) => ratio >= b && ratio < RB[k2 + 1]); const ret = x.win[i] ? x.odds[i] : 0;
-          for (const BB of (x.odds[i] >= 10 ? [B, B10] : [B])){ const o = BB[bi]; o.n++; o.odds += x.odds[i]; if (x.win[i]){ o.win++; o.ret += ret; o.ret2 += ret * ret; } if (x.top3[i]) o.top3++; o.per[f].n++; o.per[f].ret += ret; } }); });
+          for (const BB of (x.odds[i] >= 10 ? [B, B10] : [B])){ const o = BB[bi]; o.seq.push(ret); o.odds += x.odds[i]; if (x.top3[i]) o.top3++; o.per[f].n++; o.per[f].ret += ret; } }); });
       folds.push({ from: g.from, to: g.to, train: tr.length, test: te.length, gain: fn ? +((fk - fa) / fn).toFixed(4) : null });
       await new Promise(res => setTimeout(res, 0));
     }
     if (!n) return { ready: false, n: fullRows.length };
-    const fin = BB => BB.map((o, i) => { if (!o.n) return { band: RBL[i], n: 0 }; const m = o.ret / o.n, se = Math.sqrt(Math.max(0, o.ret2 / o.n - m * m) / o.n);
-      return { band: RBL[i], n: o.n, winRate: +(o.win / o.n).toFixed(4), top3Rate: +(o.top3 / o.n).toFixed(4), avgOdds: +(o.odds / o.n).toFixed(1), roi: +m.toFixed(3), lo95: +Math.max(0, m - 1.96 * se).toFixed(3), hi95: +(m + 1.96 * se).toFixed(3),
-        per: o.per.map(p => p.n >= 30 ? +(p.ret / p.n).toFixed(2) : null) }; });
+    const fin = BB => BB.map((o, i) => { const N = o.seq.length; if (!N) return { band: RBL[i], n: 0 };
+      let s = 0, s2 = 0, hit = 0, bal = 0, peak = 0, dd = 0, st = 0, maxL = 0;
+      o.seq.forEach(v => { s += v; s2 += v * v; if (v > 0){ hit++; st = 0; } else maxL = Math.max(maxL, ++st); bal += (v - 1) * 100; peak = Math.max(peak, bal); dd = Math.max(dd, peak - bal); });
+      const m = s / N, se = Math.sqrt(Math.max(0, s2 / N - m * m) / N);
+      return { band: RBL[i], n: N, hits: hit, perN: o.per.map(p => p.n), winRate: +(hit / N).toFixed(4), top3Rate: +(o.top3 / N).toFixed(4), avgOdds: +(o.odds / N).toFixed(1), roi: +m.toFixed(3), lo95: +Math.max(0, m - 1.96 * se).toFixed(3), hi95: +(m + 1.96 * se).toFixed(3),
+        maxLose: maxL, maxDD: Math.round(dd), per: o.per.map(p => p.n >= 30 ? +(p.ret / p.n).toFixed(2) : null) }; });
+    // 乖離が大きいほど回収率が上がるか（帯の順位と回収率の順位の相関・頭数100以上の帯だけ）
+    const bands = fin(B), use = bands.filter(b => b.n >= 100);
+    const mono = use.length >= 3 ? (() => { let c = 0, t = 0; for (let i = 0; i < use.length; i++) for (let j = i + 1; j < use.length; j++){ t++; if (use[j].roi > use[i].roi) c++; } return +(c / t).toFixed(2); })() : null;
     const final = indFit(fullRows);
-    return { ready: true, n: fullRows.length, races: n, ll: { indep: +(llA / n).toFixed(4), market: +(llK / n).toFixed(4), engine: +(llM / n).toFixed(4) }, folds,
+    return { ready: true, n: fullRows.length, races: n, ll: { indep: +(llA / n).toFixed(4), market: +(llK / n).toFixed(4), engine: +(llM / n).toFixed(4), uniform: +(llU / n).toFixed(4) }, folds,
+      modules: mods.map(q => ({ name: q.name, ll: q.n ? +(q.ll / q.n).toFixed(4) : null })),
       calib: cal.filter(c => c.n).map(c => ({ range: `${Math.round(c.lo * 100)}〜${Math.round(Math.min(c.hi, 1) * 100)}%`, n: c.n, pred: +(c.p / c.n).toFixed(4), actual: +(c.w / c.n).toFixed(4) })),
-      bands: fin(B), bands10: fin(B10),
-      coef: IND_NAMES.map((k, j) => [k, +final.th[j].toFixed(3)]).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 12) };
+      bands, bands10: fin(B10), mono,
+      stage1: contentStage1(rows, ranges),
+      coef: final.cols.map((c, j) => [IND_NAMES[c], +final.th[j].toFixed(3)]).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 12) };
+  }
+  // 前走の内容（出遅れ量・4角からの伸び・上がり）が、次走で市場の期待以上に走るか（仕様のStage 1：モデルに入れる前に単体で確かめる）
+  function contentStage1(rows, ranges){
+    const items = [];
+    rows.forEach(x => { const t3 = top3FromMarket(x.PK);
+      x.ct.forEach((ct, i) => { if (!ct) return; const ab = x.ab[i];
+        items.push({ date: x.date, ct, lost: ab && ab[0] != null && ab[0] >= 0.5, hit: x.top3[i], win: x.win[i], e: t3[i], odds: x.odds[i] }); }); });
+    if (items.length < 2000) return null;
+    const inR = (x, g) => x.date >= g.from && x.date <= g.to;
+    const r0 = (() => { const h = items.filter(x => x.hit).length, e = items.reduce((a, x) => a + x.e, 0); return e > 0 ? h / e : 1; })();
+    const DEF = [
+      ["前走で大きく出遅れ（1角が普段より35%以上後ろ）", x => x.ct[0] != null && x.ct[0] >= 0.35], ["前走で少し出遅れ（15〜35%）", x => x.ct[0] != null && x.ct[0] >= 0.15 && x.ct[0] < 0.35],
+      ["前走で大きく出遅れ＋着順は下位半分（不利で負けた可能性）", x => x.ct[0] != null && x.ct[0] >= 0.35 && x.lost],
+      ["前走 4角から大きく伸びた（頭数の25%以上）", x => x.ct[1] != null && x.ct[1] >= 0.25], ["前走 4角から大きく失速（25%以上）", x => x.ct[1] != null && x.ct[1] <= -0.25],
+      ["前走 4角から伸びた＋着順は下位半分（届かず）", x => x.ct[1] != null && x.ct[1] >= 0.15 && x.lost],
+      ["前走 上がりが普段より0.8秒以上速い", x => x.ct[2] != null && x.ct[2] <= -0.8], ["前走 上がりが普段より0.8秒以上遅い", x => x.ct[2] != null && x.ct[2] >= 0.8],
+      ["前走 上がりが速い＋着順は下位半分", x => x.ct[2] != null && x.ct[2] <= -0.5 && x.lost]
+    ];
+    return DEF.map(([label, pred]) => { const S = items.filter(pred); if (S.length < 30) return null;
+      const hit = S.filter(x => x.hit).length, E = S.reduce((a, x) => a + x.e, 0) * r0, V = S.reduce((a, x) => a + x.e * r0 * (1 - Math.min(0.99, x.e * r0)), 0);
+      const per = ranges.map(g => { const F = S.filter(x => inR(x, g)); if (F.length < 30) return null; const h = F.filter(x => x.hit).length, e = F.reduce((a, x) => a + x.e, 0) * r0; return +((h + 1) / (e + 1)).toFixed(2); });
+      const ls = per.filter(v => v != null), same = ls.length >= 3 && (ls.every(v => v > 1) || ls.every(v => v < 1)), z = V > 0 ? (hit - E) / Math.sqrt(V) : 0;
+      return { label, n: S.length, hit, exp: +E.toFixed(1), lift: +((hit + 1) / (E + 1)).toFixed(2), z: +z.toFixed(2), winROI: +(S.reduce((a, x) => a + (x.win ? x.odds : 0), 0) / S.length).toFixed(3), per,
+        verdict: Math.abs(z) >= 2.6 && same ? "効果あり（全期間で同じ向き）" : Math.abs(z) >= 2 ? "候補（期間で向きがそろわない／多重比較を考えると弱い）" : "偶然と区別できない" };
+    }).filter(Boolean);
   }
 
   async function report(recs, opt = {}){
@@ -1123,6 +1212,6 @@ const Learn = (() => {
     return out;
   }
 
-  return { RV, report, clean, posFill, crossCompact, crossReport, crossTickets, crossFitBeta, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
+  return { RV, report, clean, posFill, livePredict, indBuild, crossCompact, crossReport, crossTickets, crossFitBeta, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
 })();
 if (typeof module !== "undefined") module.exports = Learn;

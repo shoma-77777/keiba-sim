@@ -397,6 +397,10 @@ class Handler(SimpleHTTPRequestHandler):
                 threading.Thread(target=lambda: _safe(lambda: _push_after(None)), daemon=True).start()   # スマホ・クラウドにも反映
                 return self._json({"ok": True})
             except Exception as ex: return self._json({"ok": False, "message": str(ex)}, 400)
+        if u.path == "/api/jra/probe":
+            import jra_probe
+            try: return self._json(jra_probe.run(DATA))
+            except Exception as ex: return self._json({"ok": False, "log": [f"エラー: {ex}"]})
         if u.path == "/api/clientlog":
             n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(min(n, 20000)).decode("utf-8", "replace")
             try:
