@@ -21,10 +21,12 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import keiba_collector as kc   # noqa: E402
 import backfill as bf          # noqa: E402
+import jra_collect as jc        # noqa: E402
 
 WEB = HERE / "web"
 DATA = Path(os.environ.get("KEIBA_DATA") or (HERE / "data")); DATA.mkdir(parents=True, exist_ok=True)
 bf.init(DATA)
+jc.init(DATA)
 DB_PATH = Path(os.environ.get("KEIBA_DB") or (HERE / "keiba.db"))
 TWEAKS = DATA / "tweaks.json"
 JOB = {"running": False, "date": None, "step": "", "done": 0, "total": 0, "log": [], "error": None, "finished_at": None, "kind": None}
@@ -318,6 +320,8 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path == "/api/lock":
             fp = DATA / "lock.json"
             return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {})
+        if u.path == "/api/jra/status": return self._json(jc.status())
+        if u.path == "/api/jra/incidents": return self._json(jc.incidents())
         if u.path == "/api/prereg":
             fp = DATA / "prereg.json"
             return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {})
@@ -413,7 +417,7 @@ class Handler(SimpleHTTPRequestHandler):
                         hp = DATA / "prereg_history.json"; hist = json.loads(hp.read_text(encoding="utf-8")) if hp.exists() else []
                         hist.append(cur); hp.write_text(json.dumps(hist, ensure_ascii=False), encoding="utf-8")
                     seen = sorted(set(str(x) for x in j["seen"]))
-                    fp.write_text(json.dumps({"sealedAt": now, "seen": seen, "from": seen[0], "rules": j.get("rules"), "learnVer": j.get("learnVer")}, ensure_ascii=False), encoding="utf-8")
+                    fp.write_text(json.dumps({"sealedAt": now, "seen": seen, "from": seen[0], "kind": j.get("kind"), "rules": j.get("rules"), "learnVer": j.get("learnVer")}, ensure_ascii=False), encoding="utf-8")
                     log(f"本番テスト：{len(seen)}開催日を見た日として封印しました")
                 elif j.get("action") == "open" and cur.get("seen") and not cur.get("opened") and isinstance(j.get("result"), dict):
                     cur["opened"] = {"at": now, "result": j["result"]}; fp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8"); log("本番テスト：開封しました")
@@ -421,6 +425,13 @@ class Handler(SimpleHTTPRequestHandler):
                 threading.Thread(target=lambda: _safe(lambda: _push_after(None)), daemon=True).start()
                 return self._json({"ok": True})
             except Exception as ex: return self._json({"ok": False, "message": str(ex)}, 400)
+        if u.path == "/api/jra/collect":
+            n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8") if n else "{}"
+            j = json.loads(body or "{}")
+            if j.get("stop"): jc.stop(); return self._json({"ok": True})
+            frm, to = str(j.get("from") or ""), str(j.get("to") or "")
+            if not re.match(r"^\d{4}-\d{2}-\d{2}$", frm) or not re.match(r"^\d{4}-\d{2}-\d{2}$", to): return self._json({"ok": False, "message": "期間の指定が正しくありません"}, 400)
+            return self._json({"ok": jc.start(frm, to)})
         if u.path == "/api/jra/probe":
             import jra_probe
             try: return self._json(jra_probe.run(DATA))
