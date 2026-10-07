@@ -2227,8 +2227,12 @@ const Learn = (() => {
     const gain = L.passing?.length ? (L.passing[L.passing.length - 1] - L.pos) / L.field : null;
     const S = runs.slice(1, 6).filter(x => x.surface === L.surface && x.last3f > 0 && x.last3f < 45);
     const l3 = L.last3f > 0 && L.last3f < 45 && S.length ? Math.max(-3, Math.min(3, L.last3f - S.reduce((a, x) => a + x.last3f, 0) / S.length)) : null;
-    return [r3(late), r3(gain), r3(l3)];
+    // 道中の位置変化＝(1角の順位 − 4角の順位)÷頭数（＋は道中で押し上げた）
+    const mid = L.passing?.length >= 2 ? (L.passing[0] - L.passing[L.passing.length - 1]) / L.field : null;
+    return [r3(late), r3(gain), r3(l3), r3(mid)];
   }
+  // 複勝の実際の払戻（100円あたりの倍率・外れは0）と単勝（確定オッズ）：前走の内容が「お金になるか」を確かめる用
+  const plpOf = (res, num) => { const v = res?.pay?.["複勝"]?.[String(num)]; return v ? +(v / 100).toFixed(2) : 0; };
   function frontCounts(pres){ const w = pres.filter(p => p.pp[4] > 0); return { nf: w.filter(p => p.pp[0] < 0.35).length, nn: w.filter(p => p.pp[0] < 0.12).length }; }
   // 前の版で作った記録に、位置取りの材料だけを付け足す（モデルの確率はそのまま）。race：出馬表と結果、horses：出走馬の成績
   function posFill(rec, race, horses, Engine){
@@ -2240,7 +2244,7 @@ const Learn = (() => {
     const pres = RU.map(runs => preOf(runs, race.distance));
     rec.h.forEach((h, i) => { h.ab = abOf(RU[i], race); h.ct = ctOf(RU[i]); });
     const cF = cornerPos(race.result, false), cL = cornerPos(race.result, true);
-    rec.h.forEach((h, i) => { h.pp = pres[i].pp; h.dd = pres[i].dd; h.c1 = cF[h.num] ?? null; h.c4 = cL[h.num] ?? null; });
+    rec.h.forEach((h, i) => { h.pp = pres[i].pp; h.dd = pres[i].dd; h.c1 = cF[h.num] ?? null; h.c4 = cL[h.num] ?? null; h.plp = plpOf(race.result, h.num); });
     Object.assign(rec, frontCounts(pres)); rec.posFill = true;
     return true;
   }
@@ -2276,7 +2280,7 @@ const Learn = (() => {
         pos: fin[f.num] ? +fin[f.num].pos : null, time: fin[f.num]?.time || null, l3f: fin[f.num]?.l3f || null,
         l3rank: fin[f.num]?.l3f ? l3.indexOf(fin[f.num].l3f) + 1 : null, early: early[f.num] ?? null,
         gate: +(((f.num - 1) / Math.max(1, N - 1))).toFixed(3), style: f.style, ana: f.ana || [],
-        c1: cFirst[f.num] ?? null, c4: cLast[f.num] ?? null, pp: pres[i].pp, dd: pres[i].dd, ab: abs[i], ct: cts[i],
+        c1: cFirst[f.num] ?? null, c4: cLast[f.num] ?? null, pp: pres[i].pp, dd: pres[i].dd, ab: abs[i], ct: cts[i], plp: plpOf(res, f.num),
         z: FEATS.map(k => +((f.adj[k] || 0) / (Math.abs(wc(k)) > 1e-6 ? wc(k) : 1)).toFixed(3))
       })),
       wr: FEATS.map(k => +(wc(k) / (Math.abs(wb(k)) > 1e-6 ? wb(k) : 1)).toFixed(3)),
@@ -3130,7 +3134,8 @@ const Learn = (() => {
       const idx = []; for (const num of r.order.slice(0, 3)){ const k = H.findIndex(h => h.num === num); if (k < 0 || idx.includes(k)) break; idx.push(k); }
       const sk = H.reduce((a, h) => a + h.pk, 0), sm = H.reduce((a, h) => a + Math.max(h.pm, 1e-5), 0);
       return { date: r.date, id: r.id, X, idx, n: H.length, PK: H.map(h => h.pk / sk), PM: H.map(h => Math.max(h.pm, 1e-5) / sm), odds: H.map(h => h.odds), win: H.map(h => h.pos === 1), top3: H.map(h => h.pos <= 3),
-        ct: H.map(h => h.ct || null), ab: H.map(h => h.ab || null), full: H.every(h => h.ab !== undefined && h.ct !== undefined) };
+        ct: H.map(h => h.ct || null), ab: H.map(h => h.ab || null), nums: H.map(h => h.num), ep: H.map(h => h.pp?.[4] > 0 ? h.pp[0] : null),
+        miss: H.some(h => !h.ab || !h.ct || !(h.pp?.[4] > 0)), full: H.every(h => h.ab !== undefined && h.ct !== undefined) };
     }).filter(Boolean);
   }
   // cols：使う材料の番号（モジュール単体の確かめ用）。戻り値の H は最適解でのヘッセ行列（予測の不確かさの計算に使う）
@@ -3205,6 +3210,24 @@ const Learn = (() => {
     const m = indFit(rows);
     return { cols: m.cols, th: m.th.map(v => +v.toFixed(5)), mu: m.mu.map(v => +v.toFixed(5)), sd: m.sd.map(v => +v.toFixed(5)), chol: cholCov(m.H, m.cols.length), n: rows.length, upto: rows.reduce((a, x) => x.date > a ? x.date : a, "") };
   }
+  // 欠損フラグ（記録なし）の係数が大きいときの確かめ：出走馬全員に材料がそろったレースだけで学習・評価した場合と比べる
+  async function completeCase(fullRows, ranges){
+    const cc = fullRows.filter(x => !x.miss); if (cc.length < 400) return { races: cc.length, ok: false };
+    let n = 0, la = 0, lk = 0, ln = 0, lnk = 0, nn = 0;
+    for (const g of ranges){
+      const tr = cc.filter(x => x.date < g.from), te = cc.filter(x => x.date >= g.from && x.date <= g.to); if (tr.length < 250 || !te.length) continue;
+      const m = indFit(tr);
+      te.forEach(x => { const w = x.win.indexOf(true); if (w < 0) return; la -= Math.log(indPredict(m, x)[w]); lk -= Math.log(x.PK[w]); n++; });
+      await new Promise(res => setTimeout(res, 0));
+    }
+    // 同じ期間の、欠損のあるレース（新馬・出走歴の少ない馬がいるレース）での成績
+    for (const g of ranges){
+      const tr = fullRows.filter(x => x.date < g.from), te = fullRows.filter(x => x.date >= g.from && x.date <= g.to && x.miss); if (tr.length < 500 || !te.length) continue;
+      const m = indFit(tr);
+      te.forEach(x => { const w = x.win.indexOf(true); if (w < 0) return; ln -= Math.log(indPredict(m, x)[w]); lnk -= Math.log(x.PK[w]); nn++; });
+    }
+    return { ok: n > 0, races: n, indep: n ? +(la / n).toFixed(4) : null, market: n ? +(lk / n).toFixed(4) : null, missRaces: nn, missIndep: nn ? +(ln / nn).toFixed(4) : null, missMarket: nn ? +(lnk / nn).toFixed(4) : null };
+  }
   async function indepReport(R, ranges){
     const rows = indRows(R), fullRows = rows.filter(x => x.full);
     if (fullRows.length < 800) return { ready: false, n: fullRows.length };
@@ -3243,34 +3266,78 @@ const Learn = (() => {
       modules: mods.map(q => ({ name: q.name, ll: q.n ? +(q.ll / q.n).toFixed(4) : null })),
       calib: cal.filter(c => c.n).map(c => ({ range: `${Math.round(c.lo * 100)}〜${Math.round(Math.min(c.hi, 1) * 100)}%`, n: c.n, pred: +(c.p / c.n).toFixed(4), actual: +(c.w / c.n).toFixed(4) })),
       bands, bands10: fin(B10), mono,
-      stage1: contentStage1(rows, ranges),
+      stage1: contentStage1(rows, ranges, R), complete: await completeCase(fullRows, ranges),
       coef: final.cols.map((c, j) => [IND_NAMES[c], +final.th[j].toFixed(3)]).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 12) };
   }
-  // 前走の内容（出遅れ量・4角からの伸び・上がり）が、次走で市場の期待以上に走るか（仕様のStage 1：モデルに入れる前に単体で確かめる）
-  function contentStage1(rows, ranges){
+  // 前走の「見かけの着順」と「実際の走り」のずれが、次走で市場の期待以上に走るか（仕様のStage 1・既存データだけ）
+  // 注意：「市場の期待」は単勝オッズから計算した3着以内の確率（Harville）で、差し・追込の馬の2・3着を低めに見積もるくせがある。
+  // そのため比較用に「普段後方の馬すべて」などの行を並べ、さらに実際の複勝・単勝の払戻で回収率を確かめる（お金になるかの最終判定）。
+  function contentStage1(rows, ranges, R){
+    const plOf = {}; (R || []).forEach(r => r.h.forEach(h => { if ("plp" in h) plOf[r.id + "|" + h.num] = h.plp; }));
     const items = [];
     rows.forEach(x => { const t3 = top3FromMarket(x.PK);
-      x.ct.forEach((ct, i) => { if (!ct) return; const ab = x.ab[i];
-        items.push({ date: x.date, ct, lost: ab && ab[0] != null && ab[0] >= 0.5, hit: x.top3[i], win: x.win[i], e: t3[i], odds: x.odds[i] }); }); });
+      x.ct.forEach((ct, i) => { if (!ct) return; const ab = x.ab[i], num = x.nums?.[i];
+        items.push({ date: x.date, ct, rate: ab?.[0], mg: ab?.[3], ep: x.ep?.[i], hit: x.top3[i], win: x.win[i], e: t3[i], odds: x.odds[i], plp: num != null ? plOf[x.id + "|" + num] : undefined }); }); });
     if (items.length < 2000) return null;
     const inR = (x, g) => x.date >= g.from && x.date <= g.to;
-    const r0 = (() => { const h = items.filter(x => x.hit).length, e = items.reduce((a, x) => a + x.e, 0); return e > 0 ? h / e : 1; })();
+    const ratioOf = S => { const h = S.filter(x => x.hit).length, e = S.reduce((a, x) => a + x.e, 0); return e > 0 ? h / e : 1; };
+    const r0 = ratioOf(items);
+    const lost = x => x.rate != null && x.rate >= 0.5, l3 = (x, t) => x.ct[2] != null && x.ct[2] <= t, mg = (x, t) => x.mg != null && x.mg <= t;
     const DEF = [
-      ["前走で大きく出遅れ（1角が普段より35%以上後ろ）", x => x.ct[0] != null && x.ct[0] >= 0.35], ["前走で少し出遅れ（15〜35%）", x => x.ct[0] != null && x.ct[0] >= 0.15 && x.ct[0] < 0.35],
-      ["前走で大きく出遅れ＋着順は下位半分（不利で負けた可能性）", x => x.ct[0] != null && x.ct[0] >= 0.35 && x.lost],
-      ["前走 4角から大きく伸びた（頭数の25%以上）", x => x.ct[1] != null && x.ct[1] >= 0.25], ["前走 4角から大きく失速（25%以上）", x => x.ct[1] != null && x.ct[1] <= -0.25],
-      ["前走 4角から伸びた＋着順は下位半分（届かず）", x => x.ct[1] != null && x.ct[1] >= 0.15 && x.lost],
-      ["前走 上がりが普段より0.8秒以上速い", x => x.ct[2] != null && x.ct[2] <= -0.8], ["前走 上がりが普段より0.8秒以上遅い", x => x.ct[2] != null && x.ct[2] >= 0.8],
-      ["前走 上がりが速い＋着順は下位半分", x => x.ct[2] != null && x.ct[2] <= -0.5 && x.lost]
+      ["（比較用）全馬", () => true],
+      ["（比較用）普段後方の馬すべて（普段の1角が後ろ1/3）", x => x.ep != null && x.ep >= 0.67],
+      ["（比較用）普段先行の馬すべて（普段の1角が前1/3）", x => x.ep != null && x.ep < 0.33],
+      ["前走 下位半分 × 上がりが普段より0.3秒以上速い", x => lost(x) && l3(x, -0.3)],
+      ["前走 下位半分 × 上がりが0.5秒以上速い", x => lost(x) && l3(x, -0.5)],
+      ["前走 下位半分 × 上がりが0.8秒以上速い", x => lost(x) && l3(x, -0.8)],
+      ["前走 下位半分 × 上がりが1.2秒以上速い", x => lost(x) && l3(x, -1.2)],
+      ["前走 下位半分 × 着差1.0秒以内", x => lost(x) && mg(x, 1.0)],
+      ["前走 下位半分 × 着差0.5秒以内", x => lost(x) && mg(x, 0.5)],
+      ["前走 下位半分 × 上がり0.5秒以上速い × 着差1.0秒以内", x => lost(x) && l3(x, -0.5) && mg(x, 1.0)],
+      ["前走 下位4割 × 上がり0.5秒以上速い", x => x.rate != null && x.rate >= 0.6 && l3(x, -0.5)],
+      ["前走 下位半分 × 4角から頭数の15%以上伸びた（着順と4角の順位のずれ）", x => lost(x) && x.ct[1] != null && x.ct[1] >= 0.15],
+      ["前走 道中で頭数の25%以上押し上げた（1角→4角）", x => x.ct[3] != null && x.ct[3] >= 0.25],
+      ["前走 道中で頭数の25%以上下がった", x => x.ct[3] != null && x.ct[3] <= -0.25],
+      ["前走 道中で押し上げた × 下位半分（積極策で負けた）", x => x.ct[3] != null && x.ct[3] >= 0.25 && lost(x)],
+      ["普段後方の馬だけ：前走 下位半分 × 上がり0.5秒以上速い", x => x.ep != null && x.ep >= 0.67 && lost(x) && l3(x, -0.5)]
     ];
-    return DEF.map(([label, pred]) => { const S = items.filter(pred); if (S.length < 30) return null;
+    const nTests = DEF.length - 3, zB = invNorm(0.05 / (2 * nTests));
+    const money = S => { const P = S.filter(x => x.plp !== undefined); const roi = (arr, f) => { if (!arr.length) return null; const v = arr.map(f), m = v.reduce((a, b) => a + b, 0) / v.length, se = Math.sqrt(v.reduce((a, b) => a + (b - m) ** 2, 0) / Math.max(1, v.length - 1) / v.length); return { n: arr.length, roi: +m.toFixed(3), lo95: +Math.max(0, m - 1.96 * se).toFixed(3), hi95: +(m + 1.96 * se).toFixed(3) }; };
+      return { place: roi(P, x => x.plp), win: roi(S, x => x.win ? x.odds : 0) }; };
+    const base = money(items);
+    const out = DEF.map(([label, pred], k) => { const S = items.filter(pred); if (S.length < 30) return null;
       const hit = S.filter(x => x.hit).length, E = S.reduce((a, x) => a + x.e, 0) * r0, V = S.reduce((a, x) => a + x.e * r0 * (1 - Math.min(0.99, x.e * r0)), 0);
-      const per = ranges.map(g => { const F = S.filter(x => inR(x, g)); if (F.length < 30) return null; const h = F.filter(x => x.hit).length, e = F.reduce((a, x) => a + x.e, 0) * r0; return +((h + 1) / (e + 1)).toFixed(2); });
-      const ls = per.filter(v => v != null), same = ls.length >= 3 && (ls.every(v => v > 1) || ls.every(v => v < 1)), z = V > 0 ? (hit - E) / Math.sqrt(V) : 0;
-      return { label, n: S.length, hit, exp: +E.toFixed(1), lift: +((hit + 1) / (E + 1)).toFixed(2), z: +z.toFixed(2), winROI: +(S.reduce((a, x) => a + (x.win ? x.odds : 0), 0) / S.length).toFixed(3), per,
-        verdict: Math.abs(z) >= 2.6 && same ? "効果あり（全期間で同じ向き）" : Math.abs(z) >= 2 ? "候補（期間で向きがそろわない／多重比較を考えると弱い）" : "偶然と区別できない" };
+      const per = ranges.map(g => { const F = S.filter(x => inR(x, g)); if (F.length < 30) return null; const all = items.filter(x => inR(x, g)), rr = ratioOf(all); const h = F.filter(x => x.hit).length, e = F.reduce((a, x) => a + x.e, 0) * rr; return +((h + 1) / (e + 1)).toFixed(2); });
+      const perPl = ranges.map(g => { const F = S.filter(x => inR(x, g) && x.plp !== undefined); return F.length >= 30 ? +(F.reduce((a, x) => a + x.plp, 0) / F.length).toFixed(2) : null; });
+      const ls = per.filter(v => v != null), same = ls.length >= 3 && (ls.every(v => v > 1) || ls.every(v => v < 1)), z = V > 0 ? (hit - E) / Math.sqrt(V) : 0, m = money(S);
+      const isRef = k < 3;
+      return { label, ref: isRef, n: S.length, hit, exp: +E.toFixed(1), lift: +((hit + 1) / (E + 1)).toFixed(2), z: +z.toFixed(2), per, perPl, place: m.place, win: m.win,
+        verdict: isRef ? "比較用" : (Math.abs(z) >= zB && same ? "市場の期待とのずれは偶然でない" : Math.abs(z) >= 2 && same ? "候補（多重比較を考えると弱い）" : "偶然と区別できない")
+          + (isRef ? "" : m.place && m.place.lo95 >= 1 ? "・複勝でお金になる" : m.place && m.place.roi >= 1 ? "・複勝の回収率は100%超だが偶然の範囲" : m.place && base.place && m.place.roi > base.place.roi + 0.05 ? "・複勝の回収率は全馬より上（ただし100%未満）" : "・複勝ではお金にならない") };
     }).filter(Boolean);
+    // 前走内容スコア（ウォークフォワード）：市場の期待（Harville）と脚質（普段の位置）を前提に、前走の内容が上乗せになるか
+    const feat = x => [x.ct[0] ?? 0, x.ct[1] ?? 0, x.ct[2] ?? 0, x.ct[3] ?? 0, x.rate ?? .5, Math.min(5, x.mg ?? 1), lost(x) && l3(x, -0.5) ? 1 : 0];
+    const ctrl = x => [x.ep ?? .5, x.ep == null ? 1 : 0];
+    const logit = p => { const q = Math.min(0.999, Math.max(1e-5, p)); return Math.log(q / (1 - q)); };
+    const qs = [0, 0.2, 0.4, 0.6, 0.8, 1.0001], Q = qs.slice(0, -1).map(() => ({ n: 0, hit: 0, e: 0, pl: 0, npl: 0 }));
+    const difs = [], folds = [];
+    ranges.forEach(g => {
+      const tr = items.filter(x => x.date < g.from), te = items.filter(x => inR(x, g)); if (tr.length < 3000 || !te.length) return;
+      const rr = ratioOf(tr), off = x => logit(Math.min(0.95, x.e * rr));
+      const m = lsLogit(tr.map(x => [...feat(x), ...ctrl(x)]), tr.map(off), tr.map(x => x.hit ? 1 : 0), 30), m0 = lsLogit(tr.map(ctrl), tr.map(off), tr.map(x => x.hit ? 1 : 0), 30);
+      const sc = te.map(x => { const p = lsPredRow(m, [...feat(x), ...ctrl(x)], off(x)), p0 = lsPredRow(m0, ctrl(x), off(x)); difs.push(x.hit ? Math.log(p / p0) : Math.log((1 - p) / (1 - p0))); return p / p0; });
+      const sorted = sc.slice().sort((a, b) => a - b), cut = qs.map(q => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]);
+      const rte = ratioOf(te);
+      te.forEach((x, i) => { let k = cut.findIndex((c, j) => j < 5 && sc[i] >= c && sc[i] < (j === 4 ? Infinity : cut[j + 1])); if (k < 0) k = 4; const o = Q[k]; o.n++; if (x.hit) o.hit++; o.e += x.e * rte; if (x.plp !== undefined){ o.pl += x.plp; o.npl++; } });
+      folds.push({ from: g.from, n: te.length });
+    });
+    let score = null;
+    if (difs.length){ const md = difs.reduce((a, b) => a + b, 0) / difs.length, sd = Math.sqrt(difs.reduce((a, b) => a + (b - md) ** 2, 0) / Math.max(1, difs.length - 1));
+      score = { n: difs.length, gain: +(md * 1000).toFixed(2), z: sd > 0 ? +(md / (sd / Math.sqrt(difs.length))).toFixed(2) : null,
+        quint: Q.map((o, k) => ({ q: ["下位20%", "20〜40%", "40〜60%", "60〜80%", "上位20%"][k], n: o.n, lift: o.e ? +(o.hit / o.e).toFixed(2) : null, placeROI: o.npl ? +(o.pl / o.npl).toFixed(3) : null })) }; }
+    return { rows: out, zB: +zB.toFixed(2), base, score, plN: items.filter(x => x.plp !== undefined).length, n: items.length };
   }
+
 
   async function report(recs, opt = {}){
     const folds = opt.folds || 5, initFrac = opt.initFrac ?? 0.4;
@@ -5044,7 +5111,7 @@ async function fillPositions(){
     while (BF.proc) await bfSleep(500);
     const full = await api("/api/learn?full=1", { timeout: 120000 });
     const recs = full.records || [], byId = new Map(recs.map(r => [r.id, r]));
-    const need = r => r && !r.h.some(h => "ct" in h);     // 位置取りの材料・能力の内訳・前走の内容のどれかが欠けている記録
+    const need = r => r && !r.h.some(h => "plp" in h && h.ct?.length >= 4);     // 位置取り・能力の内訳・前走の内容（道中の位置変化まで）・複勝の払戻のどれかが欠けている記録
     const changed = [];
     Object.values(DB.races).forEach(r => { const rec = byId.get(r.id); if (need(rec) && Learn.posFill(rec, r, DB.horses, Engine)) changed.push(rec); });
     const st = await bfRefresh();
@@ -5069,6 +5136,17 @@ async function fillPositions(){
   } catch (e) { toast("付け足しできませんでした：" + e.message); }
   finally { POSFILL.busy = false; BF.pause = wasPaused; if (ST.tab === "learn") renderLearnTab(); }
 }
+// 前走の「見かけの着順」と「実際の走り」のずれ（Stage 1）：市場の期待（単勝から計算）との比と、実際の複勝・単勝の回収率
+function stage1Html(S, roi){
+  if (!S?.rows?.length) return "";
+  const rng = m => m ? `${roi(m.roi)}<span class="small">（${roi(m.lo95)}〜${roi(m.hi95)}）</span>` : "—";
+  return `<p class="small"><b>前走の「見かけの着順」と「実際の走り」のずれは、次走で市場の期待以上に走るか（Stage 1・全馬・3着以内）</b></p>
+    <p class="small">「市場の期待」は単勝オッズから計算した3着以内の確率です。この計算は<b>差し・追込の馬の2・3着を低めに見積もるくせ</b>があるため、比較用に「普段後方の馬すべて」の行を並べています。<b>本当にお金になるかは、右の実際の複勝・単勝の回収率で判定</b>します（全馬の複勝回収率 ${rng(S.base.place)}・単勝 ${rng(S.base.win)}）。多重比較を補正した「偶然でない」の基準は |z|≧${S.zB}。複勝の払戻がある記録 ${S.plN.toLocaleString()}/${S.n.toLocaleString()}頭${S.plN < S.n ? "（足りない分は8番の下のボタンで付け足せます）" : ""}。</p>
+    <div class="tbl-wrap"><table><thead><tr><th>前走の内容</th><th class="r">頭数</th><th class="r">3着以内</th><th class="r">市場の期待</th><th class="r">倍率</th><th class="r">z</th><th class="r">期間別の倍率</th><th class="r">複勝回収率（95%）</th><th class="r">期間別の複勝回収率</th><th class="r">単勝回収率</th><th>判定</th></tr></thead><tbody>
+    ${S.rows.map(x => `<tr${x.ref ? ` style="opacity:.75"` : ""}><td class="small">${esc(x.label)}</td><td class="r num">${x.n.toLocaleString()}</td><td class="r num">${x.hit}</td><td class="r num">${x.exp}</td><td class="r num ${x.lift > 1 ? "pos" : "neg"}"><b>×${x.lift}</b></td><td class="r num">${x.z > 0 ? "+" : ""}${x.z}</td><td class="r num small">${x.per.map(v => v == null ? "—" : "×" + v).join("／")}</td>
+      <td class="r num ${x.place?.lo95 >= 1 ? "pos" : ""}">${rng(x.place)}</td><td class="r num small">${x.perPl.map(v => v == null ? "—" : roi(v)).join("／")}</td><td class="r num">${rng(x.win)}</td><td class="small">${esc(x.verdict)}</td></tr>`).join("")}</tbody></table></div>
+    ${S.score ? `<p class="small"><b>前走内容スコア（ウォークフォワード）</b>：前走の内容7項目を、市場の期待と脚質（普段の位置）を前提にして学習 → 次の期間で確かめ。上乗せ ${S.score.gain > 0 ? "+" : ""}${S.score.gain}（千分の1単位・z ${S.score.z}）${Math.abs(S.score.z ?? 0) >= 2 ? (S.score.gain > 0 ? "<b class='pos'>：前走の内容は市場の期待に上乗せあり</b>" : "：かえって悪化") : "：偶然と区別できない"}。スコアの高さ別：${S.score.quint.map(q => `${q.q} ×${q.lift ?? "—"}・複勝${q.placeROI != null ? Math.round(q.placeROI * 100) + "%" : "—"}`).join("／")}</p>` : ""}`;
+}
 function indepPanel(I){
   if (!I) return "";
   const pct = x => x == null ? "—" : (x * 100).toFixed(1) + "%", roi = x => x == null ? "—" : Math.round(x * 100) + "%";
@@ -5090,9 +5168,8 @@ function indepPanel(I){
     </ul>
     ${tbl(I.bands, "全馬")}${tbl(I.bands10, "単勝10倍以上の馬だけ")}
     <p class="small"><b>モジュール単体の当てやすさ</b>（1着の対数損失・小さいほど良い。何も分からない場合 ${I.ll.uniform}、市場 ${I.ll.market}）：${I.modules.map(m => `${esc(m.name)} ${m.ll}`).join("・")}・<b>全部まとめて ${I.ll.indep}</b></p>
-    ${I.stage1?.length ? `<p class="small"><b>前走の内容は次走で市場の期待以上に走るか（Stage 1：モデルに入れる前の単体の確かめ・全馬・3着以内）</b></p>
-    <div class="tbl-wrap"><table><thead><tr><th>前走の内容</th><th class="r">頭数</th><th class="r">3着以内</th><th class="r">市場の期待</th><th class="r">倍率</th><th class="r">z</th><th class="r">単勝回収率</th><th class="r">期間別の倍率</th><th>判定</th></tr></thead><tbody>
-    ${I.stage1.map(x => `<tr><td class="small">${esc(x.label)}</td><td class="r num">${x.n.toLocaleString()}</td><td class="r num">${x.hit}</td><td class="r num">${x.exp}</td><td class="r num ${x.lift > 1 ? "pos" : "neg"}"><b>×${x.lift}</b></td><td class="r num">${x.z > 0 ? "+" : ""}${x.z}</td><td class="r num">${roi(x.winROI)}</td><td class="r num small">${x.per.map(v => v == null ? "—" : "×" + v).join("／")}</td><td class="small">${x.verdict}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    ${stage1Html(I.stage1, roi)}
+    ${I.complete?.ok ? `<p class="small"><b>欠損（記録なし）の確かめ</b>：出走馬全員に材料がそろったレースだけで学習・評価すると 独自 ${I.complete.indep}／市場 ${I.complete.market}（${I.complete.races}レース）。材料がない馬のいるレースでは 独自 ${I.complete.missIndep ?? "—"}／市場 ${I.complete.missMarket ?? "—"}（${I.complete.missRaces}レース）。「記録なし」の係数が大きくても、そろったレースだけで市場との差が同じなら、欠損が結論を左右してはいません。</p>` : ""}
     <div class="tbl-wrap"><table><thead><tr><th>独自勝率</th><th class="r">頭数</th><th class="r">予測平均</th><th class="r">実際の勝率</th></tr></thead><tbody>${I.calib.map(c => `<tr><td>${c.range}</td><td class="r num">${c.n.toLocaleString()}</td><td class="r num">${pct(c.pred)}</td><td class="r num"><b>${pct(c.actual)}</b></td></tr>`).join("")}</tbody></table></div>
     <p class="small">効いている材料（標準化した係数・＋は勝ちやすい）：${I.coef.map(([k, v]) => `${esc(k)} ${v > 0 ? "+" : ""}${v}`).join("・")}</p>`;
 }
