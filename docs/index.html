@@ -214,6 +214,7 @@ td.hi{font-weight:700;color:var(--turf)}
 .fc-tri div{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
 .fc-tri .best{font-weight:700;background:color-mix(in srgb,var(--gold) 12%,transparent);border-radius:6px;padding:2px 4px}
 tr.darkrow{background:color-mix(in srgb,var(--gold) 9%,transparent)}
+.xpost{border:1px solid var(--line, #ccc);border-radius:10px;padding:10px;margin:8px 0}
 .darkcard{display:grid;gap:6px;background:var(--surface);border:1px solid var(--gold);border-radius:12px;padding:12px 14px;margin-bottom:14px}
 .dk-badge{font-family:var(--f-display);color:var(--gold);font-size:13px;letter-spacing:.08em}
 .dk-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -3482,6 +3483,41 @@ const Learn = (() => {
   }
 
 
+  // ===== 18. 予想勝率の答え合わせ：各レースで予想勝率が一番高い馬（◎）の予想勝率と、実際に勝ったか・単勝と複勝の回収率 =====
+  // 予想勝率は2通り：アプリの予想（シミュレーションと市場の組み合わせ p ∝ pm^a・pk^b、a・bは各期間それより前の記録で学習）と、シミュレーションだけ（pm）。
+  const PB = [0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 1.01], PBL = ["20%未満", "20〜30%", "30〜40%", "40〜50%", "50〜60%", "60〜70%", "70%以上"];
+  // ◎を必ず入れて、当たれば投資（1,000円）の2倍以上が戻る組み合わせ（推定オッズ20倍以上）だけを、当たりやすい順に10点（各100円）。
+  // 記録には発走前の組み合わせのオッズがないため、単勝オッズ（市場）からHarvilleの式で確率を出し、推定オッズ＝(1−控除率)÷確率 とする（馬連22.5%・3連複25%）。
+  function favCombos(H, i0, pk){
+    const out = [], n = H.length;
+    for (let j = 0; j < n; j++){ if (j === i0) continue; const pq = pk[i0] * pk[j] / (1 - pk[i0]) + pk[j] * pk[i0] / (1 - pk[j]); out.push({ type: "馬連", nums: [H[i0].num, H[j].num], p: pq, odds: 0.775 / pq }); }
+    const h3 = (a, b, c) => { const t = [[a, b, c], [a, c, b], [b, a, c], [b, c, a], [c, a, b], [c, b, a]]; return t.reduce((s, [x, y, z]) => s + pk[x] * pk[y] / (1 - pk[x]) * pk[z] / (1 - pk[x] - pk[y]), 0); };
+    for (let j = 0; j < n; j++) for (let k = j + 1; k < n; k++){ if (j === i0 || k === i0) continue; const pq = h3(i0, j, k); out.push({ type: "三連複", nums: [H[i0].num, H[j].num, H[k].num], p: pq, odds: 0.75 / pq }); }
+    return out.filter(x => x.odds >= 20).sort((a, b) => b.p - a.p).slice(0, 10);
+  }
+  function probReport(R, ranges, abOf){
+    const rows = R.filter(r => r.h?.length >= 5 && r.order?.length); if (rows.length < 100) return null;
+    const mk = () => PBL.map(l => ({ band: l, n: 0, p: 0, mk: 0, win: 0, top3: 0, wret: 0, pret: 0, pn: 0, odds: 0 }));
+    const B = { app: mk(), sim: mk() }, list = [];
+    const TH = [0.5, 0.6, 0.7], CB = TH.map(t => ({ t, seq: [], hit: 0, inv: 0, ret: 0, tk: 0, tkHit: 0 }));
+    rows.forEach(r => {
+      const H = r.h.filter(h => h.pos != null && h.odds > 1 && h.pk > 0 && h.pm > 0); if (H.length < 5) return;
+      const { a, b } = abOf(r.date), w = H.map(h => Math.pow(h.pm, a) * Math.pow(h.pk, b)), sw = w.reduce((x, y) => x + y, 0), sm = H.reduce((x, h) => x + h.pm, 0), sk = H.reduce((x, h) => x + h.pk, 0);
+      const P = { app: w.map(x => x / sw), sim: H.map(h => h.pm / sm) };
+      if (r.pay){ const pa = P.app; let i0 = 0; pa.forEach((v, j) => { if (v > pa[i0]) i0 = j; });
+        let T = null; CB.forEach(o => { if (pa[i0] < o.t) return; T = T || favCombos(H, i0, H.map(h => h.pk / sk)); if (!T.length) return;
+          const ret = T.reduce((a, x) => a + tkRet(r.pay, { ...x, stake: 100 }), 0), inv = T.length * 100; o.inv += inv; o.ret += ret; o.tk += T.length; if (ret > 0){ o.hit++; o.tkHit += T.filter(x => tkRet(r.pay, { ...x, stake: 100 }) > 0).length; } o.seq.push(ret / inv); }); }
+      ["app", "sim"].forEach(k => { const p = P[k]; let i = 0; p.forEach((v, j) => { if (v > p[i]) i = j; }); const h = H[i], bi = PB.findIndex((x, q) => p[i] >= x && p[i] < PB[q + 1]), o = B[k][bi];
+        o.n++; o.p += p[i]; o.mk += h.pk / sk; o.odds += h.odds; if (h.pos === 1){ o.win++; o.wret += h.odds; } if (h.pos >= 1 && h.pos <= 3) o.top3++;
+        const pl = r.pay?.["複勝"] ? (r.pay["複勝"][String(h.num)] || 0) / 100 : ("plp" in h ? h.plp : null); if (pl != null){ o.pn++; o.pret += pl; }
+        if (k === "app") list.push({ date: r.date, venue: r.venue, no: r.no, name: r.name, num: h.num, p: +p[i].toFixed(3), sim: +(h.pm / sm).toFixed(3), mkt: +(h.pk / sk).toFixed(3), odds: h.odds, pop: h.pop, pos: h.pos, win: r.order[0] }); });
+    });
+    const fin = A => A.map(o => o.n ? { band: o.band, n: o.n, pred: +(o.p / o.n).toFixed(3), mkt: +(o.mk / o.n).toFixed(3), win: o.win, winRate: +(o.win / o.n).toFixed(3), top3Rate: +(o.top3 / o.n).toFixed(3), avgOdds: +(o.odds / o.n).toFixed(1), winROI: +(o.wret / o.n).toFixed(3), placeROI: o.pn ? +(o.pret / o.pn).toFixed(3) : null } : { band: o.band, n: 0 });
+    list.sort((x, y) => (y.date + (y.no || 0)).localeCompare(x.date + (x.no || 0)));
+    const combos = CB.map(o => { const n = o.seq.length; if (!n) return { t: o.t, n: 0 }; const m = o.ret / o.inv, mv = o.seq.reduce((a, b) => a + b, 0) / n, se = Math.sqrt(o.seq.reduce((a, b) => a + (b - mv) ** 2, 0) / Math.max(1, n - 1) / n);
+      return { t: o.t, n, hit: o.hit, inv: o.inv, ret: Math.round(o.ret), roi: +m.toFixed(3), lo95: +Math.max(0, m - 1.96 * se).toFixed(3), hi95: +(m + 1.96 * se).toFixed(3), avgTk: +(o.tk / n).toFixed(1) }; });
+    return { races: list.length, combos, app: fin(B.app), sim: fin(B.sim), high: list.filter(x => x.p >= 0.5).slice(0, 200), recent: list.slice(0, 60) };
+  }
   // ===== 17. 注目穴馬の買い方（簡易シミュレーション）：記録から注目穴馬を作り直して、実際の払戻で回収率を出す =====
   // 注目穴馬：6番人気以下か10倍以上の馬から、点数＝複勝の期待値＋0.5×単勝の期待値＋0.15×穴要素の数 が最も高い馬（アプリと同じ式）。
   //  ただし記録には発走前の複勝オッズがないため、複勝オッズは市場（単勝オッズ）から計算した3着以内の確率で推定する（0.8÷市場の3着内確率）。
@@ -3550,6 +3586,7 @@ const Learn = (() => {
     { id: 5, label: "14番の穴候補を軸に 3連複 人気上位5頭（10点）", odds10: true, form: 7 }
   ];
   // ===== 前走の出来事（JRA公式「競走中の出来事等」）の本番テスト（kind: "inc1"）。ルールはデータを見る前に固定（2026-10-07） =====
+  const DARK_PREREG = "人気決着が60%以下のレースだけ、注目穴馬のフォーメ型1,000円（17番の表から・別の仮説として単独で判定）";
   const INC_RULES = [
     { id: 1, label: "前走で「被害馬」になった馬の単勝", form: 0, primary: true, f: q => q.victim },
     { id: 2, label: "前走で「被害馬」になった馬の複勝", form: 1, f: q => q.victim },
@@ -3592,7 +3629,12 @@ const Learn = (() => {
       const part = late => { const w = S.filter(it => it.late === late).map(it => retOf(it, rule.form)); return w.length ? +(w.reduce((a, b) => a + b, 0) / w.length).toFixed(3) : null; };
       return { ...meta, n, hit: v.filter(x => x > 0).length, roi: +m.toFixed(3), lo95: +Math.max(0, m - 1.96 * se).toFixed(3), hi95: +(m + 1.96 * se).toFixed(3), z: +z.toFixed(2), first: part(false), second: part(true),
         verdict: z >= zB ? "合格（100%超えが偶然でない）" : m >= 1 ? "100%超だが偶然の範囲（不合格）" : "不合格" }; });
-    return { ok: true, kind: "inc1", races, months: months.length, from: months[0], to: months.at(-1), zB: +zB.toFixed(2), horses: items.length, unknown, baseWin: base(0), basePlace: base(1), rules };
+    // 別の仮説（17番の表を見て2026-10-08に固定）：人気決着が60%以下のレースだけ、注目穴馬のフォーメ型1,000円。単独で判定（片側5%）
+    const extra = [];
+    try { const D = darkReport(hold, [{ from: hold[0].date, to: hold.at(-1).date }]), c = D.ready && D.plans.find(x => x.k === "C2");
+      if (c && c.n){ const se = (c.hi95 - c.roi) / 1.96, z = se > 0 ? (c.roi - 1) / se : 0, zb = invNorm(0.05);
+        extra.push({ label: DARK_PREREG, n: c.n, hit: c.hit, roi: c.roi, lo95: c.lo95, hi95: c.hi95, z: +z.toFixed(2), per: c.per, zB: +zb.toFixed(2), verdict: z >= zb ? "合格（100%超えが偶然でない）" : c.roi >= 1 ? "100%超だが偶然の範囲（不合格）" : "不合格" }); } } catch (e) {}
+    return { ok: true, kind: "inc1", races, months: months.length, from: months[0], to: months.at(-1), zB: +zB.toFixed(2), horses: items.length, unknown, baseWin: base(0), basePlace: base(1), rules, extra };
   }
   // 開封：封印期間の各月を、その月より前のすべての記録で学習した14番のモデル（今の作り方）で予想 → 実際の払戻で答え合わせ
   async function holdoutEval(Rall, H){
@@ -3648,7 +3690,7 @@ const Learn = (() => {
       await new Promise(res => setTimeout(res, 0));     // 画面を固めない
     }
     return { ok: true, holdout, total: R.length, from: testDates[0], strict, cleanTest, testAll: testAll.length, cleanAll: R.filter(clean).length,
-      ...finAcc(A), folds: foldRows, factors: { pop10: factorStats(R, 10, 99), pop4: factorStats(R, 4, 9) }, position: positionReport(R, ranges, 10), tempered: temperReport(R, ranges), ability: abilityReport(R, ranges, 10), combo: comboReport(R, ranges, 10), strategy: strategyReport(R, ranges, foldRows.map(f => ({ from: f.from, to: f.to, a: f.a, b: f.b }))), dark: darkReport(R, ranges), indep: await indepReport(R, ranges) };
+      ...finAcc(A), folds: foldRows, factors: { pop10: factorStats(R, 10, 99), pop4: factorStats(R, 4, 9) }, position: positionReport(R, ranges, 10), tempered: temperReport(R, ranges), ability: abilityReport(R, ranges, 10), combo: comboReport(R, ranges, 10), strategy: strategyReport(R, ranges, foldRows.map(f => ({ from: f.from, to: f.to, a: f.a, b: f.b }))), dark: darkReport(R, ranges), prob: probReport(R, ranges, d => { const f = foldRows.filter(x => x.from <= d).at(-1) || foldRows[0]; return { a: f?.a ?? 0.04, b: f?.b ?? 1.04 }; }), indep: await indepReport(R, ranges) };
   }
 
   // 正則化つきロジスティック回帰（オフセット＝オッズから見た確率のlogit。係数は x を標準化した単位）
@@ -3736,7 +3778,7 @@ const Learn = (() => {
     return out;
   }
 
-  return { RV, darkReport, PREREG, INC_RULES: INC_RULES.map(({ f, ...m }) => m), holdSplit, incEval, incCoverage, jtBuilder, report, clean, posFill, livePredict, prevBuilder, indBuild, crossCompact, crossReport, crossTickets, crossFitBeta, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
+  return { RV, darkReport, DARK_PREREG, PREREG, INC_RULES: INC_RULES.map(({ f, ...m }) => m), holdSplit, incEval, incCoverage, jtBuilder, report, clean, posFill, livePredict, prevBuilder, indBuild, crossCompact, crossReport, crossTickets, crossFitBeta, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
 })();
 
 
@@ -4963,6 +5005,27 @@ const BATCH = { running: false, rows: {}, done: 0, total: 0, date: null, saved: 
 const BATCH_RUNS = 5000;
 const ymdOf = d => d.replace(/-/g, "");
 const isoOf = y => `${y.slice(0, 4)}-${y.slice(4, 6)}-${y.slice(6, 8)}`;
+// 注目穴馬の推奨理由（記録にある材料から作る文。作り話はしない）
+function darkWhy(sim){
+  const d = sim.dark; if (!d) return [];
+  const f = d.f, p = f.prof || {}, ad = f.adj || {}, L = p.last, MM = sim.cands?.M, out = [];
+  const w = MM ? MM.win[d.i] : d.a.win, t3 = MM ? MM.place[d.i] : d.a.top3, mk = f.odds > 1 ? 0.8 / f.odds : null;
+  if (f.ana?.length) out.push(`穴パターン「${f.ana.slice(0, 3).join("」「")}」に該当`);
+  if (mk && w > mk * 1.05) out.push(`AIの勝率${(w * 100).toFixed(1)}%は単勝オッズの評価（約${(mk * 100).toFixed(1)}%）より高い`);
+  try { const pf = Engine.paceForecast(sim.ctx), st = p.style;
+    if ((st === "逃げ" || st === "先行") && pf.best === "slow") out.push(`${st}脚質で、スロー想定（${Math.round(pf.slow * 100)}%）なら前で粘り込める`);
+    else if ((st === "差し" || st === "追込") && pf.best === "high") out.push(`${st}脚質で、ハイペース想定（${Math.round(pf.high * 100)}%）なら末脚が生きる`);
+    else if (st === "逃げ" && (pf.frontCount ?? 9) <= 2) out.push(`前に行く馬が少なく（${pf.frontCount}頭）、楽にハナを取れそう`); } catch (e) {}
+  if (L && L.pos > 0){
+    if (L.pos >= 4 && L.margin != null && L.margin <= 0.8) out.push(`前走${L.pos}着も勝ち馬から${L.margin < 0.05 ? "タイム差なし" : L.margin.toFixed(1) + "秒差"}で、着順ほど負けていない`);
+    if (L.pop && L.pos && L.pop - L.pos >= 3) out.push(`前走は${L.pop}番人気で${L.pos}着と、人気以上に走った`);
+    if (L.passing?.length >= 2 && L.field && (L.passing[L.passing.length - 1] - L.pos) / L.field >= 0.25) out.push(`前走は4角${L.passing[L.passing.length - 1]}番手から${L.pos}着まで追い上げた`);
+  }
+  const PH = { 距離: "距離適性が高い", 芝ダ: "芝・ダートの適性が合う", 馬場: "今日の馬場状態が合う", 競馬場: "この競馬場で実績がある", 回り: "回りの得意な方向", 枠: "枠順が有利", 騎手: `鞍上${f.jockey ? "（" + f.jockey + "）" : ""}が魅力`, 調教: "調教の動きが良い", 斤量: "斤量に恵まれた", 血統: "血統的に条件が合う" };
+  Object.entries(PH).map(([k, t]) => [t, ad[k] || 0]).filter(([, v]) => v > 0.4).sort((a, b) => b[1] - a[1]).slice(0, 2).forEach(([t]) => out.push(t));
+  out.push(`シミュレーションの3着以内率${(t3 * 100).toFixed(1)}%${mk && t3 > mk * 2.7 ? `（単勝${f.odds}倍の馬としては高め）` : ""}`);
+  return out.slice(0, 6);
+}
 // 注目穴馬を必ず入れる1,000円の買い方（全レース）。相手はシミュレーションの1着率の順（注目穴馬を除く）＝◎○▲△☆
 //  BOX型：ワイド BOX（注目穴馬・◎・○）3点 ＋ 3連複 注目穴馬軸－◎○▲△ 6点 ＋ 複勝 注目穴馬 1点＝10点
 //  フォーメーション型：ワイド 注目穴馬－◎・○ 2点 ＋ 3連複 注目穴馬－◎○－◎○▲△☆ 7点 ＋ 複勝 注目穴馬 1点＝10点
@@ -5007,7 +5070,7 @@ function summarizeSim(r, sim){
     te: sim.plans?.[1000]?.evmax ? tks(sim.plans[1000].evmax) : null,
     te5: sim.plans?.[5000]?.evmax ? tks(sim.plans[5000].evmax) : null,
     tri: tri ? { nums: tri.idx.map(i => f[i].num), p: tri.p } : null,
-    dark: sim.dark ? { num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: sim.dark.a.top3 } : null,
+    dark: sim.dark ? { num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: MM ? MM.place[sim.dark.i] : sim.dark.a.top3, win: MM ? MM.win[sim.dark.i] : sim.dark.a.win, jockey: sim.dark.f.jockey || null, style: sim.dark.f.prof?.style || null, why: darkWhy(sim) } : null,
     ...dkTickets(w.map(x => x.num), sim.dark?.f.num),
     bet: planTxt(sim.plans?.[1000]), bet5: planTxt(sim.plans?.[5000]), k1: kp(sim.plans?.[1000]), k5: kp(sim.plans?.[5000]), evm1: evm(sim.plans?.[1000]),
     anaTop: (() => { const L = sim.cands?.list; if (!L) return null; const pop = {}; f.forEach(x => pop[x.num] = x.pop || 99);
@@ -5451,16 +5514,17 @@ function holdoutPanel(H){
     <p class="small">おすすめの順番：①「予想・学習を止める」の状態でここで封印 → ②「過去データで学習」で、まだ記録していない期間を<b>高速モード</b>で記録（予想・学習を進める）→ ③下の「競走中の出来事等を集める」で同じ期間（＋2か月前から）を集める → ④封印期間が十分たまったら開封。</p>` : "<p class='small'>封印はPCのアプリで行います。</p>");
   // 封印期間の件数は、レポートを作り直さなくても今の記録から数える（封印のあとに記録した日がすぐ反映されるように）
   if (BF.recs?.length){ const hs = Learn.holdSplit(BF.recs, { seen: d.seen, from: d.from }).hold; H = { ...(H || {}), races: hs.length, from: hs.reduce((m, r) => !m || r.date < m ? r.date : m, null), to: hs.reduce((m, r) => r.date > m ? r.date : m, "") || null }; }
-  const rules = (d.rules || Learn.PREREG).map(r => `<li>${r.primary ? "<b>主</b> " : ""}${esc(r.label)}</li>`).join("");
+  const rules = (d.rules || Learn.PREREG).map(r => `<li>${r.primary ? "<b>主</b> " : ""}${esc(r.label)}</li>`).join("") + (d.kind === "inc1" ? `<li>別の仮説：${esc(Learn.DARK_PREREG)}</li>` : "");
   const info = `<p class="small">封印 ${esc(d.sealedAt || "")}・見た日 ${d.seen.length}開催日（${esc(d.seen[0])}〜${esc(d.seen.at(-1))}）。封印期間の記録：<b>${(H?.races || 0).toLocaleString()}レース</b>${H?.from ? `（${esc(H.from)}〜${esc(H.to)}）` : ""}。</p><ul class="small">${rules}</ul>`;
   const res = d.opened?.result || H?.result, inc = d.kind === "inc1", C = H?.coverage;
   // 出来事の本番テスト：開封前に出すのは件数と「前走の出来事が分かる割合」だけ（回収率は出さない）
   const cov = inc ? `<p class="small">封印期間の出走馬 ${(C?.horses || 0).toLocaleString()}頭のうち、前走が記録にある馬 ${(C?.withPrev || 0).toLocaleString()}頭・<b>前走の出来事が分かる馬 ${(C?.known || 0).toLocaleString()}頭</b>（集めた出来事 ${(C?.incRaces || 0).toLocaleString()}レース）。${C && C.withPrev && C.known < C.withPrev * 0.8 ? "<b>前走の出来事がまだ足りません。下の「競走中の出来事等を集める」で、封印期間の2か月前から集めてください。</b>" : ""}レポートを作り直すと更新されます。</p>` : "";
   const ready = inc ? (C?.known || 0) >= 15000 : (H?.races || 0) >= 1000;
-  if (!d.opened) return head + info + cov + (SERVER.enabled && !SERVER.cloud ? `<div class="ctrls"><button class="btn ${ready ? "primary" : ""}" data-prereg="open" ${PREREG_ST.busy ? "disabled" : ""}>開封する（1回だけ）${ready ? "" : inc ? "・前走の出来事が分かる馬がまだ15,000頭未満なので早すぎます" : "・まだ1,000レース未満なので早すぎます"}</button></div>` : "");
+  if (!d.opened) return head + info + cov + (SERVER.enabled && !SERVER.cloud ? `<div class="ctrls"><button class="btn ${ready ? "primary" : ""}" data-prereg="open" ${PREREG_ST.busy || !ready ? "disabled" : ""}>${ready ? "開封する（1回だけ）" : inc ? "まだ開封できません（前走の出来事が分かる馬が15,000頭になったら押せます）" : "まだ開封できません（1,000レースたまったら押せます）"}</button></div>` : "");
   return head + info + `<p class="small"><b>開封 ${esc(d.opened.at)}</b>：${res.from}〜${res.to}（${res.months}か月・${res.races.toLocaleString()}レース）。合格の基準は z≧${res.zB}（片側・ルール${res.rules.length}つで補正）。${res.kind === "inc1" ? `前走の出来事が分かる馬 ${res.horses.toLocaleString()}頭（分からない馬 ${res.unknown.toLocaleString()}頭は除外）。比べる目安：同じ馬すべての単勝 ${roi(res.baseWin)}・複勝 ${roi(res.basePlace)}。` : ""}</p>
     <div class="tbl-wrap"><table><thead><tr><th>ルール</th><th class="r">頭数</th><th class="r">的中</th><th class="r">回収率</th><th class="r">95%の範囲</th><th class="r">前半／後半</th><th class="r">z</th><th>判定</th></tr></thead><tbody>
     ${res.rules.map(r => `<tr><td>${r.primary ? "<b>主</b> " : ""}${esc(r.label)}</td><td class="r num">${(r.n || 0).toLocaleString()}</td><td class="r num">${r.hit ?? "—"}</td><td class="r num ${r.roi >= 1 ? "pos" : "neg"}"><b>${roi(r.roi)}</b></td><td class="r num small">${roi(r.lo95)}〜${roi(r.hi95)}</td><td class="r num small">${roi(r.first)}／${roi(r.second)}</td><td class="r num">${r.z ?? "—"}</td><td>${r.verdict?.startsWith("合格") ? `<b class="pos">${r.verdict}</b>` : esc(r.verdict || "—")}</td></tr>`).join("")}</tbody></table></div>
+    ${res.extra?.length ? `<p class="small"><b>別の仮説</b>（単独で判定・合格の基準 z≧${res.extra[0].zB}）</p><div class="tbl-wrap"><table><thead><tr><th>ルール</th><th class="r">レース</th><th class="r">的中</th><th class="r">回収率</th><th class="r">95%の範囲</th><th class="r">z</th><th>判定</th></tr></thead><tbody>${res.extra.map(r => `<tr><td>${esc(r.label)}</td><td class="r num">${r.n.toLocaleString()}</td><td class="r num">${r.hit}</td><td class="r num ${r.roi >= 1 ? "pos" : "neg"}"><b>${roi(r.roi)}</b></td><td class="r num small">${roi(r.lo95)}〜${roi(r.hi95)}</td><td class="r num">${r.z}</td><td>${r.verdict.startsWith("合格") ? `<b class="pos">${r.verdict}</b>` : esc(r.verdict)}</td></tr>`).join("")}</tbody></table></div>` : ""}
     ${SERVER.enabled && !SERVER.cloud ? `<div class="ctrls"><button class="btn" data-prereg="seal" ${PREREG_ST.busy ? "disabled" : ""}>新しく封印し直す（今の結果は履歴に残ります）</button></div>` : ""}`;
 }
 async function makeReport(){
@@ -5527,6 +5591,25 @@ function edgeHtml(E, roi){
     ${tbl(E.bands, "全馬")}${tbl(E.bands10, "単勝10倍以上の馬だけ")}
     <p class="small">市場からのずれに効いている材料（＋は市場の評価より走る）：${E.coef.map(([k, v]) => `${esc(k)} ${v > 0 ? "+" : ""}${v}`).join("・")}</p>
     ${formsHtml(E.forms, roi)}`;
+}
+// 18. 予想勝率の答え合わせ
+function probPanel(P){
+  if (!P) return "";
+  const pct = x => x == null ? "—" : (x * 100).toFixed(1) + "%", roi = x => x == null ? "—" : Math.round(x * 100) + "%";
+  const tbl = (A, title) => `<p class="small"><b>${title}</b></p><div class="tbl-wrap"><table><thead><tr><th>◎の予想勝率</th><th class="r">レース</th><th class="r">予想勝率の平均</th><th class="r">市場（単勝オッズ）の勝率</th><th class="r">実際に勝った</th><th class="r">実際の勝率</th><th class="r">3着以内</th><th class="r">平均オッズ</th><th class="r">単勝回収率</th><th class="r">複勝回収率</th></tr></thead><tbody>
+    ${A.map(o => o.n ? `<tr><td>${o.band}</td><td class="r num">${o.n.toLocaleString()}</td><td class="r num">${pct(o.pred)}</td><td class="r num">${pct(o.mkt)}</td><td class="r num">${o.win.toLocaleString()}</td><td class="r num"><b>${pct(o.winRate)}</b></td><td class="r num">${pct(o.top3Rate)}</td><td class="r num">${o.avgOdds}倍</td><td class="r num ${o.winROI >= 1 ? "pos" : "neg"}"><b>${roi(o.winROI)}</b></td><td class="r num ${o.placeROI >= 1 ? "pos" : "neg"}">${roi(o.placeROI)}</td></tr>` : `<tr><td>${o.band}</td><td class="r num">0</td><td colspan="8" class="small">該当なし</td></tr>`).join("")}</tbody></table></div>`;
+  const row = x => `<tr><td>${esc(x.date)}</td><td>${esc(x.venue || "")}${x.no || ""}R ${esc(x.name || "")}</td><td class="r num">${x.num}</td><td class="r num"><b>${pct(x.p)}</b></td><td class="r num">${pct(x.sim)}</td><td class="r num">${pct(x.mkt)}</td><td class="r num">${x.odds}倍${x.pop ? `（${x.pop}人気）` : ""}</td><td class="r num ${x.pos === 1 ? "pos" : ""}">${x.pos}着</td></tr>`;
+  const head = `<thead><tr><th>日付</th><th>レース</th><th class="r">◎</th><th class="r">予想勝率</th><th class="r">シミュだけ</th><th class="r">市場</th><th class="r">単勝</th><th class="r">結果</th></tr></thead>`;
+  return `<h4>18. 予想勝率の答え合わせ（各レースの◎）</h4>
+    <p class="small">各レースで予想勝率が一番高い馬（◎）について、予想勝率ごとに「実際に何回勝ったか」と、その馬の単勝・複勝を100円ずつ全部買った場合の回収率です（${P.races.toLocaleString()}レース・見た日の記録）。予想勝率が正しければ「予想勝率の平均」と「実際の勝率」がそろいます。回収率が100%を超える帯があれば、そこが狙い目の候補です。</p>
+    ${tbl(P.app, "アプリの予想勝率（シミュレーションと市場の組み合わせ）")}
+    ${P.combos?.some(c => c.n) ? `<p class="small"><b>◎が強いレースで、単勝ではなく「当たれば2倍以上戻る組み合わせ」を10点買った場合</b>：◎を必ず入れた馬連・3連複のうち、推定オッズ20倍以上（1,000円が当たれば2,000円以上）のものを、当たりやすい順に10点（各100円）。推定オッズは単勝オッズからの計算（記録に発走前の組み合わせオッズがないため）。払戻は実際の金額です。</p>
+    <div class="tbl-wrap"><table><thead><tr><th>◎の予想勝率</th><th class="r">レース</th><th class="r">当たったレース</th><th class="r">投資</th><th class="r">払戻</th><th class="r">回収率（95%）</th></tr></thead><tbody>
+    ${P.combos.map(c => c.n ? `<tr><td>${Math.round(c.t * 100)}%以上</td><td class="r num">${c.n.toLocaleString()}</td><td class="r num">${c.hit}（${pct(c.hit / c.n)}）</td><td class="r num">${yen(c.inv)}</td><td class="r num">${yen(c.ret)}</td><td class="r num ${c.roi >= 1 ? "pos" : "neg"}"><b>${roi(c.roi)}</b><span class="small">（${roi(c.lo95)}〜${roi(c.hi95)}）</span></td></tr>` : `<tr><td>${Math.round(c.t * 100)}%以上</td><td class="r num">0</td><td colspan="4" class="small">払戻が記録にあるレースなし</td></tr>`).join("")}</tbody></table></div>
+    <p class="small">レースが数十しかない帯は、1回の当たり外れで回収率が大きく動きます（95%の範囲を見てください）。</p>` : ""}
+    ${tbl(P.sim, "シミュレーションだけの予想勝率（市場を使わない）")}
+    <details><summary class="small">予想勝率50%以上だったレースの一覧（${P.high.length}件）</summary><div class="tbl-wrap"><table>${head}<tbody>${P.high.map(row).join("")}</tbody></table></div></details>
+    <details><summary class="small">最近のレースの一覧（${P.recent.length}件）</summary><div class="tbl-wrap"><table>${head}<tbody>${P.recent.map(row).join("")}</tbody></table></div></details>`;
 }
 // 17. 注目穴馬の買い方（簡易シミュレーション）
 function darkPanel(D){
@@ -5730,6 +5813,7 @@ function reportPanel(){
     ${comboPanel(R.combo, pct1, zt)}
     ${strategyPanel(R.strategy)}
     ${darkPanel(R.dark)}
+    ${probPanel(R.prob)}
     ${indepPanel(R.indep)}
     ${holdoutPanel(R.holdout)}` + btn + "</div>";
 }
@@ -6387,6 +6471,34 @@ function checkAllPanel(){
 }
 
 const MARKS = ["◎", "○", "▲"];
+// ===== X（旧Twitter）投稿用の文：この日の最注目穴馬＋各レースの注目穴馬（1投稿280＝全角140字までに分けたスレッド） =====
+const XPOST = { texts: [] };
+const xLen = t => [...t].reduce((a, c) => { const u = c.codePointAt(0); return a + (u <= 0x10FF || (u >= 0x2000 && u <= 0x200D) || (u >= 0x2010 && u <= 0x201F) || (u >= 0x2032 && u <= 0x2037) ? 1 : 2); }, 0);
+function xPostPanel(d, list, rowOf, best){
+  const rows = list.map(r => ({ r, x: rowOf(r) })).filter(o => o.x?.dark);
+  if (!rows.length) return "";
+  const wd = "日月火水木金土"[new Date(d + "T00:00:00+09:00").getDay()], md = `${+d.slice(5, 7)}/${+d.slice(8, 10)}（${wd}）`;
+  const pc = v => v == null ? "—" : (v * 100).toFixed(1) + "%";
+  const b = rows.find(o => o.x === best) || rows[0], bd = b.x.dark, why = bd.why || [];
+  const head = `【${md} AI注目穴馬】\n本日の最注目👉${b.r.venue}${b.r.no}R ${b.r.name || ""}\n${bd.num}番 ${bd.name}（${bd.pop ? bd.pop + "人気・" : ""}${bd.odds}倍）\nAI勝率${pc(bd.win)}・3着内${pc(bd.top3)}`;
+  const tags = "\n#競馬 #競馬予想 #AI競馬";
+  const fit = (base, items, tail = "") => { let t = base; for (const it of items){ if (xLen(t + "\n" + it + tail) > 280) break; t += "\n" + it; } return t + tail; };
+  const posts = [fit(head + "\n", why.slice(0, 2).map(w => "・" + w), tags)];
+  if (why.length > 2) posts.push(fit("【推奨理由・詳しく】", why.map(w => "・" + w)));
+  // 各レースの注目穴馬（会場ごと・280に収まるように分ける）
+  const lines = rows.map(o => `${o.x === best ? "★" : ""}${o.r.venue.slice(0, 1)}${o.r.no}R ${o.x.dark.num}${o.x.dark.name}(${o.x.dark.odds})`);
+  let cur = `【${md} 全レースの注目穴馬】`;
+  lines.forEach(l => { if (xLen(cur + "\n" + l) > 280){ posts.push(cur); cur = "（続き）"; } cur += "\n" + l; });
+  const tail = "\n※AIシミュレーションによる参考予想です。馬券は自己責任・余裕資金の範囲で。";
+  if (xLen(cur + tail) > 280){ posts.push(cur); cur = tail.trim(); } else cur += tail;
+  posts.push(cur);
+  const n = posts.length; XPOST.texts = posts.map((t, i) => n > 1 ? `${t}\n(${i + 1}/${n})` : t);
+  XPOST.texts.push(XPOST.texts.join("\n\n"));
+  return `<div class="learnbox"><h3>X投稿用（${esc(md)}）</h3>
+    <p class="small">この日の注目穴馬のうち、AIの勝率がいちばん高い馬を「最注目」にして、推奨理由と全レースの注目穴馬をスレッド用に分けました（1投稿は全角140字＝280文字以内）。推奨理由は、シミュレーションと過去の成績にある材料から作っています。<b>この日の全レースを一括計算したあと</b>（オッズ取得後がおすすめ）に使ってください。</p>
+    ${XPOST.texts.slice(0, n).map((t, i) => `<div class="xpost"><pre class="small" style="white-space:pre-wrap;margin:0">${esc(t)}</pre><div class="ctrls"><span class="small">${xLen(t)}/280</span><button class="btn" data-xcopy="${i}">${i + 1}つ目をコピー</button></div></div>`).join("")}
+    <div class="ctrls"><button class="btn" data-xcopy="${n}">全部まとめてコピー（長文が投稿できるアカウント用）</button></div></div>`;
+}
 function renderAllTab(){
   const el = $("#p-all"); if (!el) return;
   const d = ST.date, list = Object.values(DB.races).filter(r => r.date === d).sort((a, b) => a.venue.localeCompare(b.venue, "ja") || a.no - b.no);
@@ -6407,7 +6519,7 @@ function renderAllTab(){
       ${x.pace ? `<div class="line small">展開予想 <b>${PACE_JA[x.pace.best]}ペース ${pct(x.pace[x.pace.best])}%</b>（前に行く馬${x.pace.front}頭）</div>` : ""}
       <div class="marks">${x.marks.map((m, k) => `<span class="mk">${MARKS[k]}</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">1着${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}${(x.subs || []).map(m => `<span class="mk">△</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気）</span>` : ""}</span><span class="wpct">1着${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}</div>
       ${x.tri ? `<div class="line">最有力の3連単 <b>${x.tri.nums.join("→")}</b> <span class="small">（${pct(x.tri.p)}%）</span></div>` : ""}
-      ${x.dark ? `<div class="line">注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}3着内${pct(x.dark.top3)}%</span></div>` : ""}
+      ${x.dark ? `<div class="line">注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}${x.dark.win != null ? "勝率" + pct(x.dark.win) + "%・" : ""}3着内${pct(x.dark.top3)}%</span>${bestDark === x ? ` <span class="chip ana">この日の最注目穴馬</span>` : ""}</div>` : ""}
       ${x.evTop?.length ? `<div class="line">期待値上位 ${x.evTop.map(e => `<span class="${evCls(e.ev)}">${e.kind}${e.num} <b>${e.ev.toFixed(2)}</b></span>`).join("・")}</div>` : ""}
       ${x.anaTop?.length ? `<div class="line small">穴絡みの期待値上位 ${x.anaTop.map(e => `<span class="${evCls(e.ev)}">${esc(e.t)}（${e.odds}倍・期待値${e.ev.toFixed(2)}・控えめ${e.evL.toFixed(2)}）</span>`).join("・")}</div>` : ""}
       ${x.moves?.length ? `<div class="line small">人気の変動 ${x.moves.map(m => `${m.num}番 <span class="${m.ratio > 1 ? "neg" : ""}">${m.ratio > 1 ? "▲" : "▼"}${m.fromOdds}→${m.toOdds}倍${m.fromPop && m.toPop && m.fromPop !== m.toPop ? `（${m.fromPop}→${m.toPop}人気）` : ""}</span>`).join("・")}</div>` : ""}
@@ -6421,6 +6533,7 @@ function renderAllTab(){
     </div>`;
   };
   const done = list.map(rowOf).filter(x => x && x.marks?.length);
+  const bestDark = done.filter(x => x.dark).sort((a, b) => (b.dark.win ?? b.dark.top3 / 3) - (a.dark.win ?? a.dark.top3 / 3))[0] || null;
   const diag = (() => {
     if (done.length < 3) return "";
     const pops = done.map(x => x.favPop).filter(p => p);
@@ -6436,9 +6549,11 @@ function renderAllTab(){
     ${CHECK[d] ? checkAllPanel() : ""}
     ${CHECK[d] || LEARN.model ? upsetPanel(d) + learnPanel() : ""}
     ${diag}
+    ${xPostPanel(d, list, rowOf, bestDark)}
     <div class="allhead"><h3>${esc(d.slice(5).replace("-", "/"))} 全レース予想</h3><span class="small">${doneN}/${list.length}レース計算済み${BATCH.running ? `（計算中 ${BATCH.done}/${BATCH.total}）` : ""}。一括計算は各条件 ${BATCH_RUNS.toLocaleString()}回×馬場4×ペース3。レースを開いて「シミュレーション実行」を押すと1万回で計算し直せます。</span></div>
     ${venues.map(v => `<h3 class="sec">${esc(v)}</h3><div class="allgrid">${list.filter(r => r.venue === v).map(card).join("")}</div>`).join("")}
     <div class="note">1,000円・5,000円の買い方と◎○▲は、各レースを「馬場4種×ペース3種」の12条件で各${BATCH_RUNS.toLocaleString()}回走らせ、馬場（発表済みなら発表の馬場、発表前は予報）とペース（脚質構成から計算した各ペースの起きやすさ）の確率で混ぜた結果から計算しています。確率は、学習した比率でオッズと統合し、当日の馬場の偏り・クッション値・馬体重の効き（反映条件を満たすときだけ）も入っています。確率は過去データにもとづく推定で、的中を保証するものではありません。馬券は余裕資金の範囲で。</div>`;
+  el.querySelectorAll("[data-xcopy]").forEach(b => b.onclick = async () => { const t = XPOST.texts[+b.dataset.xcopy]; try { await navigator.clipboard.writeText(t); toast("コピーしました"); } catch (e) { toast("コピーできませんでした（文字を選んでコピーしてください）"); } });
   el.querySelectorAll("[data-cm]").forEach(b => b.onclick = () => { CHECK_MODE.v = b.dataset.cm; CHECK_ALL.res = null; computeCheck(d); renderAllTab(); });
   const pr = el.querySelector("#perfRace"); if (pr) pr.onchange = e => { PERF.race = e.target.value; renderAllTab(); };
   const ca = el.querySelector("#checkAll"); if (ca) ca.onclick = () => checkAllDates();
