@@ -482,9 +482,9 @@ class Handler(SimpleHTTPRequestHandler):
                 # 書き込みの途中で止まっても壊れないよう、別のファイルに書いてから入れ替える。1日1回、前の版を残す（learn_YYYYMMDD.json・最新7つ）
                 if lp.exists():
                     bk = DATA / "backup"; bk.mkdir(exist_ok=True)
-                    bf = bk / f"learn_{dt.date.today().strftime('%Y%m%d')}.json"
-                    if not bf.exists() and len(old) > 0:
-                        shutil.copyfile(lp, bf)
+                    bkf = bk / f"learn_{dt.date.today().strftime('%Y%m%d')}.json"
+                    if not bkf.exists() and len(old) > 0:
+                        shutil.copyfile(lp, bkf)
                         for x in sorted(bk.glob("learn_*.json"))[:-7]: x.unlink()
                 tmp = DATA / "learn.json.tmp"
                 tmp.write_text(json.dumps({"model": model, "records": recs}, ensure_ascii=False), encoding="utf-8"); os.replace(tmp, lp)
