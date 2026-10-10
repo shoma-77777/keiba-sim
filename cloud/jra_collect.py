@@ -103,56 +103,71 @@ def _months(frm, to):
 
 
 def _loop(frm, to):
-    pr = _load("progress.json", {"lists": {}, "months": {}})
+    """月のページと、開催日（場）ごとのレース一覧のページに書かれたリンクを、期間内のものだけすべてたどる。
+    一覧のページには同じ日のほかの場や前後の開催日へのリンクもあるので、それもたどる（月のページに全部の開催が載っていなくても集まる）。
+    済んだ一覧は記録して2回目からは飛ばす。取っていないレースだけ結果のページを開く。"""
+    pr = _load("progress.json", {})
+    lists_done = pr.setdefault("lists", {}); scanned = pr.setdefault("scanned", {})
     inc = _load("incidents.json", {})
     c = Client()
+    lo, hi = frm.replace("-", ""), to.replace("-", "")
+    inrange = lambda x: (lambda m: bool(m) and lo <= m.group(1) <= hi)(re.search(r"(\d{8})/", x))
     try:
-        want = _months(frm, to)
-        # ① 過去レース結果検索のページから、月のページへのリンクを集める（年の切り替えページもたどる・最大30回）
-        mon, seen, queue, tries = dict(pr.get("monthC") or {}), set(), ["pw01skl00999999/B3"], 0
-        while queue and any(w not in mon for w in want if not pr["months"].get(w)) and tries < 30 and not ST["stop"]:
-            cn = queue.pop(0)
-            if cn in seen: continue
-            seen.add(cn); tries += 1
-            with LOCK: ST["cur"] = "月の一覧を探しています"
-            html = c.post(cn)
+        want = set(_months(frm, to))
+        mon = dict(pr.get("monthC") or {})
+        lq, seenL = [], set()
+        def harvest(html, src):
+            new_m = []
             for x in dict.fromkeys(CN.findall(html)):
                 m = re.match(r"pw01skl10(\d{6})/", x)
-                if m: mon[m.group(1)] = x
-                elif x.startswith("pw01skl") and x not in seen: queue.append(x)
+                if m:
+                    if m.group(1) not in mon: new_m.append(m.group(1))
+                    mon[m.group(1)] = x
+                elif x.startswith("pw01srl") and inrange(x) and x not in seenL:
+                    seenL.add(x); lq.append(x)
+            return new_m
+        # ① 月のページ：過去レース結果検索のページ → 見つかった月のページ（前後の月へのリンクもたどる）
+        fetchedM, queue = set(), ["pw01skl00999999/B3"]
+        while not ST["stop"]:
+            todo = [ym for ym in sorted(want) if ym in mon and mon[ym] not in fetchedM]
+            cn = queue.pop(0) if queue else (mon[todo[0]] if todo else None)
+            if not cn: break
+            if cn in fetchedM: continue
+            fetchedM.add(cn)
+            with LOCK: ST["cur"] = "月の一覧を見ています"
+            before = len(lq); harvest(c.post(cn), cn)
+            m = re.match(r"pw01skl10(\d{6})/", cn)
+            if m: _log(f"{m.group(1)[:4]}年{int(m.group(1)[4:])}月：開催の一覧 {len(lq) - before}件")
+            if len(fetchedM) > 40: break
         pr["monthC"] = mon; _save("progress.json", pr)
-        miss = [w for w in want if w not in mon and not pr["months"].get(w)]
-        if miss: _log(f"月のページが見つかりませんでした：{', '.join(miss)}（JRAのページの作りが想定と違う可能性。ログを送ってください）")
-        # ② 月 → 開催日・場 → レース結果
-        for ym in want:
-            if ST["stop"]: break
-            if pr["months"].get(ym) or ym not in mon: continue
-            with LOCK: ST["cur"] = f"{ym[:4]}年{int(ym[4:])}月の開催一覧"
-            lists = [x for x in dict.fromkeys(CN.findall(c.post(mon[ym]))) if x.startswith("pw01srl")]
-            lists = [x for x in lists if (lambda d: d and frm.replace("-", "") <= d <= to.replace("-", ""))(re.search(r"(\d{8})/", x).group(1) if re.search(r"(\d{8})/", x) else None)]
-            for li in lists:
+        miss = sorted(w for w in want if w not in mon)
+        if miss: _log(f"月のページが見つかりませんでした：{', '.join(miss)}（このログを送ってください）")
+        # 前の版で済ませた一覧も、ほかの場へのリンクを探すために1回だけ見直す
+        for li in list(lists_done):
+            if inrange(li) and li not in seenL and not scanned.get(li): seenL.add(li); lq.append(li)
+        # ② 開催日・場ごとのレース一覧 → レース結果
+        while lq and not ST["stop"]:
+            lq.sort(key=lambda x: re.search(r"(\d{8})/", x).group(1))
+            li = lq.pop(0)
+            if lists_done.get(li) and scanned.get(li): continue
+            ymd = re.search(r"(\d{8})/", li).group(1); day = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}"
+            with LOCK: ST["cur"] = f"{ymd[:4]}/{ymd[4:6]}/{ymd[6:]} のレース一覧（残り{len(lq)}）"
+            html = c.post(li); harvest(html, li)
+            races = [x for x in dict.fromkeys(CN.findall(html)) if x.startswith("pw01sde") and (_rid(x)[1] or "") == day]
+            n = 0
+            for rc in races:
                 if ST["stop"]: break
-                if pr["lists"].get(li): continue
-                ymd = re.search(r"(\d{8})/", li).group(1)
-                with LOCK: ST["cur"] = f"{ymd[:4]}/{ymd[4:6]}/{ymd[6:]} のレース一覧"
-                races = [x for x in dict.fromkeys(CN.findall(c.post(li))) if x.startswith("pw01sde")]
-                races = [x for x in races if (_rid(x)[1] or "") == f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}"]
-                n = 0
-                for rc in races:
-                    if ST["stop"]: break
-                    rid, date = _rid(rc)
-                    if not rid or rid in inc: continue
-                    with LOCK: ST["cur"] = f"{date} {rid[-2:]}R の結果"
-                    p = parse(c.post(rc))
-                    inc[rid] = {"d": date, **(p or {"v": [], "vn": [], "o": [], "x": [], "t": []})}; n += 1
-                    if n % 6 == 0: _save("incidents.json", inc)
-                _save("incidents.json", inc)
-                if not ST["stop"]:
-                    pr["lists"][li] = True; _save("progress.json", pr)
-                    k = sum(1 for r in inc.values() if r.get("d") == f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}" and (r.get("v") or r.get("vn") or r.get("x")))
-                    _log(f"{ymd[:4]}/{ymd[4:6]}/{ymd[6:]}：{len(races)}レース（出来事のあったレース {k}）")
-            if not ST["stop"] and ym < dt.date.today().strftime("%Y%m"): pr["months"][ym] = True; _save("progress.json", pr)
-        _log("止めました" if ST["stop"] else "集め終わりました")
+                rid, date = _rid(rc)
+                if not rid or rid in inc: continue
+                with LOCK: ST["cur"] = f"{date} {rid[-2:]}R の結果（一覧の残り{len(lq)}）"
+                p = parse(c.post(rc))
+                inc[rid] = {"d": date, **(p or {"v": [], "vn": [], "o": [], "x": [], "t": []})}; n += 1
+                if n % 6 == 0: _save("incidents.json", inc)
+            _save("incidents.json", inc)
+            if not ST["stop"]:
+                lists_done[li] = True; scanned[li] = True; _save("progress.json", pr)
+                if n: _log(f"{ymd[:4]}/{ymd[4:6]}/{ymd[6:]}：新しく{n}レース（集めた合計 {len(inc)}）")
+        _log("止めました" if ST["stop"] else f"集め終わりました（合計 {len(inc)}レース）")
     except Exception as ex:
         with LOCK: ST["error"] = str(ex)
         _log(f"エラーで止まりました：{ex}"); traceback.print_exc()
