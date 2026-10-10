@@ -1703,6 +1703,192 @@ const Learn = (() => {
     return out;
   }
 
-  return { RV, frontPick, FRONT_RULE, histBuilder, darkReport, DARK_PREREG, PREREG, INC_RULES: INC_RULES.map(({ f, ...m }) => m), holdSplit, incEval, incCoverage, jtBuilder, report, clean, posFill, livePredict, prevBuilder, indBuild, crossCompact, crossReport, crossTickets, crossFitBeta, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
+  // ===== 20. 自動探索（前向き検証）=====
+  //  ① 記録（レース前に分かる材料だけ）から約1,000個の指標を作る
+  //  ② 固定する日より前の記録を「探索（前65%）」と「確認（後35%）」に分け、人気帯×指標1〜3個×ワイド/3連複の買い方を自動で試す
+  //  ③ 両方で良かったルールを上位30本まで固定（サーバーに追記保存。あとから書き換えられない）
+  //  ④ 判定は「固定した日より後のレース」だけで行う（過去の数字は判定に使わない）
+  const AS_BETS = {
+    w1: "ワイド 1番人気－X（1点）", w12: "ワイド 1・2番人気－X（2点）", t12: "3連複 1・2番人気－X（1点）",
+    t1: "3連複 1番人気－2〜4番人気－X（3点）", tb: "3連複 1〜4番人気から2頭－X（6点）"
+  };
+  const AS_BAND = { B1: "1〜3番人気", B2: "4〜6番人気", B3: "7〜9番人気", B4: "10番人気以下" };
+  const AS_FE = FEATS.slice(0, 20);   // 21要素のうち「人気変動」を除く（オッズの動きは使わない）
+  function asBuild(recs){
+    const R = recs.filter(r => r.h && r.pay && r.pay["単勝"] && r.h.length >= 6).slice().sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : (a.id < b.id ? -1 : 1));
+    const bin = o => Math.min(45, Math.floor(Math.log(o) / Math.log(1.12)));
+    const BT = {}; for (const r of R) for (const h of r.h){ if (!(h.pos > 0 && h.odds)) continue; const b = BT[bin(h.odds)] || (BT[bin(h.odds)] = { n: 0, t: 0 }); b.n++; if (h.pos <= 3) b.t++; }
+    const exp3 = o => { const b = BT[bin(o)]; return b ? b.t / b.n : 0; };
+    const key = a => a.slice().sort((x, y) => x - y).join("-");
+    const H = [], F = [], fi = {}; const idx = name => { if (fi[name] == null){ fi[name] = F.length; F.push(name); } return fi[name]; };
+    const jt = {}; const up = (k, a, e) => { const o = jt[k] || (jt[k] = { n: 0, a: 0, e: 0 }); o.n++; o.a += a; o.e += e; };
+    const lift = (k, min) => { const o = jt[k]; return o && o.n >= min && o.e > 0 ? o.a / o.e : null; };
+    const cntJ = {}, cntT = {}; for (const r of R) for (const h of r.h){ if (h.jk) cntJ[h.jk] = (cntJ[h.jk] || 0) + 1; if (h.tr) cntT[h.tr] = (cntT[h.tr] || 0) + 1; }
+    let day = null, pend = [];
+    for (const r of R){
+      if (r.date !== day){ for (const [k, a, e] of pend) up(k, a, e); pend = []; day = r.date; }
+      const hs = r.h.filter(h => h.pos > 0 && h.odds && h.pop); if (hs.length < 6) continue;
+      const N = hs.length, byO = hs.slice().sort((a, b) => a.odds - b.odds), fav = byO[0], f1 = byO[0].num, f2 = byO[1].num, top4 = byO.slice(0, 4).map(h => h.num), top5 = byO.slice(0, 5).map(h => h.num);
+      const byNum = {}; r.h.forEach(h => byNum[h.num] = h);
+      const nige = r.h.filter(h => h.style === "逃げ").length, fronts = r.h.filter(h => h.style === "逃げ" || h.style === "先行").length;
+      const rk = (arr, f, desc) => arr.filter(h => f(h) != null).sort((a, b) => desc ? f(b) - f(a) : f(a) - f(b)).map(h => h.num);
+      const ppRank = rk(hs, h => h.pp?.[0], false), spdRank = rk(hs, h => h.hy?.[5], true), l3Rank = rk(hs, h => h.hy?.[4], false);
+      const zr = AS_FE.map((_, j) => hs.map(h => ({ n: h.num, v: (h.z || [])[j] || 0 })).sort((a, b) => b.v - a.v));
+      const femaleRace = /牝/.test(r.name || ""), going = /[重不]/.test(r.going || "") ? "重不良" : "良稍";
+      const cls = /新馬/.test(r.name) ? "新馬" : /未勝利/.test(r.name) ? "未勝利" : /1勝|2勝/.test(r.name) ? "1-2勝" : "3勝以上OP";
+      const dband = r.dist <= 1400 ? "短距離" : r.dist <= 1800 ? "マイル〜中距離" : "長め";
+      const mon = +String(r.date).slice(5, 7), season = mon <= 2 || mon === 12 ? "冬" : mon <= 5 ? "春" : mon <= 8 ? "夏" : "秋";
+      const course = `${r.venue}${r.surface}${r.dist}`;
+      const W = r.pay["ワイド"] || {}, T = r.pay["三連複"] || {}, okW = Object.keys(W).length > 0, ok3 = Object.keys(T).length > 0;
+      for (const h of hs){
+        const f = []; const add = n => f.push(idx(n));
+        const ab = h.ab || [], ct = h.ct || [], hx = h.hx || [], hy = h.hy || [], pp = h.pp || [];
+        const nb = [byNum[h.num - 1], byNum[h.num + 1]].filter(Boolean), inner = h.num <= 3, outer = h.num >= N - 2, st = h.style;
+        const gpos = inner ? "内" : outer ? "外" : "中";
+        // 枠・隣・展開
+        if (nb.some(x => x.style === "逃げ")) add("隣の馬番に逃げ馬");
+        if (nb.filter(x => x.style === "逃げ" || x.style === "先行").length >= 2) add("両隣が逃げ・先行（挟まれる）");
+        if (nb.length && nb.every(x => x.style === "差し" || x.style === "追込")) add("両隣が差し・追込（前が開く）");
+        add("枠:" + gpos); add(h.num % 2 ? "馬番が奇数（先入れ）" : "馬番が偶数（後入れ）");
+        if (st){ add("脚質予想:" + st); add("枠×脚質:" + gpos + st); add("頭数" + (N <= 10 ? "少" : N >= 16 ? "多" : "中") + "×脚質:" + st); }
+        if (st === "逃げ" && nige === 1) add("単騎逃げ（逃げ馬が自分だけ）");
+        if (st === "逃げ" && nige >= 3) add("逃げ馬3頭以上の中の逃げ馬");
+        if (nige === 0) add("逃げ馬がいないレース");
+        if ((st === "差し" || st === "追込") && fronts >= Math.ceil(N * 0.45)) add("先行馬が多いレースの差し・追込");
+        if ((st === "逃げ" || st === "先行") && fronts <= Math.floor(N * 0.2)) add("先行馬が少ないレースの逃げ・先行");
+        const pr = ppRank.indexOf(h.num); if (pr >= 0 && pr < 2) add("メンバー内で普段いちばん前（上位2頭）"); if (pr >= 0 && pr >= ppRank.length - 2) add("メンバー内で普段いちばん後ろ（下位2頭）");
+        // 前走・ローテ
+        if (ab[3] != null && ab[3] <= 0.5 && ab[0] != null && ab[0] >= 0.4) add("前走 着順は下位だが着差0.5秒以内");
+        if (ab[0] != null && ab[0] <= 0.15) add("前走 上位の着順");
+        if (ab[5] != null && ab[5] >= 3) add("前走 人気より3つ以上好走"); if (ab[5] != null && ab[5] <= -5) add("前走 人気より5つ以上凡走");
+        if (ab[3] != null && ab[3] >= 2) add("前走 2秒以上の大敗");
+        if (ab[4] != null && ab[4] <= 3) add("前走は3番人気以内"); if (ab[4] != null && ab[4] >= 10) add("前走は10番人気以下");
+        if (ab[6] != null && ab[6] <= 14) add("連闘・中1週"); if (ab[6] != null && ab[6] > 14 && ab[6] <= 35) add("中2〜4週"); if (ab[6] != null && ab[6] >= 90) add("休み明け（90日以上）");
+        if (hx[3]) add("休み明け2戦目");
+        if (ab[8] != null && ab[8] > 0) add("昇級初戦"); if (ab[8] != null && ab[8] < 0) add("降級");
+        if (hx[1]) add("初めての芝ダ"); if (hx[2]) add("初めての距離帯");
+        if (h.dd != null && h.dd <= -200) add("距離短縮"); if (h.dd != null && h.dd >= 200) add("距離延長"); if (h.dd === 0) add("前走と同じ距離");
+        if (ct[0] != null && ct[0] >= 0.35) add("前走 出遅れ・後方から");
+        if (ct[1] != null && ct[1] >= 0.25) add("前走 4角から大きく伸びた"); if (ct[1] != null && ct[1] <= -0.25) add("前走 4角から失速");
+        if (ct[2] != null && ct[2] <= -0.8) add("前走 上がりが普段より速い"); if (ct[2] != null && ct[2] >= 0.8) add("前走 上がりが普段より遅い");
+        if (pp[3] != null && pp[3] <= 0.25 && ab[0] != null && ab[0] >= 0.5) add("前走 4角先頭集団から失速");
+        if (pp[1] != null && pp[0] != null && pp[1] - pp[0] >= 0.3) add("前走は普段より後ろの位置");
+        if (ab[7] != null && ab[7] >= 25) add("キャリア25戦以上"); if (ab[7] != null && ab[7] <= 3) add("キャリア3戦以内");
+        if (hx[0] != null && hx[0] >= 0.15) add("普段から人気以上に走る"); if (hx[0] != null && hx[0] <= -0.15) add("普段は人気より走らない");
+        // 騎手・調教師
+        const jkName = (h.jk || "").replace(/[★☆▲△◇]/g, "");
+        if (h.pj && h.jk && h.pj.slice(0, 2) !== jkName.slice(0, 2)) add("騎手乗り替わり"); else if (h.pj) add("騎手継続");
+        if (/[★☆▲△◇]/.test(h.jk || "")) add("減量騎手");
+        if (h.jk && cntJ[h.jk] >= 300) add("騎手:" + h.jk);
+        if (h.tr && cntT[h.tr] >= 150) add("調教師:" + h.tr);
+        const jl = lift("J" + h.jk, 80), tl = lift("T" + h.tr, 60), jv = lift("JV" + h.jk + r.venue, 30), jtl = lift("JT" + h.jk + h.tr, 15), jc = lift("JC" + h.jk + r.surface + dband, 30), tv = lift("TV" + h.tr + r.venue, 25);
+        if (jl != null && jl >= 1.15) add("騎手 オッズ以上に好走（過去）"); if (jl != null && jl <= 0.85) add("騎手 オッズ以下（過去）");
+        if (tl != null && tl >= 1.15) add("調教師 オッズ以上に好走（過去）"); if (tl != null && tl <= 0.85) add("調教師 オッズ以下（過去）");
+        if (jv != null && jv >= 1.2) add("騎手×この競馬場 オッズ以上（過去）"); if (jv != null && jv <= 0.8) add("騎手×この競馬場 オッズ以下（過去）");
+        if (jtl != null && jtl >= 1.25) add("騎手×調教師 オッズ以上（過去）");
+        if (jc != null && jc >= 1.2) add("騎手×芝ダ×距離 オッズ以上（過去）");
+        if (tv != null && tv >= 1.2) add("調教師×この競馬場 オッズ以上（過去）");
+        // 馬の条件
+        if (hy[0] >= 1) add("このコースで3着内あり"); if (hy[1] >= 3 && !hy[0]) add("このコースで3回以上走って3着内なし");
+        if (hy[2] >= 1) add("この距離で3着内あり");
+        const sr = spdRank.indexOf(h.num); if (sr >= 0 && sr < 3) add("持ち時計 メンバー上位3");
+        const lr = l3Rank.indexOf(h.num); if (lr >= 0 && lr < 3) add("ベスト上がり メンバー上位3");
+        if (hy[6] != null && hy[6] <= -2) add("斤量2kg以上減"); if (hy[6] != null && hy[6] >= 2) add("斤量2kg以上増");
+        if (hy[7] != null && hy[7] >= 10) add("馬体重10kg以上増"); if (hy[7] != null && hy[7] <= -10) add("馬体重10kg以上減");
+        if (hy[8] && !femaleRace) add("牝馬（牡馬混合戦）"); if (hy[8]) add("牝馬×季節:" + season);
+        if (hy[9] != null && hy[9] >= 7) add("7歳以上"); if (hy[9] === 3) add("3歳"); if (hy[9] === 2) add("2歳");
+        if ((h.ana || []).length >= 3) add("穴パターン3つ以上");
+        (h.ana || []).forEach(a => add("穴パターン:" + a));
+        AS_FE.forEach((nm, j) => { const s = zr[j], p = s.findIndex(x => x.n === h.num), v = s[p].v; if (v > 0 && p === 0 && (!s[1] || s[1].v < v)) add(`要素「${nm}」がメンバー内1位`); if (v > 0 && p < 3) add(`要素「${nm}」がメンバー内上位3`); if (v < 0 && p >= s.length - 3) add(`要素「${nm}」がメンバー内下位3`); });
+        // レース・コースとの組み合わせ
+        add("場:" + r.venue); add("芝ダ:" + r.surface); add("馬場:" + going); add("クラス:" + cls); add("距離:" + dband); add("季節:" + season);
+        add("コース:" + course); add("コース×枠:" + course + gpos);
+        if (st){ add("場×脚質:" + r.venue + r.surface + st); add("馬場×脚質:" + going + st); add("コース×脚質:" + course + st); add("季節×脚質:" + season + st); }
+        add("場×枠:" + r.venue + r.surface + gpos); add("馬場×枠:" + going + gpos);
+        add(N <= 10 ? "頭数:10頭以下" : N >= 16 ? "頭数:16頭以上" : "頭数:11〜15頭");
+        if (fav.odds < 2) add("1番人気が1倍台のレース"); if (fav.odds >= 3.5) add("1番人気が3.5倍以上（混戦）");
+        if (fav.style === "逃げ" || fav.style === "先行") add("1番人気が逃げ・先行"); if (fav.style === "差し" || fav.style === "追込") add("1番人気が差し・追込");
+        if (fav.ct?.[1] != null && fav.ct[1] <= -0.25) add("1番人気が前走失速");
+        if (fav.ab?.[6] != null && fav.ab[6] >= 90) add("1番人気が休み明け");
+        if (fav.ab?.[8] != null && fav.ab[8] > 0) add("1番人気が昇級初戦");
+        if (fav.pj && fav.jk && fav.pj.slice(0, 2) !== (fav.jk || "").replace(/[★☆▲△◇]/g, "").slice(0, 2)) add("1番人気が乗り替わり");
+        if (h.num !== fav.num && st && st === fav.style) add("1番人気と同じ脚質");
+        // 買い目（実際の払戻）
+        const n = h.num, s = {};
+        if (okW && n !== f1) s.w1 = [100, W[key([f1, n])] || 0];
+        if (okW && n !== f1 && n !== f2) s.w12 = [200, (W[key([f1, n])] || 0) + (W[key([f2, n])] || 0)];
+        if (ok3 && n !== f1 && n !== f2) s.t12 = [100, T[key([f1, f2, n])] || 0];
+        if (ok3 && !top5.includes(n)){ const o = top4.filter(m => m !== f1); let ret = 0; for (const m of o) ret += T[key([f1, m, n])] || 0; s.t1 = [o.length * 100, ret]; }
+        if (ok3 && !top5.includes(n)){ let ret = 0, c = 0; for (let i = 0; i < 4; i++) for (let j = i + 1; j < 4; j++){ c++; ret += T[key([top4[i], top4[j], n])] || 0; } s.tb = [c * 100, ret]; }
+        const band = h.pop <= 3 ? "B1" : h.pop <= 6 ? "B2" : h.pop <= 9 ? "B3" : "B4";
+        H.push({ d: r.date, id: r.id, num: n, f, band, s });
+        const a3 = h.pos <= 3 ? 1 : 0, e3 = exp3(h.odds);
+        pend.push(["J" + h.jk, a3, e3], ["T" + h.tr, a3, e3], ["JV" + h.jk + r.venue, a3, e3], ["JT" + h.jk + h.tr, a3, e3], ["JC" + h.jk + r.surface + dband, a3, e3], ["TV" + h.tr + r.venue, a3, e3]);
+      }
+    }
+    const Wn = Math.ceil(H.length / 32), bits = F.map(() => new Uint32Array(Wn)), cnt = F.map(() => 0);
+    H.forEach((h, i) => { for (const k of h.f){ bits[k][i >> 5] |= 1 << (i & 31); cnt[k]++; } h.f = null; });   // 指標はビットで持つ（メモリ節約）
+    const BAND = {}; for (const b of Object.keys(AS_BAND)){ BAND[b] = new Uint32Array(Wn); H.forEach((h, i) => { if (h.band === b) BAND[b][i >> 5] |= 1 << (i & 31); }); }
+    return { H, F, fi, bits, cnt, BAND, W: Wn };
+  }
+  const asList = b => { const out = []; for (let w = 0; w < b.length; w++){ let x = b[w]; while (x){ const t = x & -x; out.push((w << 5) + (31 - Math.clz32(t))); x ^= t; } } return out; };
+  const asAnd = (W, ...bs) => { const o = new Uint32Array(W); for (let w = 0; w < W; w++){ let v = 0xffffffff; for (const b of bs) v &= b[w]; o[w] = v; } return o; };
+  // ルールに当てはまる馬（全期間）
+  function asIds(D, rule){ const fs = rule.feats.map(n => D.fi[n]); if (fs.some(k => k == null)) return []; return asList(asAnd(D.W, D.BAND[rule.band], ...fs.map(k => D.bits[k]))); }
+  // 成績：期間 [from, to) の買い目の合計
+  function asPerf(D, ids, bet, from, to){
+    let n = 0, st = 0, rt = 0, sq = 0, hits = 0; const races = new Set();
+    for (const i of ids){ const h = D.H[i]; if ((from && h.d < from) || (to && h.d >= to)) continue; const v = h.s[bet]; if (!v) continue; n++; st += v[0]; rt += v[1]; sq += (v[1] / v[0]) ** 2; if (v[1] > 0) hits++; races.add(h.id); }
+    const roi = st ? rt / st : null, m = n ? rt / st : 0, sd = n ? Math.sqrt(Math.max(0, sq / n - m * m)) : 0;
+    return { n, races: races.size, stake: st, ret: rt, hits, roi, z: n > 1 && sd > 0 ? (m - 1) / (sd / Math.sqrt(n)) : null };
+  }
+  // 探索して、上位のルールを返す（固定はしない）。cutoff：この日までの記録だけを使う
+  async function asSearch(D, cutoff, onProgress){
+    const H = D.H, NF = D.F.length, W = D.W, BETS = Object.keys(AS_BETS);
+    const days = [...new Set(H.filter(h => h.d <= cutoff).map(h => h.d))].sort();
+    if (days.length < 40) return { error: "記録が少なすぎます（40開催日以上必要）" };
+    const split = days[Math.floor(days.length * 0.65)], v1to = days[Math.floor(days.length * 0.825)];
+    const mk = pred => { const b = new Uint32Array(W); H.forEach((h, i) => { if (pred(h)) b[i >> 5] |= 1 << (i & 31); }); return b; };
+    const PE = mk(h => h.d < split);
+    const has = (b, i) => (b[i >> 5] >>> (i & 31)) & 1;
+    const usable = D.F.map((_, k) => D.cnt[k] >= 200);
+    const stat = ids => { const s = {}; for (const k of BETS) s[k] = [0, 0, 0, 0]; for (const i of ids){ const x = H[i].s; for (const k of BETS){ const v = x[k]; if (!v) continue; const o = s[k]; o[0]++; o[1] += v[0]; o[2] += v[1]; o[3] += (v[1] / v[0]) ** 2; } } return s; };
+    const ev = o => { const [n, st, rt, sq] = o; if (n < 150) return null; const m = rt / st, sd = Math.sqrt(Math.max(0, sq / n - m * m)); return { n, roi: m, lo: m - sd / Math.sqrt(n) }; };
+    const cands = [], seen = new Set(); let tested = 0;
+    const push = (band, fs, s, only) => { for (const k of (only ? [only] : BETS)){ tested++; const e = ev(s[k]); if (e && e.roi >= 1.2 && e.lo >= 1.0){ const key = band + k + fs.join(","); if (!seen.has(key)){ seen.add(key); cands.push({ band, fs, bet: k, ...e }); } } } };
+    const bands = Object.keys(AS_BAND); let step = 0; const total = bands.length * NF;
+    for (const band of bands){ const base = asAnd(W, PE, D.BAND[band]);
+      for (let a = 0; a < NF; a++){ step++;
+        if (step % 25 === 0){ onProgress?.(`探索中：指標の組み合わせ ${Math.round(step / total * 100)}%（試した数 ${tested.toLocaleString()}）`); await new Promise(r => setTimeout(r, 0)); }
+        if (!usable[a]) continue; const la = asList(asAnd(W, base, D.bits[a])); if (la.length < 150) continue; push(band, [a], stat(la));
+        for (let b = a + 1; b < NF; b++){ if (!usable[b]) continue; const bb = D.bits[b]; const ids = []; for (const i of la) if (has(bb, i)) ids.push(i); if (ids.length < 150) continue; push(band, [a, b], stat(ids)); } } }
+    // 試行錯誤：探索期間で良かった上位300本に、3つ目の指標を足す
+    const beam = cands.filter(c => c.fs.length <= 2).sort((x, y) => y.lo - x.lo).slice(0, 300);
+    for (let ci = 0; ci < beam.length; ci++){ const c = beam[ci];
+      if (ci % 10 === 0){ onProgress?.(`探索中：3つ目の指標を足して試行錯誤 ${Math.round(ci / beam.length * 100)}%（試した数 ${tested.toLocaleString()}）`); await new Promise(r => setTimeout(r, 0)); }
+      const la = asList(asAnd(W, PE, D.BAND[c.band], ...c.fs.map(f => D.bits[f])));
+      for (let f = 0; f < NF; f++){ if (!usable[f] || c.fs.includes(f)) continue; const bb = D.bits[f]; const ids = []; for (const i of la) if (has(bb, i)) ids.push(i); if (ids.length < 150) continue; push(c.band, [...c.fs, f].sort((x, y) => x - y), stat(ids), c.bet); } }
+    onProgress?.(`確認期間で絞り込み中（候補 ${cands.length.toLocaleString()}本）`); await new Promise(r => setTimeout(r, 0));
+    const pass = [], sets = new Set();
+    for (const c of cands){ const ids = asList(asAnd(W, D.BAND[c.band], ...c.fs.map(f => D.bits[f])));
+      const v = asPerf(D, ids, c.bet, split, cutoff + "~"), v1 = asPerf(D, ids, c.bet, split, v1to), v2 = asPerf(D, ids, c.bet, v1to, cutoff + "~");
+      if (v.n >= 60 && v.roi >= 1.05 && v1.roi >= 1 && v2.roi >= 1){ const k = c.bet + ":" + ids.filter(i => H[i].d <= cutoff).join(","); if (sets.has(k)) continue; sets.add(k);
+        pass.push({ band: c.band, feats: c.fs.map(f => D.F[f]), bet: c.bet, past: { e: { n: c.n, roi: +c.roi.toFixed(3) }, v: { n: v.n, roi: +v.roi.toFixed(3), r1: +v1.roi.toFixed(3), r2: +v2.roi.toFixed(3) } }, score: Math.min(c.roi, v.roi) }); } }
+    pass.sort((a, b) => b.score - a.score);
+    // 似たルール（当てはまる馬が7割以上重なる）は1本にまとめて、上位30本
+    const picked = [], pIds = [];
+    for (const p of pass){ if (picked.length >= 30) break; const ids = new Set(asIds(D, p).filter(i => H[i].d <= cutoff));
+      if (pIds.some(q => { let c = 0; for (const i of ids) if (q.has(i)) c++; return c / Math.min(ids.size, q.size) >= 0.7; })) continue; picked.push(p); pIds.push(ids); }
+    return { cutoff, split, tested, cands: cands.length, pass: pass.length, rules: picked.map(({ score, ...x }) => x), features: D.F.length, usable: usable.filter(Boolean).length };
+  }
+  // 固定したルールの「固定した日より後」の成績。合格：回収率105%以上・200点以上・偶然では説明しにくい（30本を同時に見るので z≧2.94）
+  function asJudge(D, set){
+    const from = set.cutoff + "~";   // cutoff の翌日以降
+    let st = 0, rt = 0; const rows = set.rules.map(r => { const ids = asIds(D, r); const p = asPerf(D, ids, r.bet, from, null); st += p.stake; rt += p.ret;
+      const pass = p.n >= 200 && p.roi >= 1.05 && p.z != null && p.z >= 2.94; return { ...r, fwd: p, pass }; });
+    return { rows, stake: st, ret: rt, roi: st ? rt / st : null, passN: rows.filter(r => r.pass).length, over105: rows.filter(r => r.fwd.n >= 30 && r.fwd.roi >= 1.05).length };
+  }
+
+  return { RV, AS_BETS, AS_BAND, asBuild, asSearch, asJudge, asIds, asPerf, frontPick, FRONT_RULE, histBuilder, darkReport, DARK_PREREG, PREREG, INC_RULES: INC_RULES.map(({ f, ...m }) => m), holdSplit, incEval, incCoverage, jtBuilder, report, clean, posFill, livePredict, prevBuilder, indBuild, crossCompact, crossReport, crossTickets, crossFitBeta, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
 })();
 if (typeof module !== "undefined") module.exports = Learn;

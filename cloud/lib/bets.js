@@ -278,18 +278,38 @@ const Bets = (() => {
     const wp = list.filter(c => c.type === "単勝" || c.type === "複勝").sort((a, b) => b.evL - a.evL)[0];
     return wp ? [...ex, wp] : ex;
   }
+  // トリガミなしの配分（2026-10-11 ユーザーの方針）：
+  //  ・1点のオッズは5倍以上（ワイド・複勝は低いほうのオッズで判定）
+  //  ・どの1点が当たっても、そのレースの合計の掛け金（予算を全部使う）より多く戻る＝ 掛け金 × オッズ ＞ 予算
+  //  候補を優先順に見て、必要な最低額（100円単位）を足しても予算に収まる目だけを入れ、余りは優先順位の一番高い目に足す
+  const MIN_ODDS = 5;
+  function allocateNoLoss(res, budget, pool, N){
+    const T = Math.floor(budget / 100) * 100, maxBets = budget <= 1000 ? 5 : 10;
+    const picked = []; let req = 0;
+    for (const c of pool){
+      if (picked.length >= maxBets) break;
+      if (!(c.odds >= MIN_ODDS)) continue;
+      const need = (Math.floor(T / (100 * c.odds)) + 1) * 100;     // need × odds ＞ T になる最小の額
+      if (req + need > T) continue;
+      picked.push({ ...c, stake: need }); req += need;
+    }
+    if (!picked.length) return null;
+    picked[0].stake += T - req;                                     // 余りは一番優先度の高い目に
+    const tickets = picked.sort((a, b) => b.stake - a.stake || b.ev - a.ev);
+    return { tickets, budget, growth: null, noLoss: true, minOdds: MIN_ODDS, ...evaluate(res, tickets, N, budget) };
+  }
   function plan(ctx, res, budget, cands){
     if (!cands) return { noOdds: true };
     res = cands.wres;
     cands = { ...cands, list: restrict(cands.list) };
     const good = cands.list.filter(c => c.ev >= EV_MIN && c.evL >= 1.0);
     const evmax = planEVMax(cands, budget, cands.wres, ctx.N);
-    const kelly = good.length ? allocate(ctx, res, budget, good.sort((a, b) => b.evL - a.evL).slice(0, 40), false) : null;
+    const kelly = good.length ? allocateNoLoss(res, budget, good.sort((a, b) => b.evL - a.evL).slice(0, 40), ctx.N) : null;
     if (kelly) return { ...kelly, mode: "勝負", evmax };
     // 勝負できる買い目がないレースでも、1レース分の予算で「損の見込みが最も小さい買い方」を出す（見送り推奨）。
     // 的中率5%未満の大穴は除き（結果のぶれが大きすぎるため）、期待値の高い順の候補から選ぶ
     const pool = cands.list.filter(c => c.p >= 0.05).sort((a, b) => b.ev - a.ev).slice(0, 30);
-    const skip = pool.length ? allocate(ctx, res, budget, pool, true) : null;
+    const skip = pool.length ? allocateNoLoss(res, budget, pool, ctx.N) : null;
     const ref = cands.list.slice().sort((a, b) => b.ev - a.ev).slice(0, 3);
     return { none: true, ref, evmax, skip: skip ? { ...skip, mode: "見送り推奨" } : null };
   }
@@ -297,7 +317,7 @@ const Bets = (() => {
   // 期待値（払戻の平均）だけを最大にする買い方＝期待値が最も高い1点に全額。
   // 確率が小さすぎる買い目は推定誤差が大きいので、誤差を見込んだ控えめな期待値 evL で選ぶ。
   function planEVMax(cands, budget, res, N){
-    const c = cands.list.filter(x => x.evL >= 1.0).sort((a, b) => b.evL - a.evL)[0];
+    const c = cands.list.filter(x => x.evL >= 1.0 && x.odds >= MIN_ODDS).sort((a, b) => b.evL - a.evL)[0];
     if (!c) return null;
     const t = { ...c, stake: Math.floor(budget / 100) * 100 };
     return { tickets: [t], budget, ...evaluate(res, [t], N, budget) };
@@ -327,6 +347,6 @@ const Bets = (() => {
     return { expReturn: sum / tw, staked, hitRate: hit / tw, profitRate: profit / tw, avgHitPay: hit ? hitSum / hit : 0, maxPay };
   }
 
-  return { candidates, plan, EV_MIN, setMarketBeta, setCalibration, get BETA(){ return BETA; }, get CAL(){ return CAL; }, get EXPS(){ return exps(); }, setBodyWeightEffects, get BWE(){ return BWE; }, bwOf, setLongshot, get LS(){ return !!LSF; } };
+  return { candidates, plan, EV_MIN, MIN_ODDS, setMarketBeta, setCalibration, get BETA(){ return BETA; }, get CAL(){ return CAL; }, get EXPS(){ return exps(); }, setBodyWeightEffects, get BWE(){ return BWE; }, bwOf, setLongshot, get LS(){ return !!LSF; } };
 })();
 if (typeof module !== "undefined") module.exports = Bets;

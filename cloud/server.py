@@ -325,6 +325,9 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path == "/api/prereg":
             fp = DATA / "prereg.json"
             return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {})
+        if u.path == "/api/autosearch":
+            fp = DATA / "autosearch.json"
+            return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {"sets": []})
         if u.path == "/api/learn" and q.get("count"):
             fp = DATA / "learn.json"
             n = len(json.loads(fp.read_text(encoding="utf-8")).get("records", [])) if fp.exists() else 0
@@ -421,6 +424,24 @@ class Handler(SimpleHTTPRequestHandler):
                     log(f"本番テスト：{len(seen)}開催日を見た日として封印しました")
                 elif j.get("action") == "open" and cur.get("seen") and not cur.get("opened") and isinstance(j.get("result"), dict):
                     cur["opened"] = {"at": now, "result": j["result"]}; fp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8"); log("本番テスト：開封しました")
+                else: return self._json({"ok": False, "message": "指定が正しくありません"}, 400)
+                threading.Thread(target=lambda: _safe(lambda: _push_after(None)), daemon=True).start()
+                return self._json({"ok": True})
+            except Exception as ex: return self._json({"ok": False, "message": str(ex)}, 400)
+        if u.path == "/api/autosearch":
+            # 自動探索で固定したルールの保存：追記だけ（固定した日時はサーバーが記録し、あとから書き換えられない）
+            n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8") if n else "{}"
+            try:
+                j = json.loads(body or "{}"); fp = DATA / "autosearch.json"
+                cur = json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {"sets": []}
+                if j.get("action") == "freeze" and isinstance(j.get("rules"), list) and j["rules"] and j.get("cutoff"):
+                    now = dt.datetime.now().isoformat(timespec="seconds")
+                    if any(s.get("cutoff") == j["cutoff"] for s in cur["sets"]): return self._json({"ok": False, "message": "この日までのデータでは、すでに固定済みです"}, 400)
+                    cur["sets"].append({"id": len(cur["sets"]) + 1, "frozenAt": now, "cutoff": str(j["cutoff"]), "ver": j.get("ver"), "tested": j.get("tested"), "rules": j["rules"]})
+                    tmp = fp.with_suffix(".tmp"); tmp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8"); os.replace(tmp, fp)
+                    log(f"自動探索：{j['cutoff']}までのデータで{len(j['rules'])}本のルールを固定しました")
+                elif j.get("action") == "auto":
+                    cur["auto"] = bool(j.get("on")); tmp = fp.with_suffix(".tmp"); tmp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8"); os.replace(tmp, fp)
                 else: return self._json({"ok": False, "message": "指定が正しくありません"}, 400)
                 threading.Thread(target=lambda: _safe(lambda: _push_after(None)), daemon=True).start()
                 return self._json({"ok": True})
