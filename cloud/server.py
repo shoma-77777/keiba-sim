@@ -464,13 +464,13 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 j = json.loads(body)
                 lp = DATA / "learn.json"
-                if "records" in j: recs = j["records"]
-                else:   # 追加分だけ送られてきたとき（過去データの一括学習など）：保存済みの記録に合わせる
-                    old = json.loads(lp.read_text(encoding="utf-8")).get("records", []) if lp.exists() else []
-                    m = {r["id"]: r for r in old}
-                    for r in j.get("append") or []:
-                        o = m.get(r["id"]); m[r["id"]] = {**r, "bets": r.get("bets") or (o or {}).get("bets")}
-                    recs = sorted(m.values(), key=lambda r: (r.get("date", ""), r.get("id", "")))
+                # 記録は絶対に減らさない：送られてきた記録（records でも append でも）を、保存済みの記録に上書き・追加する
+                old = json.loads(lp.read_text(encoding="utf-8")).get("records", []) if lp.exists() else []
+                m = {r["id"]: r for r in old}
+                for r in (j.get("records") or []) + (j.get("append") or []):
+                    o = m.get(r["id"]); m[r["id"]] = {**r, "bets": r.get("bets") or (o or {}).get("bets")}
+                recs = sorted(m.values(), key=lambda r: (r.get("date", ""), r.get("id", "")))
+                if len(recs) < len(old): return self._json({"ok": False, "message": "記録が減る保存は受け付けません"}, 400)
                 model = j.get("model")
                 # 記録の一部だけで学習したモデル（空のモデルなど）で、保存済みの記録全体のモデルを上書きしない
                 if not isinstance(model, dict) or (model.get("races") or 0) < len(recs) * 0.9:
@@ -479,7 +479,15 @@ class Handler(SimpleHTTPRequestHandler):
                     model = old_m if isinstance(old_m, dict) and (old_m.get("races") or 0) >= (model or {}).get("races", 0) else model
                     model_ok = False
                 else: model_ok = True
-                lp.write_text(json.dumps({"model": model, "records": recs}, ensure_ascii=False), encoding="utf-8")
+                # 書き込みの途中で止まっても壊れないよう、別のファイルに書いてから入れ替える。1日1回、前の版を残す（learn_YYYYMMDD.json・最新7つ）
+                if lp.exists():
+                    bk = DATA / "backup"; bk.mkdir(exist_ok=True)
+                    bf = bk / f"learn_{dt.date.today().strftime('%Y%m%d')}.json"
+                    if not bf.exists() and len(old) > 0:
+                        shutil.copyfile(lp, bf)
+                        for x in sorted(bk.glob("learn_*.json"))[:-7]: x.unlink()
+                tmp = DATA / "learn.json.tmp"
+                tmp.write_text(json.dumps({"model": model, "records": recs}, ensure_ascii=False), encoding="utf-8"); os.replace(tmp, lp)
                 if model_ok: (DATA / "learn_model.json").write_text(json.dumps(model, ensure_ascii=False), encoding="utf-8")
                 log(f"学習を更新しました（{len(recs)}レース分）")
                 global LAST_LEARN_PUSH

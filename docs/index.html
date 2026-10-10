@@ -5644,10 +5644,15 @@ async function makeReport(deep){
   try {
     // PCでは過去データの処理が持っている記録（最新）をそのまま使う（同じ記録を二重に読み込んでメモリを使わないように）
     let recs = !SERVER.cloud ? BF.recs : null;
+    if (recs && !recs.length) recs = null;      // 空の記録が残っていたら、サーバーから読み直す
     if (!recs){ const full = SERVER.cloud ? await staticJson("learn.json", 120000) : await api("/api/learn?full=1", { timeout: 300000 }); recs = full.records || []; if (!SERVER.cloud && !BF.recs) BF.recs = recs; }
     await new Promise(r => setTimeout(r, 30));
+    if (!recs.length){ let cnt = null; try { cnt = (await api("/api/learn?count=1")).records; } catch (e) {}
+      throw new Error(`学習の記録を読み込めませんでした（サーバーの記録 ${cnt ?? "不明"}件）。アプリを再起動してもう一度押してください。0件なら data/learn.json を確認してください`); }
+    BF.recs = BF.recs?.length ? BF.recs : (SERVER.cloud ? BF.recs : recs);
     await loadPrereg();
     REPORT.r = await Learn.report(recs, { holdout: holdOpt(), deep: !!deep });
+    if (REPORT.r && !REPORT.r.ok) toast(`記録 ${recs.length.toLocaleString()}件のうち、検証に使える記録が${REPORT.r.n}件でした（封印の設定：${PREREG_ST.d?.seen?.length ?? 0}開催日）`);
   } catch (e) { toast("レポートを作れませんでした：" + e.message); diagSend?.("report", { msg: String(e?.message || e).slice(0, 300), stack: String(e?.stack || "").split("\n").slice(0, 3).join(" | ") }); }
   finally { REPORT.busy = false; try { renderLearnTab(); } catch (e) { toast("表示でエラー：" + e.message); } }
 }
@@ -5665,6 +5670,7 @@ async function fillPositions(){
     while (BF.proc) await bfSleep(500);
     const full = await api("/api/learn?full=1", { timeout: 120000 });
     const recs = full.records || [], byId = new Map(recs.map(r => [r.id, r]));
+    if (!recs.length) throw new Error("学習の記録を読み込めませんでした（0件）");
     const need = fillNeed;     // 位置取り・能力の内訳・前走の内容（道中の位置変化まで）・複勝の払戻のどれかが欠けている記録
     const changed = [];
     Object.values(DB.races).forEach(r => { const rec = byId.get(r.id); if (need(rec) && Learn.posFill(rec, r, DB.horses, Engine)) changed.push(rec); });
@@ -6355,7 +6361,9 @@ async function runLearn(d){
   // 取得済みのすべての開催日（土曜・過去の日を含む）で、結果の出ているレースを学習に使う
   const races = Object.values(DB.races).filter(r => r.result?.rows?.length && r.entries?.length);
   if (!races.length) return null;
-  const full = await api("/api/learn?full=1").catch(() => ({}));
+  // 記録を読み込めなかったときは学習しない（読めないまま進めると、今日の分だけで記録を上書きしてしまうため）
+  const full = BF.recs?.length ? { records: BF.recs } : await api("/api/learn?full=1", { timeout: 300000 });
+  if (!full || !Array.isArray(full.records)) throw new Error("学習の記録を読み込めませんでした");
   // 作り方が古い記録（未来の出走歴が混ざりうる版など）は、データが手元にあれば作り直す
   // その日より前の記録だけで学習したモデルで作ったと確認できない記録（clean でないもの）も作り直す
   const done = new Set((full.records || []).filter(x => (x.rv || 0) >= Learn.RV && Learn.clean(x)).map(x => x.id));
@@ -6373,10 +6381,11 @@ async function runLearn(d){
     finally { applyLearn(BF.full || keep); simBusy = false; }
   }
   // 既に記録済みのレースにも、答え合わせの仮想収支を付け足す
-  (full.records || []).forEach(x => { if (!x.bets) x.bets = betsOf({ id: x.id, date: x.date }); });
+  const touched = []; (full.records || []).forEach(x => { if (!x.bets){ const b = betsOf({ id: x.id, date: x.date }); if (b){ x.bets = b; touched.push(x); } } });
   const all = Learn.merge(full.records, recs);
   const model = Learn.build(all, all.reduce((m, x) => x.date > m ? x.date : m, d));
-  await api("/api/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, records: all }) });
+  await api("/api/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, append: recs.concat(touched) }), timeout: 300000 });
+  BF.recs = all;
   applyLearn(model);
   setUpdProgress(1, `学習を更新しました（累計${model.races}レース）`);
   return model;
