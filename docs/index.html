@@ -5638,7 +5638,9 @@ function holdoutPanel(H){
     ${SERVER.enabled && !SERVER.cloud ? `<div class="ctrls"><button class="btn" data-prereg="seal" ${PREREG_ST.busy ? "disabled" : ""}>新しく封印し直す（今の結果は履歴に残ります）</button></div>` : ""}`;
 }
 async function makeReport(deep){
-  if (REPORT.busy) return; REPORT.busy = true; renderLearnTab();
+  if (REPORT.busy && Date.now() - (REPORT.since || 0) < 15 * 60000) { toast("検証レポートを作っている途中です（数分お待ちください）"); return; }
+  REPORT.busy = true; REPORT.since = Date.now(); toast(deep ? "詳しい検証を作っています（数分かかります）" : "検証レポートを作っています（1〜2分）");
+  try { renderLearnTab(); } catch (e) {}
   try {
     // PCでは過去データの処理が持っている記録（最新）をそのまま使う（同じ記録を二重に読み込んでメモリを使わないように）
     let recs = !SERVER.cloud ? BF.recs : null;
@@ -5646,8 +5648,8 @@ async function makeReport(deep){
     await new Promise(r => setTimeout(r, 30));
     await loadPrereg();
     REPORT.r = await Learn.report(recs, { holdout: holdOpt(), deep: !!deep });
-  } catch (e) { toast("レポートを作れませんでした：" + e.message); }
-  REPORT.busy = false; renderLearnTab();
+  } catch (e) { toast("レポートを作れませんでした：" + e.message); diagSend?.("report", { msg: String(e?.message || e).slice(0, 300), stack: String(e?.stack || "").split("\n").slice(0, 3).join(" | ") }); }
+  finally { REPORT.busy = false; try { renderLearnTab(); } catch (e) { toast("表示でエラー：" + e.message); } }
 }
 // 付け足しがまだの記録の数（新しい材料を足したときも、ボタンが出るように）
 const fillNeed = r => r && (!("pay" in r) || r.h.some(h => !("plp" in h) || !("hid" in h) || !("jk" in h) || !("hx" in h) || !("hy" in h) || h.ct === undefined || (h.ct && h.ct.length < 4)));
@@ -6279,6 +6281,9 @@ function bfPanel(){
   </div>`;
 }
 
+// 学習・成績タブの描画。どこかの表でエラーが出ても、画面とボタンが止まらないようにする（エラーの内容は画面と data/client_log.txt に残す）
+function safePanel(name, fn){ try { return fn(); } catch (e) { console.error(e); diagSend?.("panel", { name, msg: String(e?.message || e).slice(0, 300), stack: String(e?.stack || "").split("\n").slice(0, 3).join(" | ") });
+  return `<div class="learnbox"><h3>${esc(name)}</h3><p class="small neg">この欄を表示できませんでした：${esc(String(e?.message || e))}（この文をそのまま送ってください）</p>${name === "検証レポート" ? `<div class="ctrls"><button class="btn primary" id="mkReport">作り直す（軽い版）</button><button class="btn" id="mkReportDeep">詳しい検証も作る</button></div>` : ""}</div>`; } }
 function renderLearnTab(){
   if (!JRAC.st && !JRAC.loading && SERVER.enabled && !SERVER.cloud){ JRAC.loading = true; jraStatus().then(() => { if (ST.tab === "learn") renderLearnTab(); }); }
   const el = $("#p-learn"); if (!el) return;
@@ -6307,7 +6312,7 @@ function renderLearnTab(){
     ${m ? learnPanel() : ""}
     ${lockPanel()}
     ${histPanel()}
-    ${reportPanel()}
+    ${safePanel("検証レポート", reportPanel)}
     ${crossPanel()}
     ${jraProbePanel()}
     ${bodyWeightPanel()}
