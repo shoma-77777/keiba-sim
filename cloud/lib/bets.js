@@ -270,9 +270,18 @@ const Bets = (() => {
     const growth = (() => { let s = 0; for (let m = 0; m < Msz; m++) s += QW[m] * Math.log(W[m] / (budget * BANK_MUL)); return s / qs; })();
     return { tickets, budget, growth, ...evaluate(res, tickets, N, budget) };
   }
+  // 買い方の方針（2026-10の検証結果から）：組み合わせ馬券は ワイド・馬連・3連複 だけ（馬単は外す）。単勝・複勝は1レースで1頭1点まで（期待値が一番高いもの）。
+  // 期待値は「単勝の売上から計算した確率」と「その組み合わせの実際のオッズ」のずれ＝売れ残っている目を拾う考え方（券種ごとのずれ）。
+  const ALLOW = new Set(["ワイド", "馬連", "三連複", "単勝", "複勝"]);
+  function restrict(list){
+    const ex = list.filter(c => ALLOW.has(c.type) && c.type !== "単勝" && c.type !== "複勝");
+    const wp = list.filter(c => c.type === "単勝" || c.type === "複勝").sort((a, b) => b.evL - a.evL)[0];
+    return wp ? [...ex, wp] : ex;
+  }
   function plan(ctx, res, budget, cands){
     if (!cands) return { noOdds: true };
     res = cands.wres;
+    cands = { ...cands, list: restrict(cands.list) };
     const good = cands.list.filter(c => c.ev >= EV_MIN && c.evL >= 1.0);
     const evmax = planEVMax(cands, budget, cands.wres, ctx.N);
     const kelly = good.length ? allocate(ctx, res, budget, good.sort((a, b) => b.evL - a.evL).slice(0, 40), false) : null;
