@@ -5389,6 +5389,19 @@ function dkTickets(order, d){
   B.push(t("複勝", [d]));
   return { dkA: A, dkB: B };
 }
+// ===== 固定ルール「馬連 ◎-○」（2026-10-11 固定・これより後のレースだけで成績を数える）=====
+//  元：◎（シミュレーションの1着率1位）が1番人気でなく、○（2位）が1番人気 → 馬連 ◎-○ を1点
+//  おすすめ：さらに ○の単勝2倍以上・出走13頭以上
+//  過去の参考（2024-10〜2026-10・6,952レース）：元 1,326R 112.1%／おすすめ 889R 124.1%（ルールは過去を見て決めたので参考値）
+const MO_FROM = "2026-10-11";
+function moTickets(w, f){
+  if (!w?.[1]) return { mo: null, mo2: null };
+  const mkt = f.filter(x => x.odds > 1).sort((a, b) => a.odds - b.odds), fav = mkt[0]; if (!fav || mkt.length < 2) return { mo: null, mo2: null };
+  const a = w[0], b = w[1], fb = f[b.i];
+  if (a.num === fav.num || b.num !== fav.num) return { mo: null, mo2: null };
+  const t = [{ type: "馬連", nums: [a.num, b.num].sort((x, y) => x - y), stake: 1000 }];
+  return { mo: t, mo2: fb.odds >= 2 && mkt.length >= 13 ? t : null };
+}
 function summarizeSim(r, sim){
   const w = sim.weighted.slice().sort((a, b) => b.win - a.win);
   const f = sim.ctx.field;
@@ -5421,6 +5434,7 @@ function summarizeSim(r, sim){
     tri: tri ? { nums: tri.idx.map(i => f[i].num), p: tri.p } : null,
     dark: sim.dark ? { num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: MM ? MM.place[sim.dark.i] : sim.dark.a.top3, win: MM ? MM.win[sim.dark.i] : sim.dark.a.win, jockey: sim.dark.f.jockey || null, style: sim.dark.f.prof?.style || null, why: darkWhy(sim) } : null,
     ...dkTickets(w.map(x => x.num), sim.dark?.f.num),
+    ...moTickets(w, f),
     fr: (() => { const H = f.filter(x => x.odds > 1), pw = MM ? H.map(x => MM.win[f.indexOf(x)]) : H.map(x => sim.weighted.find(s2 => s2.num === x.num)?.win || 0);
       const pk = Learn.frontPick(H, H.map(x => x.earlyPos ?? null), H.map((x, i) => [x.num, pw[i]]).sort((a, b) => b[1] - a[1]).map(x => x[0])); return pk ? pk.tickets : null; })(),
     bet: planTxt(sim.plans?.[1000]), bet5: planTxt(sim.plans?.[5000]), k1: kp(sim.plans?.[1000]), k5: kp(sim.plans?.[5000]), evm1: evm(sim.plans?.[1000]),
@@ -6452,7 +6466,7 @@ async function bfProcessDay(j, left){
     const result = fast ? { n: races.length, fast: true, tot: {} } : { n: c.n, fav1: c.fav1, fav3: c.fav3, dark3: c.dark3, darkN: c.darkN, a: Bets.CAL.a, b: Bets.CAL.b,
       tot: Object.fromEntries(Object.entries(c.tot).map(([k, t]) => [k, { inv: t.invest, ret: Math.round(t.ret), races: t.races, hit: t.hitRaces }])) };
     // ③ 学習（その日の結果を記録して、次の日からの予想に使う）
-    const betsOf = r => { if (fast) return null; const p = c.per[r.id]; if (!p) return null; const pick = k => p.plans[k] ? [p.plans[k].inv, Math.round(p.plans[k].ret)] : [0, 0]; return { t1: pick("1000"), t5: pick("5000"), te: pick("e1000"), t1s: pick("1000s"), t5s: pick("5000s"), dkA: pick("dkA"), dkB: pick("dkB"), fr: pick("fr"), src: "backfill", ...predDetail(BATCH.rows[r.id]) }; };
+    const betsOf = r => { if (fast) return null; const p = c.per[r.id]; if (!p) return null; const pick = k => p.plans[k] ? [p.plans[k].inv, Math.round(p.plans[k].ret)] : [0, 0]; return { t1: pick("1000"), t5: pick("5000"), te: pick("e1000"), t1s: pick("1000s"), t5s: pick("5000s"), dkA: pick("dkA"), dkB: pick("dkB"), fr: pick("fr"), mo: pick("mo"), mo2: pick("mo2"), src: "backfill", ...predDetail(BATCH.rows[r.id]) }; };
     setUpdProgress(1, `過去データ ${d}：結果を学習中`);
     // 記録（モデルの確率など）も、その日より前のデータで学習したモデルの状態で作る（検証に未来の情報が混ざらないように）
     while (simBusy || BATCH.running || CHECK_ALL.running) await bfSleep(200);
@@ -6505,7 +6519,7 @@ function bfPanel(){
   const sum = {}; const byYear = {};
   days.forEach(k => { const r = P[k]; Object.entries(r.tot || {}).forEach(([pk, t]) => { const a = (sum[pk] ||= { inv: 0, ret: 0, races: 0, hit: 0 }); a.inv += t.inv; a.ret += t.ret; a.races += t.races; a.hit += t.hit;
     const yk = k.slice(0, 4), b = ((byYear[yk] ||= {})[pk] ||= { inv: 0, ret: 0, races: 0 }); b.inv += t.inv; b.ret += t.ret; b.races += t.races; }); });
-  const L = { "1000": "1,000円（勝負だけ）", "1000s": "1,000円（全レース）", "5000": "5,000円（勝負だけ）", "5000s": "5,000円（全レース）", "e1000": "期待値最大1点", "dkA": "注目穴馬入り BOX型 1,000円", "dkB": "注目穴馬入り フォーメ型 1,000円", "fr": "前残り穴 1,000円（ルール固定）" };
+  const L = { "1000": "1,000円（勝負だけ）", "1000s": "1,000円（全レース）", "5000": "5,000円（勝負だけ）", "5000s": "5,000円（全レース）", "e1000": "期待値最大1点", "dkA": "注目穴馬入り BOX型 1,000円", "dkB": "注目穴馬入り フォーメ型 1,000円", "fr": "前残り穴 1,000円（ルール固定）", "mo": "馬連◎-○ 固定ルール・元（過去の参考）", "mo2": "馬連◎-○ 固定ルール・おすすめ（過去の参考）" };
   const rate = t => t?.inv ? Math.round(t.ret / t.inv * 100) + "%" : "—";
   const nR = days.reduce((a, k) => a + (P[k].n || 0), 0);
   const last = days.length ? P[days[days.length - 1]] : null;
@@ -6703,7 +6717,7 @@ function betsForLearn(d, id){
   const c = CHECK[d]?.per?.[id]; if (!c) return null;
   const pick = k => c.plans[k] ? [c.plans[k].inv, Math.round(c.plans[k].ret)] : [0, 0];
   const row = checkRows(d, "pre").find(x => x.r.id === id)?.row;
-  return { t1: pick("1000"), t5: pick("5000"), te: pick("e1000"), t1s: pick("1000s"), t5s: pick("5000s"), dkA: pick("dkA"), dkB: pick("dkB"), fr: pick("fr"), ...predDetail(row) };
+  return { t1: pick("1000"), t5: pick("5000"), te: pick("e1000"), t1s: pick("1000s"), t5s: pick("5000s"), dkA: pick("dkA"), dkB: pick("dkB"), fr: pick("fr"), mo: pick("mo"), mo2: pick("mo2"), ...predDetail(row) };
 }
 function upsetPanel(d){
   const m = LEARN.model; if (!m?.upsets) return "";
@@ -6759,6 +6773,7 @@ function computeCheck(d){
   const plans = { "1000": { label: "1,000円（勝負レースだけ）", key: "t1", alt: "bet" }, "5000": { label: "5,000円（勝負レースだけ）", key: "t5", alt: "bet5" },
     "1000s": { label: "1,000円（全レース・見送り推奨も購入）", key: "t1s" }, "5000s": { label: "5,000円（全レース・見送り推奨も購入）", key: "t5s" }, "e1000": { label: "期待値最大 1点（1,000円）", key: "te" }, "e5000": { label: "期待値最大 1点（5,000円）", key: "te5" },
     "fr": { label: "前残り穴 1,000円（ルール固定：前に行く馬2頭以下のレースで、前に行く10倍以上の馬からワイド3点＋馬連2点）", key: "fr" },
+    "mo": { label: "馬連 ◎-○ 1,000円（固定ルール・元：◎が1番人気以外で○が1番人気）", key: "mo" }, "mo2": { label: "馬連 ◎-○ 1,000円（固定ルール・おすすめ：元＋○の単勝2倍以上・13頭以上）", key: "mo2" },
     "dkA": { label: "注目穴馬入り BOX型 1,000円（ワイドBOX3点＋3連複6点＋複勝）", key: "dkA" }, "dkB": { label: "注目穴馬入り フォーメーション型 1,000円（ワイド2点＋3連複7点＋複勝）", key: "dkB" } };
   const tot = {};
   Object.entries(plans).forEach(([k, p]) => tot[k] = { ...p, invest: 0, ret: 0, races: 0, hitRaces: 0 });
@@ -6813,7 +6828,7 @@ async function sendBetsToCloud(d){
 }
 // ===== 成績の一覧（ひと目で比べる）：指定レース・この日・これまでの累計 × 4つの買い方 =====
 const PERF = { race: null, loading: false };
-const PERF_PLANS = [["1000", "t1", "勝負レースだけ", "1,000円"], ["5000", "t5", "勝負レースだけ", "5,000円"], ["1000s", "t1s", "全レース", "1,000円"], ["5000s", "t5s", "全レース", "5,000円"], ["fr", "fr", "前残り穴（ルール固定）", "1,000円"], ["dkA", "dkA", "注目穴馬入り BOX型", "1,000円"], ["dkB", "dkB", "注目穴馬入り フォーメ型", "1,000円"]];
+const PERF_PLANS = [["1000", "t1", "勝負レースだけ", "1,000円"], ["5000", "t5", "勝負レースだけ", "5,000円"], ["1000s", "t1s", "全レース", "1,000円"], ["5000s", "t5s", "全レース", "5,000円"], ["mo2", "mo2", "馬連◎-○ おすすめ（10/11固定）", "1,000円"], ["mo", "mo", "馬連◎-○ 元（10/11固定）", "1,000円"], ["fr", "fr", "前残り穴（ルール固定）", "1,000円"], ["dkA", "dkA", "注目穴馬入り BOX型", "1,000円"], ["dkB", "dkB", "注目穴馬入り フォーメ型", "1,000円"]];
 function perfCell(x, empty){
   if (!x || !x.n) return `<td><div class="big" style="color:var(--muted)">—</div><div class="sub">${empty || "購入なし"}</div></td>`;
   const roi = x.inv ? x.ret / x.inv : 0, prof = x.ret - x.inv;
@@ -6825,7 +6840,7 @@ function perfCum(){
   const recs = SERVER.cloud ? HIST.recs : BF.recs; if (!recs) return null;
   const out = {}; PERF_PLANS.forEach(([, key]) => out[key] = { n: 0, inv: 0, ret: 0, hit: 0 });
   let races = 0;
-  recs.forEach(r => { if (!r.bets) return; races++; PERF_PLANS.forEach(([, key]) => { const v = r.bets[key]; if (v && v[0] > 0){ const o = out[key]; o.n++; o.inv += v[0]; o.ret += v[1]; if (v[1] > 0) o.hit++; } }); });
+  recs.forEach(r => { if (!r.bets) return; races++; PERF_PLANS.forEach(([, key]) => { const v = r.bets[key]; if ((key === "mo" || key === "mo2") && r.date < MO_FROM) return; if (v && v[0] > 0){ const o = out[key]; o.n++; o.inv += v[0]; o.ret += v[1]; if (v[1] > 0) o.hit++; } }); });
   return { out, races };
 }
 function perfLoad(){
@@ -6846,7 +6861,7 @@ function perfDashboard(d){
   return `<div class="tbl-wrap"><table class="perf"><thead><tr><th class="rowh"></th>${PERF_PLANS.map(([, , a, b]) => `<th>${a}<br><b>${b}</b></th>`).join("")}</tr></thead><tbody>
     <tr><td class="rowh">指定レース<br>${sel}${pr ? `<div class="sub">結果 ${pr.order.join("→")}</div>` : ""}</td>${raceRow.map(perfCell).join("")}</tr>
     <tr><td class="rowh">${esc(d.slice(5).replace("-", "/"))} の合計<div class="sub">${c.n}レース</div></td>${dayRow.map(perfCell).join("")}</tr>
-    <tr><td class="rowh">これまでの累計<div class="sub">${cum ? `学習した${cum.races.toLocaleString()}レース` : PERF.loading ? "読み込み中…" : PERF.err ? "読み込めませんでした" : ""}</div></td>${cum ? PERF_PLANS.map(([, key]) => perfCell(cum.out[key], key === "t5s" || key === "dkA" || key === "dkB" || key === "fr" ? "該当なし・まだ記録なし" : null)).join("") : `<td colspan="${PERF_PLANS.length}"><div class="sub">${PERF.loading ? "読み込み中…" : "累計は、学習の記録がある端末（PCのアプリ）で表示されます"}</div></td>`}</tr>
+    <tr><td class="rowh">これまでの累計<div class="sub">${cum ? `学習した${cum.races.toLocaleString()}レース` : PERF.loading ? "読み込み中…" : PERF.err ? "読み込めませんでした" : ""}</div></td>${cum ? PERF_PLANS.map(([, key]) => perfCell(cum.out[key], key === "t5s" || key === "dkA" || key === "dkB" || key === "fr" || key === "mo" || key === "mo2" ? "該当なし・まだ記録なし（10/11から記録）" : null)).join("") : `<td colspan="${PERF_PLANS.length}"><div class="sub">${PERF.loading ? "読み込み中…" : "累計は、学習の記録がある端末（PCのアプリ）で表示されます"}</div></td>`}</tr>
     </tbody></table></div>
     <p class="small">回収率が100%以上のマスは緑の枠。的中率は「当たったレース÷買ったレース」。勝負レースだけ＝「勝負」と判定したレースだけ購入、全レース＝「見送り推奨」のレースも購入。累計は過去データ（その日より前のデータだけで学習したモデルの予想）と、これまでの答え合わせ（発走前の予想）の合計${cum && cum.out.t5s.n < cum.out.t1s.n ? `。<b>全レース5,000円の累計は、記録を始めた後の ${cum.out.t5s.n.toLocaleString()}レース分だけ</b>（「過去データで学習」の「予想し直す」をすると全レース分になります）` : ""}。注目穴馬入り＝注目穴馬を必ず入れた1,000円（BOX型：ワイドBOX［穴・◎・○］3点＋3連複 穴軸－◎○▲△ 6点＋穴の複勝／フォーメ型：ワイド 穴－◎・○ 2点＋3連複 穴－◎○－◎○▲△☆ 7点＋穴の複勝。◎○…はシミュレーションの1着率の順）${cum && cum.out.dkA.n < cum.out.t1s.n ? `。<b>注目穴馬入りの累計は、この版から記録した ${cum.out.dkA.n.toLocaleString()}レース分だけ</b>（過去分は「過去データで学習」の「全開催日を予想し直す」〔高速モードは外す〕で入ります）` : ""}。</p>`;
 }
@@ -7022,6 +7037,7 @@ function renderAllTab(){
       ${x.pace ? `<div class="line small">展開予想 <b>${PACE_JA[x.pace.best]}ペース ${pct(x.pace[x.pace.best])}%</b>（前に行く馬${x.pace.front}頭）</div>` : ""}
       <div class="marks">${x.marks.map((m, k) => `<span class="mk">${MARKS[k]}</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">1着${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}${(x.subs || []).filter(m => m.num !== starOf(x)?.num).map(m => `<span class="mk">△</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気）</span>` : ""}</span><span class="wpct">1着${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}${(() => { const m = starOf(x); return m ? `<span class="mk">☆</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">1着${pct(m.win)}%・3着内${pct(m.top3)}%</span>` : ""; })()}</div>
       ${ftLine(d, r)}
+      ${x.mo?.length ? `<div class="line"><span class="verdict go">馬連 ◎-○（固定ルール）</span> <b>${x.mo[0].nums.join("-")}</b> 1,000円${x.mo2?.length ? ` <span class="pos">おすすめ版にも該当</span>` : ` <span class="small">（元のルールのみ）</span>`}</div>` : ""}
       ${x.fr?.length ? `<div class="line"><span class="chip ana">前残り穴</span> ${x.fr.map(t => `${t.type}${t.nums.join("-")}`).join("・")} <span class="small">（各200円・ルール固定）</span></div>` : ""}
       ${x.tri ? `<div class="line">最有力の3連単 <b>${x.tri.nums.join("→")}</b> <span class="small">（${pct(x.tri.p)}%）</span></div>` : ""}
       ${x.dark ? `<div class="line">注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}${x.dark.win != null ? "勝率" + pct(x.dark.win) + "%・" : ""}3着内${pct(x.dark.top3)}%</span>${bestDark === x ? ` <span class="chip ana">この日の最注目穴馬</span>` : ""}</div>` : ""}
