@@ -1714,7 +1714,8 @@ const Learn = (() => {
   };
   const AS_BAND = { B1: "1〜3番人気", B2: "4〜6番人気", B3: "7〜9番人気", B4: "10番人気以下" };
   const AS_FE = FEATS.slice(0, 20);   // 21要素のうち「人気変動」を除く（オッズの動きは使わない）
-  function asBuild(recs){
+  // live：まだ走っていないレースの記録（結果なし）。同じ指標を作り、H の後ろに live:true で足す（騎手などの成績は過去の分だけで計算）
+  function asBuild(recs, live){
     const R = recs.filter(r => r.h && r.pay && r.pay["単勝"] && r.h.length >= 6).slice().sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : (a.id < b.id ? -1 : 1));
     const bin = o => Math.min(45, Math.floor(Math.log(o) / Math.log(1.12)));
     const BT = {}; for (const r of R) for (const h of r.h){ if (!(h.pos > 0 && h.odds)) continue; const b = BT[bin(h.odds)] || (BT[bin(h.odds)] = { n: 0, t: 0 }); b.n++; if (h.pos <= 3) b.t++; }
@@ -1725,9 +1726,10 @@ const Learn = (() => {
     const lift = (k, min) => { const o = jt[k]; return o && o.n >= min && o.e > 0 ? o.a / o.e : null; };
     const cntJ = {}, cntT = {}; for (const r of R) for (const h of r.h){ if (h.jk) cntJ[h.jk] = (cntJ[h.jk] || 0) + 1; if (h.tr) cntT[h.tr] = (cntT[h.tr] || 0) + 1; }
     let day = null, pend = [];
-    for (const r of R){
-      if (r.date !== day){ for (const [k, a, e] of pend) up(k, a, e); pend = []; day = r.date; }
-      const hs = r.h.filter(h => h.pos > 0 && h.odds && h.pop); if (hs.length < 6) continue;
+    const ALL = R.map(r => [r, false]).concat((live || []).filter(r => r.h && r.h.length >= 6).map(r => [r, true]));
+    for (const [r, isLive] of ALL){
+      if (r.date !== day || isLive){ for (const [k, a, e] of pend) up(k, a, e); pend = []; day = r.date; }
+      const hs = r.h.filter(h => (isLive || h.pos > 0) && h.odds && h.pop); if (hs.length < 6) continue;
       const N = hs.length, byO = hs.slice().sort((a, b) => a.odds - b.odds), fav = byO[0], f1 = byO[0].num, f2 = byO[1].num, top4 = byO.slice(0, 4).map(h => h.num), top5 = byO.slice(0, 5).map(h => h.num);
       const byNum = {}; r.h.forEach(h => byNum[h.num] = h);
       const nige = r.h.filter(h => h.style === "逃げ").length, fronts = r.h.filter(h => h.style === "逃げ" || h.style === "先行").length;
@@ -1739,7 +1741,7 @@ const Learn = (() => {
       const dband = r.dist <= 1400 ? "短距離" : r.dist <= 1800 ? "マイル〜中距離" : "長め";
       const mon = +String(r.date).slice(5, 7), season = mon <= 2 || mon === 12 ? "冬" : mon <= 5 ? "春" : mon <= 8 ? "夏" : "秋";
       const course = `${r.venue}${r.surface}${r.dist}`;
-      const W = r.pay["ワイド"] || {}, T = r.pay["三連複"] || {}, okW = Object.keys(W).length > 0, ok3 = Object.keys(T).length > 0;
+      const W = (r.pay || {})["ワイド"] || {}, T = (r.pay || {})["三連複"] || {}, okW = Object.keys(W).length > 0, ok3 = Object.keys(T).length > 0;
       for (const h of hs){
         const f = []; const add = n => f.push(idx(n));
         const ab = h.ab || [], ct = h.ct || [], hx = h.hx || [], hy = h.hy || [], pp = h.pp || [];
@@ -1821,9 +1823,9 @@ const Learn = (() => {
         if (ok3 && !top5.includes(n)){ const o = top4.filter(m => m !== f1); let ret = 0; for (const m of o) ret += T[key([f1, m, n])] || 0; s.t1 = [o.length * 100, ret]; }
         if (ok3 && !top5.includes(n)){ let ret = 0, c = 0; for (let i = 0; i < 4; i++) for (let j = i + 1; j < 4; j++){ c++; ret += T[key([top4[i], top4[j], n])] || 0; } s.tb = [c * 100, ret]; }
         const band = h.pop <= 3 ? "B1" : h.pop <= 6 ? "B2" : h.pop <= 9 ? "B3" : "B4";
-        H.push({ d: r.date, id: r.id, num: n, f, band, s });
+        H.push({ d: r.date, id: r.id, num: n, f, band, s, live: isLive, rk: byO.indexOf(h) + 1, tan: ((r.pay || {})["単勝"] || {})[n] || 0 });
         const a3 = h.pos <= 3 ? 1 : 0, e3 = exp3(h.odds);
-        pend.push(["J" + h.jk, a3, e3], ["T" + h.tr, a3, e3], ["JV" + h.jk + r.venue, a3, e3], ["JT" + h.jk + h.tr, a3, e3], ["JC" + h.jk + r.surface + dband, a3, e3], ["TV" + h.tr + r.venue, a3, e3]);
+        if (!isLive) pend.push(["J" + h.jk, a3, e3], ["T" + h.tr, a3, e3], ["JV" + h.jk + r.venue, a3, e3], ["JT" + h.jk + h.tr, a3, e3], ["JC" + h.jk + r.surface + dband, a3, e3], ["TV" + h.tr + r.venue, a3, e3]);
       }
     }
     const Wn = Math.ceil(H.length / 32), bits = F.map(() => new Uint32Array(Wn)), cnt = F.map(() => 0);
@@ -1889,6 +1891,37 @@ const Learn = (() => {
     return { rows, stake: st, ret: rt, roi: st ? rt / st : null, passN: rows.filter(r => r.pass).length, over105: rows.filter(r => r.fwd.n >= 30 && r.fwd.roi >= 1.05).length };
   }
 
-  return { RV, AS_BETS, AS_BAND, asBuild, asSearch, asJudge, asIds, asPerf, frontPick, FRONT_RULE, histBuilder, darkReport, DARK_PREREG, PREREG, INC_RULES: INC_RULES.map(({ f, ...m }) => m), holdSplit, incEval, incCoverage, jtBuilder, report, clean, posFill, livePredict, prevBuilder, indBuild, crossCompact, crossReport, crossTickets, crossFitBeta, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
+  // ===== 21. 1番人気の信頼度 =====
+  //  1番人気と2番人気の馬の指標（約1,000個）から「1番人気の単勝の払戻（倍率）」を予想する線形モデル（5回作って平均）。
+  //  2026-10-11 の検証（4期間・その期間より前の記録だけで学習）：上位3割のレースだけ1番人気の単勝を買うと 87.7%（全レース 79%）、上位1割で 91.5%。100%は超えていない。
+  function ftTrain(D, seeds = 5){
+    const H = D.H, NF = D.F.length, use = []; for (let k = 0; k < NF; k++) if (D.cnt[k] >= 200) use.push(k);
+    const BK = { B1: 0, B2: 1, B3: 2, B4: 3 }, NU = use.length + 4;
+    const cnt = new Uint32Array(H.length);
+    const each = (b, fn) => { for (let w = 0; w < b.length; w++){ let x = b[w]; while (x){ const t = x & -x; fn((w << 5) + (31 - Math.clz32(t))); x ^= t; } } };
+    use.forEach(k => each(D.bits[k], i => cnt[i]++));
+    const ptr = new Uint32Array(H.length + 1); for (let i = 0; i < H.length; i++) ptr[i + 1] = ptr[i] + cnt[i] + 1;
+    const idx = new Uint16Array(ptr[H.length]), fill = new Uint32Array(H.length);
+    use.forEach((k, u) => each(D.bits[k], i => { idx[ptr[i] + fill[i]++] = u; }));
+    H.forEach((h, i) => { idx[ptr[i] + fill[i]] = use.length + BK[h.band]; });
+    const byRace = {}; H.forEach((h, i) => { if (h.rk !== 1 && h.rk !== 2) return; const o = byRace[h.id] || (byRace[h.id] = { id: h.id, d: h.d, live: h.live }); if (h.rk === 1) o.a = i; else o.b = i; });
+    const races = Object.values(byRace).filter(r => r.a != null && r.b != null);
+    races.forEach(r => { const f = []; for (let k = ptr[r.a]; k < ptr[r.a + 1]; k++) f.push(idx[k]); for (let k = ptr[r.b]; k < ptr[r.b + 1]; k++) f.push(NU + idx[k]); r.f = f; });
+    const tr = races.filter(r => !r.live), te = races.filter(r => r.live);
+    if (tr.length < 1000) return { error: "記録が少なすぎます（1,000レース以上必要）" };
+    const y = r => Math.min(H[r.a].tan / 100, 15);
+    let mu = 0; for (const r of tr) mu += y(r); mu /= tr.length;
+    const pTr = new Float64Array(tr.length), pTe = new Float64Array(te.length), order = tr.slice();
+    for (let sd = 0; sd < seeds; sd++){ const w = new Float64Array(NU * 2);
+      for (let ep = 0; ep < 4; ep++){ for (let q = order.length - 1; q > 0; q--){ const k = (Math.random() * (q + 1)) | 0; const t = order[q]; order[q] = order[k]; order[k] = t; }
+        for (const r of order){ let p = mu; for (const f of r.f) p += w[f]; const g = p - y(r); for (const f of r.f) w[f] -= 0.003 * (g + 0.002 * w[f]); } }
+      const pred = r => { let p = mu; for (const f of r.f) p += w[f]; return p; };
+      tr.forEach((r, q) => pTr[q] += pred(r) / seeds); te.forEach((r, q) => pTe[q] += pred(r) / seeds); }
+    const sorted = Array.from(pTr).sort((a, b) => b - a);
+    const topOf = p => { let lo = 0, hi = sorted.length; while (lo < hi){ const m = (lo + hi) >> 1; if (sorted[m] > p) lo = m + 1; else hi = m; } return lo / sorted.length; };
+    return { n: tr.length, mean: mu, live: te.map((r, q) => ({ id: r.id, num: H[r.a].num, score: pTe[q], top: topOf(pTe[q]) })) };
+  }
+
+  return { RV, ftTrain, AS_BETS, AS_BAND, asBuild, asSearch, asJudge, asIds, asPerf, frontPick, FRONT_RULE, histBuilder, darkReport, DARK_PREREG, PREREG, INC_RULES: INC_RULES.map(({ f, ...m }) => m), holdSplit, incEval, incCoverage, jtBuilder, report, clean, posFill, livePredict, prevBuilder, indBuild, crossCompact, crossReport, crossTickets, crossFitBeta, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
 })();
 if (typeof module !== "undefined") module.exports = Learn;

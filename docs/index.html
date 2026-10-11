@@ -3917,7 +3917,8 @@ const Learn = (() => {
   };
   const AS_BAND = { B1: "1〜3番人気", B2: "4〜6番人気", B3: "7〜9番人気", B4: "10番人気以下" };
   const AS_FE = FEATS.slice(0, 20);   // 21要素のうち「人気変動」を除く（オッズの動きは使わない）
-  function asBuild(recs){
+  // live：まだ走っていないレースの記録（結果なし）。同じ指標を作り、H の後ろに live:true で足す（騎手などの成績は過去の分だけで計算）
+  function asBuild(recs, live){
     const R = recs.filter(r => r.h && r.pay && r.pay["単勝"] && r.h.length >= 6).slice().sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : (a.id < b.id ? -1 : 1));
     const bin = o => Math.min(45, Math.floor(Math.log(o) / Math.log(1.12)));
     const BT = {}; for (const r of R) for (const h of r.h){ if (!(h.pos > 0 && h.odds)) continue; const b = BT[bin(h.odds)] || (BT[bin(h.odds)] = { n: 0, t: 0 }); b.n++; if (h.pos <= 3) b.t++; }
@@ -3928,9 +3929,10 @@ const Learn = (() => {
     const lift = (k, min) => { const o = jt[k]; return o && o.n >= min && o.e > 0 ? o.a / o.e : null; };
     const cntJ = {}, cntT = {}; for (const r of R) for (const h of r.h){ if (h.jk) cntJ[h.jk] = (cntJ[h.jk] || 0) + 1; if (h.tr) cntT[h.tr] = (cntT[h.tr] || 0) + 1; }
     let day = null, pend = [];
-    for (const r of R){
-      if (r.date !== day){ for (const [k, a, e] of pend) up(k, a, e); pend = []; day = r.date; }
-      const hs = r.h.filter(h => h.pos > 0 && h.odds && h.pop); if (hs.length < 6) continue;
+    const ALL = R.map(r => [r, false]).concat((live || []).filter(r => r.h && r.h.length >= 6).map(r => [r, true]));
+    for (const [r, isLive] of ALL){
+      if (r.date !== day || isLive){ for (const [k, a, e] of pend) up(k, a, e); pend = []; day = r.date; }
+      const hs = r.h.filter(h => (isLive || h.pos > 0) && h.odds && h.pop); if (hs.length < 6) continue;
       const N = hs.length, byO = hs.slice().sort((a, b) => a.odds - b.odds), fav = byO[0], f1 = byO[0].num, f2 = byO[1].num, top4 = byO.slice(0, 4).map(h => h.num), top5 = byO.slice(0, 5).map(h => h.num);
       const byNum = {}; r.h.forEach(h => byNum[h.num] = h);
       const nige = r.h.filter(h => h.style === "逃げ").length, fronts = r.h.filter(h => h.style === "逃げ" || h.style === "先行").length;
@@ -3942,7 +3944,7 @@ const Learn = (() => {
       const dband = r.dist <= 1400 ? "短距離" : r.dist <= 1800 ? "マイル〜中距離" : "長め";
       const mon = +String(r.date).slice(5, 7), season = mon <= 2 || mon === 12 ? "冬" : mon <= 5 ? "春" : mon <= 8 ? "夏" : "秋";
       const course = `${r.venue}${r.surface}${r.dist}`;
-      const W = r.pay["ワイド"] || {}, T = r.pay["三連複"] || {}, okW = Object.keys(W).length > 0, ok3 = Object.keys(T).length > 0;
+      const W = (r.pay || {})["ワイド"] || {}, T = (r.pay || {})["三連複"] || {}, okW = Object.keys(W).length > 0, ok3 = Object.keys(T).length > 0;
       for (const h of hs){
         const f = []; const add = n => f.push(idx(n));
         const ab = h.ab || [], ct = h.ct || [], hx = h.hx || [], hy = h.hy || [], pp = h.pp || [];
@@ -4024,9 +4026,9 @@ const Learn = (() => {
         if (ok3 && !top5.includes(n)){ const o = top4.filter(m => m !== f1); let ret = 0; for (const m of o) ret += T[key([f1, m, n])] || 0; s.t1 = [o.length * 100, ret]; }
         if (ok3 && !top5.includes(n)){ let ret = 0, c = 0; for (let i = 0; i < 4; i++) for (let j = i + 1; j < 4; j++){ c++; ret += T[key([top4[i], top4[j], n])] || 0; } s.tb = [c * 100, ret]; }
         const band = h.pop <= 3 ? "B1" : h.pop <= 6 ? "B2" : h.pop <= 9 ? "B3" : "B4";
-        H.push({ d: r.date, id: r.id, num: n, f, band, s });
+        H.push({ d: r.date, id: r.id, num: n, f, band, s, live: isLive, rk: byO.indexOf(h) + 1, tan: ((r.pay || {})["単勝"] || {})[n] || 0 });
         const a3 = h.pos <= 3 ? 1 : 0, e3 = exp3(h.odds);
-        pend.push(["J" + h.jk, a3, e3], ["T" + h.tr, a3, e3], ["JV" + h.jk + r.venue, a3, e3], ["JT" + h.jk + h.tr, a3, e3], ["JC" + h.jk + r.surface + dband, a3, e3], ["TV" + h.tr + r.venue, a3, e3]);
+        if (!isLive) pend.push(["J" + h.jk, a3, e3], ["T" + h.tr, a3, e3], ["JV" + h.jk + r.venue, a3, e3], ["JT" + h.jk + h.tr, a3, e3], ["JC" + h.jk + r.surface + dband, a3, e3], ["TV" + h.tr + r.venue, a3, e3]);
       }
     }
     const Wn = Math.ceil(H.length / 32), bits = F.map(() => new Uint32Array(Wn)), cnt = F.map(() => 0);
@@ -4092,7 +4094,38 @@ const Learn = (() => {
     return { rows, stake: st, ret: rt, roi: st ? rt / st : null, passN: rows.filter(r => r.pass).length, over105: rows.filter(r => r.fwd.n >= 30 && r.fwd.roi >= 1.05).length };
   }
 
-  return { RV, AS_BETS, AS_BAND, asBuild, asSearch, asJudge, asIds, asPerf, frontPick, FRONT_RULE, histBuilder, darkReport, DARK_PREREG, PREREG, INC_RULES: INC_RULES.map(({ f, ...m }) => m), holdSplit, incEval, incCoverage, jtBuilder, report, clean, posFill, livePredict, prevBuilder, indBuild, crossCompact, crossReport, crossTickets, crossFitBeta, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
+  // ===== 21. 1番人気の信頼度 =====
+  //  1番人気と2番人気の馬の指標（約1,000個）から「1番人気の単勝の払戻（倍率）」を予想する線形モデル（5回作って平均）。
+  //  2026-10-11 の検証（4期間・その期間より前の記録だけで学習）：上位3割のレースだけ1番人気の単勝を買うと 87.7%（全レース 79%）、上位1割で 91.5%。100%は超えていない。
+  function ftTrain(D, seeds = 5){
+    const H = D.H, NF = D.F.length, use = []; for (let k = 0; k < NF; k++) if (D.cnt[k] >= 200) use.push(k);
+    const BK = { B1: 0, B2: 1, B3: 2, B4: 3 }, NU = use.length + 4;
+    const cnt = new Uint32Array(H.length);
+    const each = (b, fn) => { for (let w = 0; w < b.length; w++){ let x = b[w]; while (x){ const t = x & -x; fn((w << 5) + (31 - Math.clz32(t))); x ^= t; } } };
+    use.forEach(k => each(D.bits[k], i => cnt[i]++));
+    const ptr = new Uint32Array(H.length + 1); for (let i = 0; i < H.length; i++) ptr[i + 1] = ptr[i] + cnt[i] + 1;
+    const idx = new Uint16Array(ptr[H.length]), fill = new Uint32Array(H.length);
+    use.forEach((k, u) => each(D.bits[k], i => { idx[ptr[i] + fill[i]++] = u; }));
+    H.forEach((h, i) => { idx[ptr[i] + fill[i]] = use.length + BK[h.band]; });
+    const byRace = {}; H.forEach((h, i) => { if (h.rk !== 1 && h.rk !== 2) return; const o = byRace[h.id] || (byRace[h.id] = { id: h.id, d: h.d, live: h.live }); if (h.rk === 1) o.a = i; else o.b = i; });
+    const races = Object.values(byRace).filter(r => r.a != null && r.b != null);
+    races.forEach(r => { const f = []; for (let k = ptr[r.a]; k < ptr[r.a + 1]; k++) f.push(idx[k]); for (let k = ptr[r.b]; k < ptr[r.b + 1]; k++) f.push(NU + idx[k]); r.f = f; });
+    const tr = races.filter(r => !r.live), te = races.filter(r => r.live);
+    if (tr.length < 1000) return { error: "記録が少なすぎます（1,000レース以上必要）" };
+    const y = r => Math.min(H[r.a].tan / 100, 15);
+    let mu = 0; for (const r of tr) mu += y(r); mu /= tr.length;
+    const pTr = new Float64Array(tr.length), pTe = new Float64Array(te.length), order = tr.slice();
+    for (let sd = 0; sd < seeds; sd++){ const w = new Float64Array(NU * 2);
+      for (let ep = 0; ep < 4; ep++){ for (let q = order.length - 1; q > 0; q--){ const k = (Math.random() * (q + 1)) | 0; const t = order[q]; order[q] = order[k]; order[k] = t; }
+        for (const r of order){ let p = mu; for (const f of r.f) p += w[f]; const g = p - y(r); for (const f of r.f) w[f] -= 0.003 * (g + 0.002 * w[f]); } }
+      const pred = r => { let p = mu; for (const f of r.f) p += w[f]; return p; };
+      tr.forEach((r, q) => pTr[q] += pred(r) / seeds); te.forEach((r, q) => pTe[q] += pred(r) / seeds); }
+    const sorted = Array.from(pTr).sort((a, b) => b - a);
+    const topOf = p => { let lo = 0, hi = sorted.length; while (lo < hi){ const m = (lo + hi) >> 1; if (sorted[m] > p) lo = m + 1; else hi = m; } return lo / sorted.length; };
+    return { n: tr.length, mean: mu, live: te.map((r, q) => ({ id: r.id, num: H[r.a].num, score: pTe[q], top: topOf(pTe[q]) })) };
+  }
+
+  return { RV, ftTrain, AS_BETS, AS_BAND, asBuild, asSearch, asJudge, asIds, asPerf, frontPick, FRONT_RULE, histBuilder, darkReport, DARK_PREREG, PREREG, INC_RULES: INC_RULES.map(({ f, ...m }) => m), holdSplit, incEval, incCoverage, jtBuilder, report, clean, posFill, livePredict, prevBuilder, indBuild, crossCompact, crossReport, crossTickets, crossFitBeta, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
 })();
 
 
@@ -6912,6 +6945,36 @@ function xPostPanel(d, list, rowOf, best){
     ${XPOST.texts.slice(0, n).map((t, i) => `<div class="xpost"><pre class="small" style="white-space:pre-wrap;margin:0">${esc(t)}</pre><div class="ctrls"><span class="small">${xLen(t)}/280</span><button class="btn" data-xcopy="${i}">${i + 1}つ目をコピー</button></div></div>`).join("")}
     <div class="ctrls"><button class="btn" data-xcopy="${n}">全部まとめてコピー（長文が投稿できるアカウント用）</button></div></div>`;
 }
+// ===== 21. 1番人気の信頼度（その日の全レース）=====
+const FT = { busy: false, msg: "", date: null, map: {}, n: 0 };
+const ftLabel = top => top <= 0.1 ? ["高い", "pos"] : top <= 0.3 ? ["やや高い", "pos"] : top >= 0.7 ? ["低い", "neg"] : ["ふつう", ""];
+async function ftRun(d){
+  if (FT.busy) return; FT.busy = true; FT.msg = "過去の記録を読み込んでいます…"; renderAllTab(); await new Promise(r => setTimeout(r, 30));
+  try {
+    if (!BF.recs) await bfLoadRecs();
+    const list = Object.values(DB.races).filter(r => r.date === d && r.entries?.length >= 6 && r.entries.filter(e => e.odds > 1).length >= 6);
+    if (!list.length) throw new Error("オッズが入っているレースがありません（オッズを取得してから押してください）");
+    FT.msg = `${list.length}レースの指標を作っています…`; renderAllTab(); await new Promise(r => setTimeout(r, 30));
+    const live = list.map(r => { const race = { ...r, going: goingOf(r) }; const ctx = Engine.buildContext(race, DB.horses, { going: race.going, track: trackOf(r) });
+      return Learn.record(race, ctx, new Array(ctx.N).fill(1 / ctx.N), { rows: [], going: race.going }, null, Engine.WEIGHTS, LEARN.base || Engine.WEIGHTS); });
+    const D = Learn.asBuild(BF.recs, live);
+    FT.msg = "学習しています（30秒ほど）…"; renderAllTab(); await new Promise(r => setTimeout(r, 30));
+    const res = Learn.ftTrain(D); if (res.error) throw new Error(res.error);
+    FT.map = Object.fromEntries(res.live.map(x => [x.id, x])); FT.date = d; FT.n = res.n; FT.msg = "";
+  } catch (e) { FT.msg = "計算できませんでした：" + e.message; }
+  FT.busy = false; renderAllTab();
+}
+function ftPanel(d){
+  const done = FT.date === d && Object.keys(FT.map).length;
+  return `<div class="learnbox"><h3>1番人気の信頼度</h3>
+    <p class="small">1番人気と2番人気の馬の指標（約1,000個）から、「このレースの1番人気は、オッズの割に信頼できるか」を、過去${FT.n ? FT.n.toLocaleString() : "の全"}レースで学習して順位にしました。「上位○%」は、過去のレースの中での順位です。</p>
+    <p class="small"><b>過去の検証（2026-10-11・まだ見ていない4期間）</b>：上位3割のレースだけ1番人気の単勝を買うと回収率 87.7%（全レース 79%）、上位1割で 91.5%。<b>100%は超えていません</b>。1番人気を軸にした馬連・ワイド・3連複（5倍以上の目）では、上位3割で 82〜84%（全レース 75〜80%）。買うレースを選ぶ参考や、1番人気を軸にするか消すかの判断材料にしてください。</p>
+    ${SERVER.enabled && !SERVER.cloud ? `<div class="ctrls"><button class="btn primary" id="ftRun" ${FT.busy ? "disabled" : ""}>${FT.busy ? "計算中…" : done ? "計算し直す" : "この日の1番人気の信頼度を計算（1〜2分）"}</button></div>` : `<p class="small">このPCのアプリで計算できます。</p>`}
+    ${FT.msg ? `<p class="small">${esc(FT.msg)}</p>` : ""}
+    ${done ? `<p class="small">信頼度が「高い」（上位1割）のレース：${Object.values(DB.races).filter(r => r.date === d && FT.map[r.id]?.top <= 0.1).sort((a, b) => FT.map[a.id].top - FT.map[b.id].top).map(r => `${esc(r.venue)}${r.no}R（${FT.map[r.id].num}番・上位${Math.max(1, Math.round(FT.map[r.id].top * 100))}%）`).join("、") || "なし"}</p>` : ""}</div>`;
+}
+const ftLine = (d, r) => { const x = FT.date === d ? FT.map[r.id] : null; if (!x) return ""; const [lb, cls] = ftLabel(x.top);
+  return `<div class="line small">1番人気（${x.num}番）の信頼度 <b class="${cls}">${lb}</b>（過去のレースの上位${Math.max(1, Math.round(x.top * 100))}%）</div>`; };
 // ===== 重賞（G3以上）の予想ポスト：1レース1投稿（全角140字＝280文字以内）。印は◎○▲△☆、☆の穴馬の推しポイントつき =====
 const xGrade = r => { const g = r.grade || Engine.gradeOf(r.name || ""); return /^G[123]$/.test(g) ? g : null; };
 function xGradedPost(r, x){
@@ -6958,6 +7021,7 @@ function renderAllTab(){
       <div class="cond">${r.surface}${r.distance}m・${x.field}頭・発走 ${esc(r.postTime || "")}・馬場「${esc(x.going)}」${r.goingAt ? `（${esc(r.goingAt.slice(11))}の発表${r.goingPrev && r.goingPrev !== r.going ? `・${esc(r.goingPrev)}から変更` : ""}）` : "想定"}${fromSaved ? "・保存済みの結果" : ""}</div>
       ${x.pace ? `<div class="line small">展開予想 <b>${PACE_JA[x.pace.best]}ペース ${pct(x.pace[x.pace.best])}%</b>（前に行く馬${x.pace.front}頭）</div>` : ""}
       <div class="marks">${x.marks.map((m, k) => `<span class="mk">${MARKS[k]}</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">1着${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}${(x.subs || []).filter(m => m.num !== starOf(x)?.num).map(m => `<span class="mk">△</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気）</span>` : ""}</span><span class="wpct">1着${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}${(() => { const m = starOf(x); return m ? `<span class="mk">☆</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">1着${pct(m.win)}%・3着内${pct(m.top3)}%</span>` : ""; })()}</div>
+      ${ftLine(d, r)}
       ${x.fr?.length ? `<div class="line"><span class="chip ana">前残り穴</span> ${x.fr.map(t => `${t.type}${t.nums.join("-")}`).join("・")} <span class="small">（各200円・ルール固定）</span></div>` : ""}
       ${x.tri ? `<div class="line">最有力の3連単 <b>${x.tri.nums.join("→")}</b> <span class="small">（${pct(x.tri.p)}%）</span></div>` : ""}
       ${x.dark ? `<div class="line">注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}${x.dark.win != null ? "勝率" + pct(x.dark.win) + "%・" : ""}3着内${pct(x.dark.top3)}%</span>${bestDark === x ? ` <span class="chip ana">この日の最注目穴馬</span>` : ""}</div>` : ""}
@@ -6990,12 +7054,14 @@ function renderAllTab(){
     ${CHECK[d] ? checkAllPanel() : ""}
     ${CHECK[d] || LEARN.model ? upsetPanel(d) + learnPanel() : ""}
     ${diag}
+    ${safePanel("1番人気の信頼度", () => ftPanel(d))}
     ${xGradedPanel(d, list, rowOf)}
     ${xPostPanel(d, list, rowOf, bestDark)}
     <div class="allhead"><h3>${esc(d.slice(5).replace("-", "/"))} 全レース予想</h3><span class="small">${doneN}/${list.length}レース計算済み${BATCH.running ? `（計算中 ${BATCH.done}/${BATCH.total}）` : ""}。一括計算は各条件 ${BATCH_RUNS.toLocaleString()}回×馬場4×ペース3。レースを開いて「シミュレーション実行」を押すと1万回で計算し直せます。</span></div>
     ${venues.map(v => `<h3 class="sec">${esc(v)}</h3><div class="allgrid">${list.filter(r => r.venue === v).map(card).join("")}</div>`).join("")}
     <div class="note">1,000円・5,000円の買い方と◎○▲は、各レースを「馬場4種×ペース3種」の12条件で各${BATCH_RUNS.toLocaleString()}回走らせ、馬場（発表済みなら発表の馬場、発表前は予報）とペース（脚質構成から計算した各ペースの起きやすさ）の確率で混ぜた結果から計算しています。確率は、学習した比率でオッズと統合し、当日の馬場の偏り・クッション値・馬体重の効き（反映条件を満たすときだけ）も入っています。確率は過去データにもとづく推定で、的中を保証するものではありません。馬券は余裕資金の範囲で。</div>`;
   el.querySelectorAll("[data-xcopy]").forEach(b => b.onclick = async () => { const t = XPOST.texts[+b.dataset.xcopy]; try { await navigator.clipboard.writeText(t); toast("コピーしました"); } catch (e) { toast("コピーできませんでした（文字を選んでコピーしてください）"); } });
+  const ftb = el.querySelector("#ftRun"); if (ftb) ftb.onclick = () => ftRun(d);
   el.querySelectorAll("[data-xgcopy]").forEach(b => b.onclick = async () => { const t = XPOST.g?.[+b.dataset.xgcopy]; if (!t) return; try { await navigator.clipboard.writeText(t); toast("コピーしました"); } catch (e) { toast("コピーできませんでした（文字を選んでコピーしてください）"); } });
   el.querySelectorAll("[data-cm]").forEach(b => b.onclick = () => { CHECK_MODE.v = b.dataset.cm; CHECK_ALL.res = null; computeCheck(d); renderAllTab(); });
   const pr = el.querySelector("#perfRace"); if (pr) pr.onchange = e => { PERF.race = e.target.value; renderAllTab(); };
