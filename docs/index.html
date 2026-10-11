@@ -5476,10 +5476,10 @@ function moBad(fa, r){
     return out; } catch (e) { return []; }
 }
 function moTickets(w, f, r){
-  if (!w?.[1]) return { mo: null, mo2: null, mo3: null, mo4: null, mo5: null, mo6: null, mo7: null, mo8: null };
-  const mkt = f.filter(x => x.odds > 1).sort((a, b) => a.odds - b.odds), fav = mkt[0]; if (!fav || mkt.length < 2) return { mo: null, mo2: null, mo3: null, mo4: null, mo5: null, mo6: null, mo7: null, mo8: null };
+  if (!w?.[1]) return { mo: null, mo2: null, mo3: null, mo4: null, mo5: null, mo6: null, mo7: null, mo8: null, mo9: null };
+  const mkt = f.filter(x => x.odds > 1).sort((a, b) => a.odds - b.odds), fav = mkt[0]; if (!fav || mkt.length < 2) return { mo: null, mo2: null, mo3: null, mo4: null, mo5: null, mo6: null, mo7: null, mo8: null, mo9: null };
   const a = w[0], b = w[1], fb = f[b.i];
-  if (a.num === fav.num || b.num !== fav.num) return { mo: null, mo2: null, mo3: null, mo4: null, mo5: null, mo6: null, mo7: null, mo8: null };
+  if (a.num === fav.num || b.num !== fav.num) return { mo: null, mo2: null, mo3: null, mo4: null, mo5: null, mo6: null, mo7: null, mo8: null, mo9: null };
   const t = [{ type: "馬連", nums: [a.num, b.num].sort((x, y) => x - y), stake: 1000 }];
   const rec = fb.odds >= 2 && mkt.length >= 13, bad = moBad(f[a.i], r || {});
   // 本命ルール（新・強弱版、10/11決定）：元のルール＋◎の前走に悪い材料1つ以上＋○（1番人気）の単勝2倍以上。悪い材料2つ以上は2,000円・1つは1,000円
@@ -5488,8 +5488,11 @@ function moTickets(w, f, r){
   // 検証中（10/11から記録だけ）：1番人気と2番人気のオッズに差がある（2番人気÷1番人気≥1.5）ときだけ強気。過去の参考 419R 174%（裏付けは弱い）
   //  mo7／mo8：本命ルールで悪い材料2つ以上のレースを「差あり」「僅差」に分けて、各1,000円で記録（どちらが本当に強いかの確かめ用）
   const gap = mkt[1].odds / fb.odds >= 1.5, strong = main && bad.length >= 2;
+  // 道悪の言い訳ルール（10/12 追加・検証中の新ルール）：本命ルールのうち、◎の前走が稍重・重・不良だったレースだけ。悪い材料2つ以上は2,000円・1つは1,000円
+  //  過去の参考 99R（月4前後）402%（前半434%・後半372%・高配当3回除き198%）。前半だけで選んでも後半324%、後半だけで選んでも前半361%
+  const pr = (f[a.i]?.prof?.runs || []).filter(q => q.surface !== "障" && q.pos > 0 && q.field > 0)[0], wet = !!(pr && /^[稍重不]/.test(pr.going || ""));
   return { mo: t, mo2: rec ? t : null, mo3: rec && bad.length ? t : null, mo4: null, mo5: main ? (bad.length >= 2 ? t2 : t) : null,
-    mo6: main ? (strong && gap ? t2 : t) : null, mo7: strong && gap ? t : null, mo8: strong && !gap ? t : null, moGap: main ? gap : null, moBad: bad.length ? bad : null };
+    mo6: main ? (strong && gap ? t2 : t) : null, mo7: strong && gap ? t : null, mo8: strong && !gap ? t : null, mo9: main && wet ? (strong ? t2 : t) : null, moWet: main ? (wet ? (pr.going || "").slice(0, 1) : null) : null, moGap: main ? gap : null, moBad: bad.length ? bad : null };
 }
 // 固定ルール（馬連◎-○）を作る前に保存された予想にも、その場で本命ルールを当てはめて表示する（その日より前の成績だけを使う）
 const MO_FILL = new Map();
@@ -6573,7 +6576,7 @@ async function bfProcessDay(j, left){
     const result = fast ? { n: races.length, fast: true, tot: {} } : { n: c.n, fav1: c.fav1, fav3: c.fav3, dark3: c.dark3, darkN: c.darkN, a: Bets.CAL.a, b: Bets.CAL.b,
       tot: Object.fromEntries(Object.entries(c.tot).map(([k, t]) => [k, { inv: t.invest, ret: Math.round(t.ret), races: t.races, hit: t.hitRaces }])) };
     // ③ 学習（その日の結果を記録して、次の日からの予想に使う）
-    const betsOf = r => { if (fast) return null; const p = c.per[r.id]; if (!p) return null; const pick = k => p.plans[k] ? [p.plans[k].inv, Math.round(p.plans[k].ret)] : [0, 0]; return { t1: pick("1000"), t5: pick("5000"), te: pick("e1000"), t1s: pick("1000s"), t5s: pick("5000s"), dkA: pick("dkA"), dkB: pick("dkB"), fr: pick("fr"), mo: pick("mo"), mo2: pick("mo2"), mo3: pick("mo3"), mo4: pick("mo4"), mo5: pick("mo5"), mo6: pick("mo6"), mo7: pick("mo7"), mo8: pick("mo8"), src: "backfill", ...predDetail(BATCH.rows[r.id]) }; };
+    const betsOf = r => { if (fast) return null; const p = c.per[r.id]; if (!p) return null; const pick = k => p.plans[k] ? [p.plans[k].inv, Math.round(p.plans[k].ret)] : [0, 0]; return { t1: pick("1000"), t5: pick("5000"), te: pick("e1000"), t1s: pick("1000s"), t5s: pick("5000s"), dkA: pick("dkA"), dkB: pick("dkB"), fr: pick("fr"), mo: pick("mo"), mo2: pick("mo2"), mo3: pick("mo3"), mo4: pick("mo4"), mo5: pick("mo5"), mo6: pick("mo6"), mo7: pick("mo7"), mo8: pick("mo8"), mo9: pick("mo9"), src: "backfill", ...predDetail(BATCH.rows[r.id]) }; };
     setUpdProgress(1, `過去データ ${d}：結果を学習中`);
     // 記録（モデルの確率など）も、その日より前のデータで学習したモデルの状態で作る（検証に未来の情報が混ざらないように）
     while (simBusy || BATCH.running || CHECK_ALL.running) await bfSleep(200);
@@ -6626,7 +6629,7 @@ function bfPanel(){
   const sum = {}; const byYear = {};
   days.forEach(k => { const r = P[k]; Object.entries(r.tot || {}).forEach(([pk, t]) => { const a = (sum[pk] ||= { inv: 0, ret: 0, races: 0, hit: 0 }); a.inv += t.inv; a.ret += t.ret; a.races += t.races; a.hit += t.hit;
     const yk = k.slice(0, 4), b = ((byYear[yk] ||= {})[pk] ||= { inv: 0, ret: 0, races: 0 }); b.inv += t.inv; b.ret += t.ret; b.races += t.races; }); });
-  const L = { "1000": "1,000円（勝負だけ）", "1000s": "1,000円（全レース）", "5000": "5,000円（勝負だけ）", "5000s": "5,000円（全レース）", "e1000": "期待値最大1点", "dkA": "注目穴馬入り BOX型 1,000円", "dkB": "注目穴馬入り フォーメ型 1,000円", "fr": "前残り穴 1,000円（ルール固定）", "mo": "馬連◎-○ 固定ルール・元（過去の参考）", "mo2": "馬連◎-○ 固定ルール・おすすめ（過去の参考）", "mo3": "馬連◎-○ 140%版（過去の参考）", "mo5": "馬連◎-○ 本命ルール（過去の参考）", "mo6": "検証中：差ありだけ強気", "mo7": "検証中：凡走2つ↑・差あり", "mo8": "検証中：凡走2つ↑・僅差" };
+  const L = { "1000": "1,000円（勝負だけ）", "1000s": "1,000円（全レース）", "5000": "5,000円（勝負だけ）", "5000s": "5,000円（全レース）", "e1000": "期待値最大1点", "dkA": "注目穴馬入り BOX型 1,000円", "dkB": "注目穴馬入り フォーメ型 1,000円", "fr": "前残り穴 1,000円（ルール固定）", "mo": "馬連◎-○ 固定ルール・元（過去の参考）", "mo2": "馬連◎-○ 固定ルール・おすすめ（過去の参考）", "mo3": "馬連◎-○ 140%版（過去の参考）", "mo5": "馬連◎-○ 本命ルール（過去の参考）", "mo6": "検証中：差ありだけ強気", "mo7": "検証中：凡走2つ↑・差あり", "mo8": "検証中：凡走2つ↑・僅差", "mo9": "道悪の言い訳ルール" };
   const rate = t => t?.inv ? Math.round(t.ret / t.inv * 100) + "%" : "—";
   const nR = days.reduce((a, k) => a + (P[k].n || 0), 0);
   const last = days.length ? P[days[days.length - 1]] : null;
@@ -6817,7 +6820,7 @@ function betsForLearn(d, id){
   const c = CHECK[d]?.per?.[id]; if (!c) return null;
   const pick = k => c.plans[k] ? [c.plans[k].inv, Math.round(c.plans[k].ret)] : [0, 0];
   const row = checkRows(d, "pre").find(x => x.r.id === id)?.row;
-  return { t1: pick("1000"), t5: pick("5000"), te: pick("e1000"), t1s: pick("1000s"), t5s: pick("5000s"), dkA: pick("dkA"), dkB: pick("dkB"), fr: pick("fr"), mo: pick("mo"), mo2: pick("mo2"), mo3: pick("mo3"), mo4: pick("mo4"), mo5: pick("mo5"), mo6: pick("mo6"), mo7: pick("mo7"), mo8: pick("mo8"), ...predDetail(row) };
+  return { t1: pick("1000"), t5: pick("5000"), te: pick("e1000"), t1s: pick("1000s"), t5s: pick("5000s"), dkA: pick("dkA"), dkB: pick("dkB"), fr: pick("fr"), mo: pick("mo"), mo2: pick("mo2"), mo3: pick("mo3"), mo4: pick("mo4"), mo5: pick("mo5"), mo6: pick("mo6"), mo7: pick("mo7"), mo8: pick("mo8"), mo9: pick("mo9"), ...predDetail(row) };
 }
 function upsetPanel(d){
   const m = LEARN.model; if (!m?.upsets) return "";
@@ -6877,6 +6880,7 @@ function computeCheck(d){
     "mo6": { label: "検証中：本命ルールで、2,000円にするのは1番人気と2番人気のオッズに差がある（1.5倍以上）ときだけ", key: "mo6" },
     "mo7": { label: "検証中：本命ルールの悪い材料2つ以上・1番人気と2番人気に差あり（1,000円で記録）", key: "mo7" },
     "mo8": { label: "検証中：本命ルールの悪い材料2つ以上・1番人気と2番人気が僅差（1,000円で記録）", key: "mo8" },
+    "mo9": { label: "道悪の言い訳ルール：本命ルールのうち◎の前走が稍重・重・不良（悪い材料2つ以上は2,000円・1つは1,000円）", key: "mo9" },
     "dkA": { label: "注目穴馬入り BOX型 1,000円（ワイドBOX3点＋3連複6点＋複勝）", key: "dkA" }, "dkB": { label: "注目穴馬入り フォーメーション型 1,000円（ワイド2点＋3連複7点＋複勝）", key: "dkB" } };
   const tot = {};
   Object.entries(plans).forEach(([k, p]) => tot[k] = { ...p, invest: 0, ret: 0, races: 0, hitRaces: 0 });
@@ -6931,7 +6935,7 @@ async function sendBetsToCloud(d){
 }
 // ===== 成績の一覧（ひと目で比べる）：指定レース・この日・これまでの累計 × 4つの買い方 =====
 const PERF = { race: null, loading: false };
-const PERF_PLANS = [["mo5", "mo5", "★馬連◎-○ 本命ルール（10/11固定）", "1,000〜2,000円"], ["mo6", "mo6", "検証中：差ありだけ強気", "1,000〜2,000円"], ["mo7", "mo7", "検証中：凡走2つ↑・差あり", "1,000円"], ["mo8", "mo8", "検証中：凡走2つ↑・僅差", "1,000円"], ["mo3", "mo3", "馬連◎-○ 140%版（10/11固定）", "1,000円"], ["1000", "t1", "（旧）勝負レースだけ", "1,000円"]];
+const PERF_PLANS = [["mo9", "mo9", "★★道悪の言い訳ルール（10/12〜）", "1,000〜2,000円"], ["mo5", "mo5", "★馬連◎-○ 本命ルール（10/11固定）", "1,000〜2,000円"], ["mo6", "mo6", "検証中：差ありだけ強気", "1,000〜2,000円"], ["mo7", "mo7", "検証中：凡走2つ↑・差あり", "1,000円"], ["mo8", "mo8", "検証中：凡走2つ↑・僅差", "1,000円"], ["mo3", "mo3", "馬連◎-○ 140%版（10/11固定）", "1,000円"], ["1000", "t1", "（旧）勝負レースだけ", "1,000円"]];
 function perfCell(x, empty){
   if (!x || !x.n) return `<td><div class="big" style="color:var(--muted)">—</div><div class="sub">${empty || "購入なし"}</div></td>`;
   const roi = x.inv ? x.ret / x.inv : 0, prof = x.ret - x.inv;
@@ -7183,7 +7187,7 @@ function renderAllTab(){
       ${x.pace ? `<div class="line small">展開予想 <b>${PACE_JA[x.pace.best]}ペース ${pct(x.pace[x.pace.best])}%</b>（前に行く馬${x.pace.front}頭）</div>` : ""}
       <div class="marks">${x.marks.map((m, k) => `<span class="mk">${MARKS[k]}</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">勝率${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}${(x.subs || []).filter(m => m.num !== starOf(x)?.num).map(m => `<span class="mk">△</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気）</span>` : ""}</span><span class="wpct">勝率${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}${(() => { const m = starOf(x); return m ? `<span class="mk">☆</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">勝率${pct(m.win)}%・3着内${pct(m.top3)}%</span>` : ""; })()}</div>
       ${favLine(x)}
-      ${x.mo5?.length ? `<div class="line"><span class="verdict go">★買い：馬連 ◎-○（本命ルール）</span> <b>${x.mo5[0].nums.join("-")}</b> <b class="pos">${x.mo5[0].stake.toLocaleString()}円</b>${x.mo5[0].stake >= 2000 ? `<span class="small">（悪い材料2つ以上＝信頼度 高${x.moGap === false ? "。検証中の候補では1,000円" : ""}）</span>` : ""}${x.moBad?.length ? `<span class="small">（◎の前走：${esc(x.moBad.join("・"))}）</span>` : ""}</div>` : x.mo?.length ? `<div class="line"><span class="small">馬連 ◎-○ ${x.mo[0].nums.join("-")}：元のルールには当てはまるが本命ルール外（買わない）${x.moBad?.length ? "" : "・◎の前走に悪い材料なし"}${x.moBad?.length ? "・1番人気が2倍未満" : ""}</span></div>` : ""}
+      ${x.mo5?.length ? `<div class="line"><span class="verdict go">★買い：馬連 ◎-○（本命ルール）</span> <b>${x.mo5[0].nums.join("-")}</b> <b class="pos">${x.mo5[0].stake.toLocaleString()}円</b>${x.mo5[0].stake >= 2000 ? `<span class="small">（悪い材料2つ以上＝信頼度 高${x.moGap === false ? "。検証中の候補では1,000円" : ""}）</span>` : ""}${x.moBad?.length ? `<span class="small">（◎の前走：${esc(x.moBad.join("・"))}）</span>` : ""}${x.mo9?.length ? `<br><b class="pos">★★道悪の言い訳ルールにも該当</b><span class="small">（◎の前走は「${esc(x.moWet || "")}」の馬場で凡走＝言い訳あり。過去99レースで回収率402%）</span>` : x.moWet === null ? `<br><span class="small">◎の前走は良馬場（言い訳なし。この形は過去の回収率が低め）</span>` : ""}</div>` : x.mo?.length ? `<div class="line"><span class="small">馬連 ◎-○ ${x.mo[0].nums.join("-")}：元のルールには当てはまるが本命ルール外（買わない）${x.moBad?.length ? "" : "・◎の前走に悪い材料なし"}${x.moBad?.length ? "・1番人気が2倍未満" : ""}</span></div>` : ""}
       ${x.uma ? `<div class="line">最有力の馬連 <b>${x.uma.nums.join("-")}</b> <span class="small">（シミュの的中確率${pct(x.uma.p)}%${x.uma.odds ? `・${x.uma.odds}倍` : ""}）</span></div>` : ""}
       ${x.tri ? `<div class="line">最有力の3連単 <b>${x.tri.nums.join("→")}</b> <span class="small">（${pct(x.tri.p)}%）</span></div>` : ""}
       ${x.dark ? `<div class="line">注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}${x.dark.win != null ? "勝率" + pct(x.dark.win) + "%・" : ""}3着内${pct(x.dark.top3)}%</span>${bestDark === x ? ` <span class="chip ana">この日の最注目穴馬</span>` : ""}</div>` : ""}
