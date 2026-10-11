@@ -180,6 +180,70 @@ const Learn = (() => {
   }
   // 穴馬（6番人気以下・15倍以上）について、各要因があったときに「オッズから見た期待」より何倍3着以内に来たか。
   // 人気（オッズ）の差でできる見かけの差は取り除き、オッズが見落としていた分だけを測る（お金になるのはこの分だけ）
+
+  // ===== 穴馬の振り返り（毎日学習）：5番人気以下で3着内に来た馬を、なぜ外したか・レース前に当てる材料はあったかで分類 =====
+  //  材料はすべてレース前に分かるもの。各材料の効き（オッズから見た期待より何倍3着内に来たか）は、その日より前の記録だけで計算（毎日、記録が増えるたびに更新）
+  const ANA_SIG = ["乗り替わりで騎手強化", "騎手の穴好走率が高い", "厩舎の穴好走率が高い", "前走のレースレベルが高い", "前走は展開負け", "前走は上がり上位なのに5着以下", "前走は出遅れ",
+    "前走は直線で伸びていた", "降級・同級で前走の着差が小さい", "地力あり（近5走ベスト上位）なのに前走凡走", "上がりのベストがレース2位内", "持ち時計がレース2位内", "同じコースで3着内の実績",
+    "同じ距離帯で好走率が高い", "単騎で逃げられそう", "先行馬が多いレースの差し馬", "斤量2kg以上減", "叩き2戦目", "普段から人気より走る", "能力指数がレース3位内", "前走でもシミュの印", "シミュ5位以内", "シミュが市場より1.3倍以上高評価"];
+  function anaReview(recsIn, date){
+    const recs = recsIn.filter(r => r.surface !== "障" && r.h?.length >= 5).slice().sort((a, b) => a.date.localeCompare(b.date) || String(a.id).localeCompare(String(b.id)));
+    const JK = {}, JA = {}, TA = {}, last = {}, nextHit = {}, g = (M, k) => M[k] || (M[k] = [0, 0]);
+    const S = ANA_SIG.map(() => ({ pre: { n: 0, hit: 0, exp: 0, pl: 0 }, all: { n: 0, hit: 0, exp: 0, pl: 0 } })), B = { pre: { n: 0, hit: 0, exp: 0, pl: 0 }, all: { n: 0, hit: 0, exp: 0, pl: 0 } };
+    const items = [], dayRaces = [];
+    const byDate = {}; recs.forEach(r => (byDate[r.date] ||= []).push(r));
+    const dates = Object.keys(byDate).sort().filter(d => d <= date);
+    const rate = (M, k, n) => { const a = M[k]; return a && a[0] >= n ? a[1] / a[0] : null; };
+    for (const d of dates){
+      const today = d === date;
+      for (const r of byDate[d]){
+        const H = r.h.filter(h => h.odds > 0 && h.pop > 0 && h.pk > 0); if (H.length < 5) continue;
+        const sum = H.reduce((a, h) => a + h.pk, 0), t3 = top3FromMarket(H.map(h => h.pk / sum));
+        const sim = [...H].sort((a, b) => b.pm - a.pm), srk = {}; sim.forEach((h, i) => srk[h.num] = i + 1);
+        const mk = r.bets?.mk || sim.slice(0, 3).map(h => h.num);
+        const rankBy = (f, asc) => { const v = H.map(h => ({ num: h.num, v: f(h) })).filter(x => x.v != null && isFinite(x.v)); v.sort((a, b) => asc ? a.v - b.v : b.v - a.v); const o = {}; v.forEach((x, i) => o[x.num] = i + 1); return o; };
+        const l3r = rankBy(h => h.hy?.[4], true), spr = rankBy(h => h.hy?.[5], false), abr = rankBy(h => h.z?.[0], false);
+        if (today) dayRaces.push(r.id);
+        H.forEach((h, i) => { if (h.pop < 5 || !(h.pos > 0)) return;
+          const pv = last[h.hid]; let A4 = null, A5 = false, A6 = false, pmk = -1, pjk = null;
+          if (pv){ const nh = nextHit[pv.r.id]; if (nh && nh[0] >= 3) A4 = nh[1] / nh[0];
+            const top = pv.r.h.filter(x => x.pos >= 1 && x.pos <= 3 && x.c4 != null); const mc = top.length ? top.reduce((a, x) => a + x.c4, 0) / top.length : null;
+            A5 = mc != null && mc <= 0.3 && pv.h.c4 >= 0.6; A6 = !!(pv.h.l3rank && pv.h.l3rank <= 3 && pv.h.pos >= 5);
+            const m2 = pv.r.bets?.mk; if (m2) pmk = m2.indexOf(pv.h.num); pjk = pv.h.jk; }
+          const jr = rate(JK, h.jk, 50), pjr = pjk ? rate(JK, pjk, 50) : null, ja = rate(JA, h.jk, 40), ta = rate(TA, h.tr, 30);
+          const ab = h.ab || [], ct = h.ct || [], hy = h.hy || [], hx = h.hx || [], pp = h.pp || [];
+          const F = [jr != null && pjr != null && pjk !== h.jk && jr - pjr >= 0.03, ja != null && ja >= 0.18, ta != null && ta >= 0.18, A4 != null && A4 >= 0.35, A5, A6,
+            ct[0] != null && ct[0] >= 0.25, ct[1] != null && ct[1] >= 0.2, ab[8] != null && ab[8] <= 0 && ab[3] != null && ab[3] <= 0.5, ab[2] != null && ab[2] <= 0.15 && ab[0] >= 0.5,
+            l3r[h.num] <= 2, spr[h.num] <= 2, hy[0] >= 1, hy[3] >= 2 && hy[2] / hy[3] >= 0.4, pp[4] > 0 && pp[0] <= 0.12 && r.nn === 1, r.nf >= 5 && pp[0] >= 0.55,
+            hy[6] != null && hy[6] <= -2, hx[3] === 1, hx[0] != null && hx[0] >= 0.1, abr[h.num] <= 3, pmk >= 0 && pmk <= 2, srk[h.num] <= 5, h.pm >= h.pk * 1.3].map(Boolean);
+          const hit = h.pos <= 3 ? 1 : 0, pl = h.plp || 0, add = o => { o.n++; o.hit += hit; o.exp += t3[i]; o.pl += pl; };
+          if (today){
+            if (hit){
+              // その日より前の記録だけで計算した、各材料の効き
+              const r0 = B.pre.exp ? B.pre.hit / B.pre.exp : 1;
+              const sig = F.map((v, k) => v ? { k: ANA_SIG[k], n: S[k].pre.n, lift: S[k].pre.exp && r0 ? +(S[k].pre.hit / S[k].pre.exp / r0).toFixed(2) : null } : null).filter(Boolean);
+              const strong = sig.filter(x => x.n >= 150 && x.lift >= 1.2);
+              const mark = mk.indexOf(h.num), why = [];
+              if (h.early != null && h.early <= 0.25) why.push("前に行って粘った"); if (h.early != null && h.early >= 0.55 && h.l3rank && h.l3rank <= 3) why.push(`後方から上がり${h.l3rank}位`);
+              if (r.going && r.going !== "良") why.push("馬場：" + r.going); if (H.some(x => x.pop <= 3 && x.pos >= 6)) why.push("人気馬が凡走");
+              items.push({ id: r.id, venue: r.venue, no: r.no, race: r.name, num: h.num, name: h.hid, pop: h.pop, odds: h.odds, pos: h.pos, simRank: srk[h.num], mark: mark >= 0 ? "◎○▲"[mark] : null,
+                simWin: +h.pm.toFixed(3), mktWin: +h.pk.toFixed(3), sig, strong: strong.map(x => x.k), catchable: mark >= 0 || srk[h.num] <= 5 || strong.length >= 2, why });
+            }
+          } else { add(B.pre); F.forEach((v, k) => { if (v) add(S[k].pre); }); }
+          add(B.all); F.forEach((v, k) => { if (v) add(S[k].all); });
+        });
+      }
+      for (const r of byDate[d]){ for (const h of r.h){ if (!(h.pos > 0)) continue; const w = h.pos === 1 ? 1 : 0, t3 = h.pos <= 3 ? 1 : 0;
+        if (h.jk){ const a = g(JK, h.jk); a[0]++; a[1] += w; if (h.pop >= 5){ const b = g(JA, h.jk); b[0]++; b[1] += t3; } }
+        if (h.tr && h.pop >= 5){ const b = g(TA, h.tr); b[0]++; b[1] += t3; }
+        if (h.hid){ const p = last[h.hid]; if (p){ const nh = g(nextHit, p.r.id); nh[0]++; nh[1] += t3; } last[h.hid] = { r, h }; } } }
+    }
+    const r0 = B.all.exp ? B.all.hit / B.all.exp : 1;
+    const stats = ANA_SIG.map((k, j) => { const o = S[j].all; return { k, n: o.n, hit: o.n ? +(o.hit / o.n).toFixed(3) : null, lift: o.exp ? +(o.hit / o.exp / r0).toFixed(2) : null, placeROI: o.n ? +(o.pl / o.n).toFixed(2) : null }; })
+      .filter(x => x.n >= 50).sort((a, b) => b.lift - a.lift);
+    const longN = recs.filter(r => r.date === date).reduce((a, r) => a + r.h.filter(h => h.pop >= 5 && h.pos > 0).length, 0);
+    return { date, races: dayRaces.length, longN, items, stats, base: { n: B.all.n, hit: B.all.n ? +(B.all.hit / B.all.n).toFixed(3) : null, placeROI: B.all.n ? +(B.all.pl / B.all.n).toFixed(2) : null }, days: dates.length };
+  }
   function upsetStats(recs){
     const cnt = {}; let base = 0, baseHit = 0, baseExp = 0;
     recs.forEach(r => {
@@ -1922,6 +1986,6 @@ const Learn = (() => {
     return { n: tr.length, mean: mu, live: te.map((r, q) => ({ id: r.id, num: H[r.a].num, score: pTe[q], top: topOf(pTe[q]) })) };
   }
 
-  return { RV, ftTrain, abOf, ctOf, AS_BETS, AS_BAND, asBuild, asSearch, asJudge, asIds, asPerf, frontPick, FRONT_RULE, histBuilder, darkReport, DARK_PREREG, PREREG, INC_RULES: INC_RULES.map(({ f, ...m }) => m), holdSplit, incEval, incCoverage, jtBuilder, report, clean, posFill, livePredict, prevBuilder, indBuild, crossCompact, crossReport, crossTickets, crossFitBeta, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
+  return { RV, anaReview, ANA_SIG, ftTrain, abOf, ctOf, AS_BETS, AS_BAND, asBuild, asSearch, asJudge, asIds, asPerf, frontPick, FRONT_RULE, histBuilder, darkReport, DARK_PREREG, PREREG, INC_RULES: INC_RULES.map(({ f, ...m }) => m), holdSplit, incEval, incCoverage, jtBuilder, report, clean, posFill, livePredict, prevBuilder, indBuild, crossCompact, crossReport, crossTickets, crossFitBeta, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
 })();
 if (typeof module !== "undefined") module.exports = Learn;
