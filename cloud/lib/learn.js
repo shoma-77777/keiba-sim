@@ -1974,16 +1974,26 @@ const Learn = (() => {
     const tr = races.filter(r => !r.live), te = races.filter(r => r.live);
     if (tr.length < 1000) return { error: "記録が少なすぎます（1,000レース以上必要）" };
     const y = r => Math.min(H[r.a].tan / 100, 15);
-    let mu = 0; for (const r of tr) mu += y(r); mu /= tr.length;
-    const pTr = new Float64Array(tr.length), pTe = new Float64Array(te.length), order = tr.slice();
-    for (let sd = 0; sd < seeds; sd++){ const w = new Float64Array(NU * 2);
-      for (let ep = 0; ep < 4; ep++){ for (let q = order.length - 1; q > 0; q--){ const k = (Math.random() * (q + 1)) | 0; const t = order[q]; order[q] = order[k]; order[k] = t; }
-        for (const r of order){ let p = mu; for (const f of r.f) p += w[f]; const g = p - y(r); for (const f of r.f) w[f] -= 0.003 * (g + 0.002 * w[f]); } }
-      const pred = r => { let p = mu; for (const f of r.f) p += w[f]; return p; };
-      tr.forEach((r, q) => pTr[q] += pred(r) / seeds); te.forEach((r, q) => pTe[q] += pred(r) / seeds); }
-    const sorted = Array.from(pTr).sort((a, b) => b - a);
+    const fitPred = (TR, TE, seeds) => { let mu = 0; for (const r of TR) mu += y(r); mu /= TR.length;
+      const out = new Float64Array(TE.length), order = TR.slice();
+      for (let sd = 0; sd < seeds; sd++){ const w = new Float64Array(NU * 2);
+        for (let ep = 0; ep < 4; ep++){ for (let q = order.length - 1; q > 0; q--){ const k = (Math.random() * (q + 1)) | 0; const t = order[q]; order[q] = order[k]; order[k] = t; }
+          for (const r of order){ let p = mu; for (const f of r.f) p += w[f]; const g = p - y(r); for (const f of r.f) w[f] -= 0.003 * (g + 0.002 * w[f]); } }
+        TE.forEach((r, q) => { let p = mu; for (const f of r.f) p += w[f]; out[q] += p / seeds; }); }
+      return { mu, out }; };
+    const full = fitPred(tr, te, seeds), mu = full.mu, pTe = full.out;
+    // 自信度の目安：学習に使っていない期間で予想した順位（4分割・時期順）と、実際の1番人気の勝率・単勝回収率を突き合わせる
+    const trS = tr.slice().sort((a, b) => a.d.localeCompare(b.d)), K = 4, oof = new Float64Array(trS.length);
+    for (let k = 0; k < K; k++){ const lo = Math.floor(trS.length * k / K), hi = Math.floor(trS.length * (k + 1) / K);
+      const res = fitPred(trS.slice(0, lo).concat(trS.slice(hi)), trS.slice(lo, hi), 2); res.out.forEach((v, q) => oof[lo + q] = v); }
+    const sorted = Array.from(oof).sort((a, b) => b - a);
     const topOf = p => { let lo = 0, hi = sorted.length; while (lo < hi){ const m = (lo + hi) >> 1; if (sorted[m] > p) lo = m + 1; else hi = m; } return lo / sorted.length; };
-    return { n: tr.length, mean: mu, live: te.map((r, q) => ({ id: r.id, num: H[r.a].num, score: pTe[q], top: topOf(pTe[q]) })) };
+    const BUCK = [[0, 0.1, "上位1割"], [0.1, 0.3, "上位1〜3割"], [0.3, 0.7, "真ん中"], [0.7, 1.01, "下位3割"]];
+    const cal = BUCK.map(([lo, hi, label]) => { const R = trS.filter((r, q) => { const t = topOf(oof[q]); return t >= lo && t < hi; }); const n = R.length, w = R.filter(r => H[r.a].tan > 0).length, p = n ? w / n : 0, se = n ? Math.sqrt(p * (1 - p) / n) : 0;
+      return { lo, hi, label, n, win: +p.toFixed(3), lo95: +Math.max(0, p - 1.96 * se).toFixed(3), hi95: +Math.min(1, p + 1.96 * se).toFixed(3), roi: n ? +(R.reduce((a, r) => a + H[r.a].tan, 0) / n / 100).toFixed(3) : null }; });
+    const baseWin = +(trS.filter(r => H[r.a].tan > 0).length / trS.length).toFixed(3);
+    const calOf = t => cal.find(c => t >= c.lo && t < c.hi) || cal[cal.length - 1];
+    return { n: tr.length, mean: mu, cal, baseWin, live: te.map((r, q) => { const top = topOf(pTe[q]), c = calOf(top); return { id: r.id, num: H[r.a].num, score: pTe[q], top, win: c.win, lo95: c.lo95, hi95: c.hi95, roi: c.roi, band: c.label }; }) };
   }
 
   return { RV, anaReview, ANA_SIG, ftTrain, abOf, ctOf, AS_BETS, AS_BAND, asBuild, asSearch, asJudge, asIds, asPerf, frontPick, FRONT_RULE, histBuilder, darkReport, DARK_PREREG, PREREG, INC_RULES: INC_RULES.map(({ f, ...m }) => m), holdSplit, incEval, incCoverage, jtBuilder, report, clean, posFill, livePredict, prevBuilder, indBuild, crossCompact, crossReport, crossTickets, crossFitBeta, top3FromMarket, isLong, bodyWeightEffects, bwFeatures, FEATS, record, fit, build, merge, bias, logloss, recordsForRaces, analyzeUpsets, upsetStats, paperStats };
