@@ -4805,9 +4805,15 @@ function averageStats(list, field){
 
 // 注目穴馬：6番人気以下（オッズ10倍以上）から、複勝期待値と穴要素で選ぶ
 function pickDarkHorse(ctx, stats, avgStats, M){
-  const cand = ctx.field.map((f, i) => ({ f, i, s: stats[i], a: avgStats[i] }))
-    .filter(x => x.f.odds > 1 && (x.f.odds >= 10 || (x.f.pop && x.f.pop >= 6)));
-  if (!cand.length || !Engine.oddsReady(ctx.field)) return null;
+  // 2026-10-12：3着以内の的中率を優先して、5番人気以下で「オッズから見た3着内率」が一番高い馬を選ぶ（過去6,700レースで3着内24%・複勝回収76%。
+  //  以前の期待値重視の選び方は3着内12%・複勝回収68%。シミュの評価・穴パターンなどの材料を足しても的中率は上がらなかった）
+  const cand0 = ctx.field.map((f, i) => ({ f, i, s: stats[i], a: avgStats[i] })).filter(x => x.f.odds > 1 && (x.f.pop ? x.f.pop >= 5 : x.f.odds >= 10));
+  if (!cand0.length || !Engine.oddsReady(ctx.field)) return null;
+  cand0.forEach(x => { x.winEV = (M ? M.win[x.i] : x.a.win) * x.f.odds; x.placeEV = null; });
+  cand0.sort((a, b) => a.f.odds - b.f.odds || (b.a.top3 - a.a.top3));
+  return cand0[0];
+  // 旧：期待値重視
+  const cand = cand0;
   cand.forEach(x => {
     // 複勝オッズが取れていないときは推定値を使わず、複勝期待値は出さない（実際のオッズだけで計算する）
     const po = x.f.placeLo > 0 ? x.f.placeLo : null;
@@ -5509,6 +5515,20 @@ function moFill(r, x){
   } catch (e) { console.error(e); }
   MO_FILL.set(r.id, out); return out;
 }
+// ===== 1日最低4レースの買い（2026-10-12）：①★★道悪の言い訳ルール（2,000〜3,000円）②本命ルール（前走良→今回良は除く・1,000円）
+//  ③4レースに足りない分は、◎の勝率（シミュ）が高いレースから馬連◎-○を1,000円。過去約2年：1日4.0レース・回収率156%（前半160%・後半152%・8期間すべて103%以上）
+//  ③の埋め分だけでは回収率92%（ここは損になりやすい分です）
+function dayPicks(items){
+  const out = new Map(), core = [], rest = [];
+  items.forEach(({ r, row }) => { if (!row?.marks?.length || row.marks.length < 2) return; const x = row;
+    const gg = x.mo5?.length && !x.mo9?.length && String(x.going || "").startsWith("良");
+    if (x.mo5?.length && !gg){ const st = x.mo9?.length ? (x.mo9[0].stake >= 2000 ? 3000 : 2000) : 1000; core.push({ r, t: [{ type: "馬連", nums: x.mo5[0].nums, stake: st }], why: x.mo9?.length ? "★★道悪の言い訳" : "★本命ルール" }); }
+    else if (x.marks[0]?.odds || x.hasOdds) rest.push({ r, x }); });
+  core.forEach(c => out.set(c.r.id, { tickets: c.t, why: c.why }));
+  rest.sort((a, b) => (b.x.marks[0].win || 0) - (a.x.marks[0].win || 0)).slice(0, Math.max(0, 4 - core.length))
+    .forEach(({ r, x }) => out.set(r.id, { tickets: [{ type: "馬連", nums: [x.marks[0].num, x.marks[1].num].sort((a, b) => a - b), stake: 1000 }], why: "埋め（◎の勝率が高いレース）" }));
+  return out;
+}
 function summarizeSim(r, sim){
   const w = sim.weighted.slice().sort((a, b) => b.win - a.win);
   const f = sim.ctx.field;
@@ -5539,6 +5559,10 @@ function summarizeSim(r, sim){
     te: sim.plans?.[1000]?.evmax ? tks(sim.plans[1000].evmax) : null,
     te5: sim.plans?.[5000]?.evmax ? tks(sim.plans[5000].evmax) : null,
     tri: tri ? { nums: tri.idx.map(i => f[i].num), p: tri.p } : null,
+    // 精度重視の本命（市場7：シミュ3で混ぜた勝率が一番高い馬）。11Rで◎の3着内率が52%→58%（過去581レース）
+    acc: (() => { const H = sim.weighted.filter(x => f[x.i].odds > 1 && x.win > 0); if (H.length < 5) return null; const sk = H.reduce((a, x) => a + 1 / f[x.i].odds, 0);
+      const sc = H.map(x => ({ x, p: Math.pow(x.win, 0.3) * Math.pow(1 / f[x.i].odds / sk, 0.7) })); const z = sc.reduce((a, q) => a + q.p, 0); sc.sort((a, b) => b.p - a.p);
+      return sc.slice(0, 3).map(q => ({ num: q.x.num, name: q.x.name, win: q.p / z, odds: f[q.x.i].odds, pop: f[q.x.i].pop ?? null })); })(),
     uma: (() => { if (!sim.triMap) return null; const P = new Map(); sim.triMap.forEach((p, k) => { const [a, b] = k.split("-").map(Number); const kk = [f[a].num, f[b].num].sort((x, y) => x - y).join("-"); P.set(kk, (P.get(kk) || 0) + p); });
       const best = [...P.entries()].sort((a, b) => b[1] - a[1])[0]; if (!best) return null; const o = r.comboOdds?.馬連?.[best[0]];
       return { nums: best[0].split("-").map(Number), p: best[1], odds: o ? +(+o).toFixed(1) : null }; })(),
@@ -6576,7 +6600,7 @@ async function bfProcessDay(j, left){
     const result = fast ? { n: races.length, fast: true, tot: {} } : { n: c.n, fav1: c.fav1, fav3: c.fav3, dark3: c.dark3, darkN: c.darkN, a: Bets.CAL.a, b: Bets.CAL.b,
       tot: Object.fromEntries(Object.entries(c.tot).map(([k, t]) => [k, { inv: t.invest, ret: Math.round(t.ret), races: t.races, hit: t.hitRaces }])) };
     // ③ 学習（その日の結果を記録して、次の日からの予想に使う）
-    const betsOf = r => { if (fast) return null; const p = c.per[r.id]; if (!p) return null; const pick = k => p.plans[k] ? [p.plans[k].inv, Math.round(p.plans[k].ret)] : [0, 0]; return { t1: pick("1000"), t5: pick("5000"), te: pick("e1000"), t1s: pick("1000s"), t5s: pick("5000s"), dkA: pick("dkA"), dkB: pick("dkB"), fr: pick("fr"), mo: pick("mo"), mo2: pick("mo2"), mo3: pick("mo3"), mo4: pick("mo4"), mo5: pick("mo5"), mo6: pick("mo6"), mo7: pick("mo7"), mo8: pick("mo8"), mo9: pick("mo9"), src: "backfill", ...predDetail(BATCH.rows[r.id]) }; };
+    const betsOf = r => { if (fast) return null; const p = c.per[r.id]; if (!p) return null; const pick = k => p.plans[k] ? [p.plans[k].inv, Math.round(p.plans[k].ret)] : [0, 0]; return { t1: pick("1000"), t5: pick("5000"), te: pick("e1000"), t1s: pick("1000s"), t5s: pick("5000s"), dkA: pick("dkA"), dkB: pick("dkB"), fr: pick("fr"), mo: pick("mo"), mo2: pick("mo2"), mo3: pick("mo3"), mo4: pick("mo4"), mo5: pick("mo5"), mo6: pick("mo6"), mo7: pick("mo7"), mo8: pick("mo8"), mo9: pick("mo9"), d4: pick("d4"), src: "backfill", ...predDetail(BATCH.rows[r.id]) }; };
     setUpdProgress(1, `過去データ ${d}：結果を学習中`);
     // 記録（モデルの確率など）も、その日より前のデータで学習したモデルの状態で作る（検証に未来の情報が混ざらないように）
     while (simBusy || BATCH.running || CHECK_ALL.running) await bfSleep(200);
@@ -6629,7 +6653,7 @@ function bfPanel(){
   const sum = {}; const byYear = {};
   days.forEach(k => { const r = P[k]; Object.entries(r.tot || {}).forEach(([pk, t]) => { const a = (sum[pk] ||= { inv: 0, ret: 0, races: 0, hit: 0 }); a.inv += t.inv; a.ret += t.ret; a.races += t.races; a.hit += t.hit;
     const yk = k.slice(0, 4), b = ((byYear[yk] ||= {})[pk] ||= { inv: 0, ret: 0, races: 0 }); b.inv += t.inv; b.ret += t.ret; b.races += t.races; }); });
-  const L = { "1000": "1,000円（勝負だけ）", "1000s": "1,000円（全レース）", "5000": "5,000円（勝負だけ）", "5000s": "5,000円（全レース）", "e1000": "期待値最大1点", "dkA": "注目穴馬入り BOX型 1,000円", "dkB": "注目穴馬入り フォーメ型 1,000円", "fr": "前残り穴 1,000円（ルール固定）", "mo": "馬連◎-○ 固定ルール・元（過去の参考）", "mo2": "馬連◎-○ 固定ルール・おすすめ（過去の参考）", "mo3": "馬連◎-○ 140%版（過去の参考）", "mo5": "馬連◎-○ 本命ルール（過去の参考）", "mo6": "検証中：差ありだけ強気", "mo7": "検証中：凡走2つ↑・差あり", "mo8": "検証中：凡走2つ↑・僅差", "mo9": "道悪の言い訳ルール" };
+  const L = { "1000": "1,000円（勝負だけ）", "1000s": "1,000円（全レース）", "5000": "5,000円（勝負だけ）", "5000s": "5,000円（全レース）", "e1000": "期待値最大1点", "dkA": "注目穴馬入り BOX型 1,000円", "dkB": "注目穴馬入り フォーメ型 1,000円", "fr": "前残り穴 1,000円（ルール固定）", "mo": "馬連◎-○ 固定ルール・元（過去の参考）", "mo2": "馬連◎-○ 固定ルール・おすすめ（過去の参考）", "mo3": "馬連◎-○ 140%版（過去の参考）", "mo5": "馬連◎-○ 本命ルール（過去の参考）", "mo6": "検証中：差ありだけ強気", "mo7": "検証中：凡走2つ↑・差あり", "mo8": "検証中：凡走2つ↑・僅差", "mo9": "道悪の言い訳ルール", "d4": "1日4レースの買い" };
   const rate = t => t?.inv ? Math.round(t.ret / t.inv * 100) + "%" : "—";
   const nR = days.reduce((a, k) => a + (P[k].n || 0), 0);
   const last = days.length ? P[days[days.length - 1]] : null;
@@ -6820,7 +6844,7 @@ function betsForLearn(d, id){
   const c = CHECK[d]?.per?.[id]; if (!c) return null;
   const pick = k => c.plans[k] ? [c.plans[k].inv, Math.round(c.plans[k].ret)] : [0, 0];
   const row = checkRows(d, "pre").find(x => x.r.id === id)?.row;
-  return { t1: pick("1000"), t5: pick("5000"), te: pick("e1000"), t1s: pick("1000s"), t5s: pick("5000s"), dkA: pick("dkA"), dkB: pick("dkB"), fr: pick("fr"), mo: pick("mo"), mo2: pick("mo2"), mo3: pick("mo3"), mo4: pick("mo4"), mo5: pick("mo5"), mo6: pick("mo6"), mo7: pick("mo7"), mo8: pick("mo8"), mo9: pick("mo9"), ...predDetail(row) };
+  return { t1: pick("1000"), t5: pick("5000"), te: pick("e1000"), t1s: pick("1000s"), t5s: pick("5000s"), dkA: pick("dkA"), dkB: pick("dkB"), fr: pick("fr"), mo: pick("mo"), mo2: pick("mo2"), mo3: pick("mo3"), mo4: pick("mo4"), mo5: pick("mo5"), mo6: pick("mo6"), mo7: pick("mo7"), mo8: pick("mo8"), mo9: pick("mo9"), d4: pick("d4"), ...predDetail(row) };
 }
 function upsetPanel(d){
   const m = LEARN.model; if (!m?.upsets) return "";
@@ -6873,6 +6897,8 @@ function checkRows(d, mode){
 }
 function computeCheck(d){
   const items = checkRows(d).filter(x => x.res && x.row);
+  items.forEach(it => it.row = moFill(it.r, it.row));
+  { const D4 = dayPicks(items); items.forEach(it => { const p = D4.get(it.r.id); it.row = { ...it.row, d4: p ? p.tickets : null }; }); }
   const plans = { "1000": { label: "1,000円（勝負レースだけ）", key: "t1", alt: "bet" }, "5000": { label: "5,000円（勝負レースだけ）", key: "t5", alt: "bet5" },
     "1000s": { label: "1,000円（全レース・見送り推奨も購入）", key: "t1s" }, "5000s": { label: "5,000円（全レース・見送り推奨も購入）", key: "t5s" }, "e1000": { label: "期待値最大 1点（1,000円）", key: "te" }, "e5000": { label: "期待値最大 1点（5,000円）", key: "te5" },
     "fr": { label: "前残り穴 1,000円（ルール固定：前に行く馬2頭以下のレースで、前に行く10倍以上の馬からワイド3点＋馬連2点）", key: "fr" },
@@ -6880,6 +6906,7 @@ function computeCheck(d){
     "mo6": { label: "検証中：本命ルールで、2,000円にするのは1番人気と2番人気のオッズに差がある（1.5倍以上）ときだけ", key: "mo6" },
     "mo7": { label: "検証中：本命ルールの悪い材料2つ以上・1番人気と2番人気に差あり（1,000円で記録）", key: "mo7" },
     "mo8": { label: "検証中：本命ルールの悪い材料2つ以上・1番人気と2番人気が僅差（1,000円で記録）", key: "mo8" },
+    "d4": { label: "1日4レースの買い（★★道悪→★本命→◎の勝率が高いレースで埋める）", key: "d4" },
     "mo9": { label: "道悪の言い訳ルール：本命ルールのうち◎の前走が稍重・重・不良（悪い材料2つ以上は2,000円・1つは1,000円）", key: "mo9" },
     "dkA": { label: "注目穴馬入り BOX型 1,000円（ワイドBOX3点＋3連複6点＋複勝）", key: "dkA" }, "dkB": { label: "注目穴馬入り フォーメーション型 1,000円（ワイド2点＋3連複7点＋複勝）", key: "dkB" } };
   const tot = {};
@@ -6935,7 +6962,7 @@ async function sendBetsToCloud(d){
 }
 // ===== 成績の一覧（ひと目で比べる）：指定レース・この日・これまでの累計 × 4つの買い方 =====
 const PERF = { race: null, loading: false };
-const PERF_PLANS = [["mo9", "mo9", "★★道悪の言い訳ルール（10/12〜）", "1,000〜2,000円"], ["mo5", "mo5", "★馬連◎-○ 本命ルール（10/11固定）", "1,000〜2,000円"], ["mo6", "mo6", "検証中：差ありだけ強気", "1,000〜2,000円"], ["mo7", "mo7", "検証中：凡走2つ↑・差あり", "1,000円"], ["mo8", "mo8", "検証中：凡走2つ↑・僅差", "1,000円"], ["mo3", "mo3", "馬連◎-○ 140%版（10/11固定）", "1,000円"], ["1000", "t1", "（旧）勝負レースだけ", "1,000円"]];
+const PERF_PLANS = [["d4", "d4", "◆1日4レースの買い（10/12〜）", "1,000〜3,000円"], ["mo9", "mo9", "★★道悪の言い訳ルール（10/12〜）", "1,000〜2,000円"], ["mo5", "mo5", "★馬連◎-○ 本命ルール（10/11固定）", "1,000〜2,000円"], ["mo6", "mo6", "検証中：差ありだけ強気", "1,000〜2,000円"], ["mo7", "mo7", "検証中：凡走2つ↑・差あり", "1,000円"], ["mo8", "mo8", "検証中：凡走2つ↑・僅差", "1,000円"], ["mo3", "mo3", "馬連◎-○ 140%版（10/11固定）", "1,000円"], ["1000", "t1", "（旧）勝負レースだけ", "1,000円"]];
 function perfCell(x, empty){
   if (!x || !x.n) return `<td><div class="big" style="color:var(--muted)">—</div><div class="sub">${empty || "購入なし"}</div></td>`;
   const roi = x.inv ? x.ret / x.inv : 0, prof = x.ret - x.inv;
@@ -6947,7 +6974,7 @@ function perfCum(){
   const recs = SERVER.cloud ? HIST.recs : BF.recs; if (!recs) return null;
   const out = {}; PERF_PLANS.forEach(([, key]) => out[key] = { n: 0, inv: 0, ret: 0, hit: 0 });
   let races = 0;
-  recs.forEach(r => { if (!r.bets) return; races++; PERF_PLANS.forEach(([, key]) => { const v = r.bets[key]; if (/^mo\d?$/.test(key) && r.date < MO_FROM) return; if (v && v[0] > 0){ const o = out[key]; o.n++; o.inv += v[0]; o.ret += v[1]; if (v[1] > 0) o.hit++; } }); });
+  recs.forEach(r => { if (!r.bets) return; races++; PERF_PLANS.forEach(([, key]) => { const v = r.bets[key]; if ((/^mo\d?$/.test(key) || key === "d4") && r.date < MO_FROM) return; if (v && v[0] > 0){ const o = out[key]; o.n++; o.inv += v[0]; o.ret += v[1]; if (v[1] > 0) o.hit++; } }); });
   return { out, races };
 }
 function perfLoad(){
@@ -7177,6 +7204,7 @@ function renderAllTab(){
   const doneN = list.filter(rowOf).length;
   if (!list.length){ el.innerHTML = `<div class="empty"><h3>この日のレースがありません</h3>${SERVER.enabled ? "上の「この日の全レースを取得」を押してください。" : "データ取込タブから出馬表を読み込んでください。"}</div>`; return; }
   const venues = [...new Set(list.map(r => r.venue))];
+  const D4 = dayPicks(list.map(r => ({ r, row: moFill(r, rowOf(r)) })));
   const card = r => {
     const x = moFill(r, rowOf(r)), fromSaved = !BATCH.rows[r.id] && x;
     if (!r.entries?.length) return `<div class="rc pending"><div class="hd"><span class="no">${r.no}R</span><span class="nm">${esc(r.name)}</span></div><div class="cond">出馬表なし</div></div>`;
@@ -7187,6 +7215,8 @@ function renderAllTab(){
       ${x.pace ? `<div class="line small">展開予想 <b>${PACE_JA[x.pace.best]}ペース ${pct(x.pace[x.pace.best])}%</b>（前に行く馬${x.pace.front}頭）</div>` : ""}
       <div class="marks">${x.marks.map((m, k) => `<span class="mk">${MARKS[k]}</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">勝率${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}${(x.subs || []).filter(m => m.num !== starOf(x)?.num).map(m => `<span class="mk">△</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気）</span>` : ""}</span><span class="wpct">勝率${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}${(() => { const m = starOf(x); return m ? `<span class="mk">☆</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">勝率${pct(m.win)}%・3着内${pct(m.top3)}%</span>` : ""; })()}</div>
       ${favLine(x)}
+      ${D4.get(r.id) ? `<div class="line"><span class="verdict go">◆今日の買い</span> 馬連 <b>${D4.get(r.id).tickets[0].nums.join("-")}</b> <b>${D4.get(r.id).tickets[0].stake.toLocaleString()}円</b> <span class="small">（${esc(D4.get(r.id).why)}）</span></div>` : ""}
+      ${r.no === 11 && x.acc?.length ? `<div class="line small">11R 精度重視の予想（市場7：シミュ3）：${x.acc.map((m, k) => `${"◎○▲"[k]}${m.num} ${esc(m.name || "")}（勝率${pct(m.win)}%）`).join("・")}</div>` : ""}
       ${x.mo5?.length ? `<div class="line"><span class="verdict go">★買い：馬連 ◎-○（本命ルール）</span> <b>${x.mo5[0].nums.join("-")}</b> <b class="pos">${x.mo5[0].stake.toLocaleString()}円</b>${x.mo5[0].stake >= 2000 ? `<span class="small">（悪い材料2つ以上＝信頼度 高${x.moGap === false ? "。検証中の候補では1,000円" : ""}）</span>` : ""}${x.moBad?.length ? `<span class="small">（◎の前走：${esc(x.moBad.join("・"))}）</span>` : ""}${x.mo9?.length ? `<br><b class="pos">★★道悪の言い訳ルールにも該当</b><span class="small">（◎の前走は「${esc(x.moWet || "")}」の馬場で凡走＝言い訳あり。過去99レースで回収率402%）</span>` : x.moWet === null ? `<br><span class="small">◎の前走は良馬場（言い訳なし。この形は過去の回収率が低め）</span>` : ""}</div>` : x.mo?.length ? `<div class="line"><span class="small">馬連 ◎-○ ${x.mo[0].nums.join("-")}：元のルールには当てはまるが本命ルール外（買わない）${x.moBad?.length ? "" : "・◎の前走に悪い材料なし"}${x.moBad?.length ? "・1番人気が2倍未満" : ""}</span></div>` : ""}
       ${x.uma ? `<div class="line">最有力の馬連 <b>${x.uma.nums.join("-")}</b> <span class="small">（シミュの的中確率${pct(x.uma.p)}%${x.uma.odds ? `・${x.uma.odds}倍` : ""}）</span></div>` : ""}
       ${x.tri ? `<div class="line">最有力の3連単 <b>${x.tri.nums.join("→")}</b> <span class="small">（${pct(x.tri.p)}%）</span></div>` : ""}
@@ -7212,6 +7242,7 @@ function renderAllTab(){
   el.innerHTML = `
     ${checkPanel(d)}
     ${CHECK[d] ? checkAllPanel() : ""}
+    ${(() => { const L = list.filter(r => D4.get(r.id)); return L.length ? `<div class="learnbox"><h3>◆今日の買い（${L.length}レース）</h3><p class="small">★★道悪の言い訳ルール → ★本命ルール（前走良→今回良は除く）→ 足りなければ◎の勝率が高いレースで、1日4レース以上にしています。過去約2年：回収率156%（前半160%・後半152%）。埋め分だけだと92%です。</p><ul class="small">${L.map(r => { const p = D4.get(r.id); return `<li>${esc(r.venue)}${r.no}R 馬連 <b>${p.tickets[0].nums.join("-")}</b> ${p.tickets[0].stake.toLocaleString()}円（${esc(p.why)}）</li>`; }).join("")}</ul></div>` : ""; })()}
     ${safePanel("穴馬の振り返り", () => arvPanel(d))}
     ${xPostPanel(d, list, rowOf, bestDark)}
     <div class="allhead"><h3>${esc(d.slice(5).replace("-", "/"))} 全レース予想</h3><span class="small">${doneN}/${list.length}レース計算済み${BATCH.running ? `（計算中 ${BATCH.done}/${BATCH.total}）` : ""}。一括計算は各条件 ${BATCH_RUNS.toLocaleString()}回×馬場4×ペース3。レースを開いて「シミュレーション実行」を押すと1万回で計算し直せます。</span></div>
