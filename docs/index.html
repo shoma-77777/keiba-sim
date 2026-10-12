@@ -5658,8 +5658,10 @@ async function raceImage(r, x){
     wrap(why, 48, ty + 222, W - 110, 38, 26, "#fff");
   } else txt("この レースは注目穴馬なし", 60, y + 200, 40, "#fff");
   // 印の表
-  y = 810; const rows = [...(x.marks || []).map((m, k) => [MARKS[k], m]), ...((x.subs || []).slice(0, 1).map(m => ["△", m]))].slice(0, 4);
-  rr(24, y, W - 48, 70 + rows.length * 86, 16, "#fff");
+  const TRI = (x.field >= 14 ? (x.subs5?.length ? x.subs5 : x.subs || []).slice(0, 5) : (x.subs || []).slice(0, 1));
+  y = 810; const rows = [...(x.marks || []).map((m, k) => [MARKS[k], m]), ...(TRI.length === 1 ? [["△", TRI[0]]] : [])].slice(0, 4);
+  const triRow = TRI.length >= 2;
+  rr(24, y, W - 48, 70 + (rows.length + (triRow ? 1 : 0)) * 86, 16, "#fff");
   g.save(); g.beginPath(); g.roundRect(24, y, W - 48, 70, [16, 16, 0, 0]); g.fillStyle = "#0f3d22"; g.fill(); g.restore();
   const cols = [[64, "印"], [140, "馬番"], [190, "馬名（騎手・脚質・人気）"], [500, "1着率"], [620, "連対率"], [740, "複勝率"], [880, "単勝オッズ"]];
   cols.forEach(([cx, t], k) => txt(t, k < 3 ? (k === 2 ? cx : cx) : cx, y + 44, k === 2 ? 22 : 22, "#fff", { al: k === 2 ? "left" : "center" }));
@@ -5669,8 +5671,12 @@ async function raceImage(r, x){
     txt(m.name || "", 190, ry + 42, 28, "#111", { max: 270 }); txt([m.jockey, m.style, m.pop ? m.pop + "番人気" : null].filter(Boolean).join("・"), 190, ry + 74, 19, "#444", { w: "normal", max: 270 });
     txt(P(m.win), 500, ry + 54, 27, "#111", { al: "center" }); txt(P(m.top2), 620, ry + 54, 25, "#111", { al: "center", w: "normal" }); txt(P(m.top3), 740, ry + 54, 25, "#111", { al: "center", w: "normal" });
     txt(m.odds ? m.odds + "倍" : "—", 880, ry + 54, 27, "#111", { al: "center" }); });
+  if (triRow){ const ry = y + 70 + rows.length * 86; if (rows.length % 2){ g.fillStyle = "#f4f4f4"; g.fillRect(24, ry, W - 48, 86); }
+    txt("△", 64, ry + 58, 46, "#111", { al: "center" }); const cw = Math.min(170, (W - 140) / TRI.length);
+    TRI.forEach((m, k) => { const cx = 112 + k * cw, wk = wakuNo(r, m.num, x.field, m.waku); rr(cx, ry + 18, 50, 50, 6, WAKU[wk - 1] || "#fff", "#999"); txt(m.num, cx + 25, ry + 55, 30, WAKU_TX[wk - 1] || "#111", { al: "center" });
+      txt(P(m.win), cx + 58, ry + 42, 22, "#111", { w: "bold" }); txt(m.pop ? m.pop + "人気" : "", cx + 58, ry + 70, 18, "#444", { w: "normal" }); }); }
   // ポイントとヒント
-  y = 810 + 70 + rows.length * 86 + 22; const bh = H - y - 36;
+  y = 810 + 70 + (rows.length + (triRow ? 1 : 0)) * 86 + 22; const bh = H - y - 36;
   rr(24, y, 470, bh, 16, "rgba(0,0,0,0.5)", "rgba(255,255,255,0.25)"); rr(530, y, 470, bh, 16, "rgba(0,0,0,0.5)", "#2a6fdb", 3);
   const head = (x0, t, col) => { rr(x0, y + 22, 8, 40, 4, col); txt(t, x0 + 20, y + 56, 32, "#fff", { f: FD, w: "normal" }); g.strokeStyle = col; g.globalAlpha = 0.5; g.lineWidth = 1.5; g.beginPath(); g.moveTo(x0, y + 74); g.lineTo(x0 + 430, y + 74); g.stroke(); g.globalAlpha = 1; };
   head(44, "レースのポイント", "#e53935"); head(550, "買い目のヒント", "#4f8ef7");
@@ -5747,6 +5753,8 @@ function summarizeSim(r, sim){
     marks: w.slice(0, 3).map(mk),
     subs: (() => { const dn = sim.dark?.f.num; const m = marksFor(w, dn != null ? s => s.num === dn : null); return w.map((x, k) => m[k] === "△" ? mk(x) : null).filter(Boolean); })(),
     // ◎○▲に入った5番人気以下（2頭以上なら画像は2頭版）
+    // 14頭以上は△を5頭まで（画像用）
+    subs5: f.length >= 14 ? w.slice(3, 8).map(mk) : null,
     darks: w.slice(0, 3).map((x, k) => ({ x, k })).filter(q => (f[q.x.i].pop || 0) >= 5).map(q => ({ ...mk(q.x), mk: q.k, ana: (f[q.x.i].ana || []).slice(0, 3) })),
     star: (() => { const dn = sim.dark?.f.num; const k = w.findIndex(s => s.num === dn); return dn != null && k >= 3 ? mk(w[k]) : null; })(),
     pace: (() => { const pf = Engine.paceForecast(sim.ctx); return { slow: pf.slow, mid: pf.mid, high: pf.high, best: pf.best, front: pf.frontCount }; })(),
