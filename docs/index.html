@@ -5523,6 +5523,152 @@ function moFill(r, x){
 // ===== 1日最低4レースの買い（2026-10-12）：①★★道悪の言い訳ルール（2,000〜3,000円）②本命ルール（前走良→今回良は除く・1,000円）
 //  ③4レースに足りない分は、◎の勝率（シミュ）が高いレースから馬連◎-○を1,000円。過去約2年：1日4.0レース・回収率156%（前半160%・後半152%・8期間すべて103%以上）
 //  ③の埋め分だけでは回収率92%（ここは損になりやすい分です）
+// ===== レースの予想画像（1024×1536のPNG）：ボタン1つで作って保存できる =====
+// 馬番の色：アプリの枠色（3D再生・出馬表と同じ）。枠は出馬表の枠番を優先
+function drawHorse(g, ox, oy, s, col){
+  g.save(); g.translate(ox, oy); g.scale(s, s); g.lineCap = "round"; g.lineJoin = "round";
+  const grad = g.createLinearGradient(0, 0, 0, 250); grad.addColorStop(0, col[0]); grad.addColorStop(1, col[1]);
+  const dark = col[2];
+  // 脚（付け根が太く先が細い）
+  const leg = (pts, w0, w1, c) => { g.fillStyle = c; for (let i = 0; i < pts.length - 1; i++){ const [x1, y1] = pts[i], [x2, y2] = pts[i + 1]; const t1 = w0 + (w1 - w0) * i / (pts.length - 1), t2 = w0 + (w1 - w0) * (i + 1) / (pts.length - 1);
+      const a = Math.atan2(y2 - y1, x2 - x1) + Math.PI / 2, cx = Math.cos(a), sy = Math.sin(a);
+      g.beginPath(); g.moveTo(x1 + cx * t1 / 2, y1 + sy * t1 / 2); g.lineTo(x2 + cx * t2 / 2, y2 + sy * t2 / 2); g.lineTo(x2 - cx * t2 / 2, y2 - sy * t2 / 2); g.lineTo(x1 - cx * t1 / 2, y1 - sy * t1 / 2); g.closePath(); g.fill();
+      g.beginPath(); g.arc(x2, y2, t2 / 2, 0, Math.PI * 2); g.fill(); }
+    const [hx, hy] = pts[pts.length - 1], [px, py] = pts[pts.length - 2]; const a = Math.atan2(hy - py, hx - px); g.save(); g.translate(hx, hy); g.rotate(a); g.fillStyle = dark; g.beginPath(); g.ellipse(4, 0, 9, 7, 0, 0, Math.PI * 2); g.fill(); g.restore(); };
+  // 奥の脚（少し暗く）
+  const far = col[3];
+  leg([[92, 140], [70, 178], [40, 196], [14, 200]], 26, 9, far);
+  leg([[228, 130], [262, 168], [276, 196], [300, 204]], 22, 9, far);
+  // 尾
+  g.fillStyle = grad; g.beginPath(); g.moveTo(58, 96); g.bezierCurveTo(30, 92, 5, 105, -18, 140); g.bezierCurveTo(-5, 128, 10, 122, 22, 120); g.bezierCurveTo(5, 140, -2, 160, -6, 178); g.bezierCurveTo(20, 150, 40, 128, 60, 112); g.closePath(); g.fill();
+  // 胴・首・頭（1本の輪郭）
+  g.fillStyle = grad; g.beginPath();
+  g.moveTo(58, 98); g.bezierCurveTo(90, 78, 150, 86, 200, 78);
+  g.bezierCurveTo(225, 70, 248, 42, 268, 22);
+  g.lineTo(272, 4); g.lineTo(281, 18);
+  g.bezierCurveTo(298, 26, 318, 40, 332, 54); g.bezierCurveTo(336, 62, 328, 68, 318, 66);
+  g.bezierCurveTo(305, 62, 295, 60, 285, 62);
+  g.bezierCurveTo(270, 80, 258, 108, 246, 130);
+  g.bezierCurveTo(230, 148, 200, 154, 150, 154); g.bezierCurveTo(120, 154, 100, 152, 90, 148);
+  g.bezierCurveTo(62, 146, 44, 126, 50, 108); g.closePath(); g.fill();
+  // たてがみ
+  g.fillStyle = dark; g.beginPath(); g.moveTo(268, 22); g.bezierCurveTo(250, 42, 230, 66, 206, 78); g.bezierCurveTo(222, 62, 238, 46, 258, 26); g.closePath(); g.fill();
+  // 目と鼻
+  g.fillStyle = dark; g.beginPath(); g.arc(292, 32, 3.2, 0, Math.PI * 2); g.fill(); g.beginPath(); g.arc(326, 57, 2.5, 0, Math.PI * 2); g.fill();
+  // 手前の脚
+  leg([[110, 140], [96, 186], [72, 214], [56, 232]], 30, 10, grad);
+  leg([[238, 128], [280, 150], [312, 142], [334, 150]], 24, 9, grad);
+  // ゼッケン
+  g.fillStyle = "rgba(255,255,255,0.92)"; g.beginPath(); g.roundRect(150, 104, 44, 32, 4); g.fill();
+  // 騎手（前かがみ）
+  const jk = col[4] || "#fff";
+  g.fillStyle = jk; g.beginPath(); g.moveTo(166, 80); g.bezierCurveTo(170, 56, 196, 36, 226, 32); g.bezierCurveTo(236, 34, 238, 46, 230, 50); g.bezierCurveTo(212, 56, 196, 70, 192, 88); g.closePath(); g.fill();
+  g.beginPath(); g.moveTo(178, 84); g.bezierCurveTo(190, 98, 202, 104, 214, 104); g.lineTo(216, 96); g.bezierCurveTo(204, 94, 196, 86, 192, 78); g.closePath(); g.fill(); // 脚
+  g.fillStyle = dark; g.beginPath(); g.roundRect(210, 96, 16, 12, 3); g.fill(); // ブーツ
+  g.fillStyle = jk; g.beginPath(); g.moveTo(222, 40); g.bezierCurveTo(240, 48, 254, 54, 268, 54); g.lineTo(268, 60); g.bezierCurveTo(250, 62, 236, 56, 220, 50); g.closePath(); g.fill(); // 腕
+  g.fillStyle = col[5] || "#c62828"; g.beginPath(); g.arc(238, 22, 13, Math.PI, 0); g.lineTo(253, 26); g.lineTo(224, 26); g.closePath(); g.fill(); // ヘルメット
+  g.fillStyle = jk; g.beginPath(); g.arc(238, 26, 10, 0, Math.PI); g.fill();
+  g.strokeStyle = dark; g.lineWidth = 2; g.beginPath(); g.moveTo(268, 57); g.lineTo(318, 58); g.stroke(); // 手綱
+  g.restore();
+}
+// 枠番：アプリの出馬表・印の表示と同じ値を使う（①予想に保存した枠 ②出馬表の枠番 ③頭数からJRAの決まりで計算）
+const wakuNo = (r, num, N, saved) => { const w = +saved || +r?.entries?.find(e => +e.num === +num)?.waku; if (w >= 1 && w <= 8) return w; const n = r?.entries?.length || N; return Engine.wakuOf ? Engine.wakuOf(+num, n) : 1; };
+async function raceImage(r, x){
+  try { await document.fonts.load('48px "Dela Gothic One"'); await document.fonts.load('bold 24px "Zen Kaku Gothic New"'); } catch (e) {}
+  const W = 1024, H = 1536, c = document.createElement("canvas"); c.width = W; c.height = H; const g = c.getContext("2d");
+  const FD = '"Dela Gothic One","Zen Kaku Gothic New",sans-serif', FB = '"Zen Kaku Gothic New","Hiragino Sans","Yu Gothic",sans-serif';
+  const font = (sz, w = "bold", f = FB) => g.font = `${w} ${sz}px ${f}`;
+  const txt = (t, x0, y0, sz, col = "#fff", opt = {}) => { font(sz, opt.w || "bold", opt.f || FB); g.fillStyle = col; g.textAlign = opt.al || "left"; g.textBaseline = opt.bl || "alphabetic"; if (opt.max) g.fillText(String(t), x0, y0, opt.max); else g.fillText(String(t), x0, y0); };
+  const rr = (x0, y0, w, h, rad, fill, stroke, lw = 2) => { g.beginPath(); g.roundRect(x0, y0, w, h, rad); if (fill){ g.fillStyle = fill; g.fill(); } if (stroke){ g.strokeStyle = stroke; g.lineWidth = lw; g.stroke(); } };
+  const wrap = (t, x0, y0, maxW, lh, sz, col) => { font(sz); g.fillStyle = col; g.textAlign = "left"; let line = "", y = y0; for (const ch of String(t)){ if (g.measureText(line + ch).width > maxW){ g.fillText(line, x0, y); line = ch; y += lh; } else line += ch; } if (line) g.fillText(line, x0, y); return y; };
+  const P = v => v == null ? "—" : (v * 100).toFixed(1) + "%";
+  // 背景：芝のストライプ
+  const bg = g.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, "#0d2a16"); bg.addColorStop(0.45, "#0a1f10"); bg.addColorStop(1, "#06120a"); g.fillStyle = bg; g.fillRect(0, 0, W, H);
+  g.save(); g.globalAlpha = 0.07; for (let i = 0; i < 14; i++){ g.fillStyle = i % 2 ? "#4caf50" : "#2e7d32"; g.fillRect(0, 300 + i * 26, W, 13); } g.restore();
+  const glow = g.createRadialGradient(820, 160, 20, 820, 160, 420); glow.addColorStop(0, "rgba(255,215,64,0.18)"); glow.addColorStop(1, "rgba(255,215,64,0)"); g.fillStyle = glow; g.fillRect(0, 0, W, 600);
+  // 右上：馬のイラスト（騎手の帽子は注目穴馬の枠の色）
+  const capCol = x.dark ? (WAKU[wakuNo(r, x.dark.num, x.field, x.dark.waku) - 1] || "#2e9e4b") : "#2e9e4b";
+  g.save(); g.globalAlpha = 0.95; drawHorse(g, 612, 54, 0.95, ["#fff1c1", "#d9a521", "#6b4b0e", "#a9821c", "#ffffff", capCol === "#fff" || capCol === "#ffffff" ? "#e0e0e0" : capCol]); g.restore();
+  // 見出し
+  const date = r.date ? r.date.replace(/-/g, ".") : ""; const wd = r.date ? "日月火水木金土"[new Date(r.date).getDay()] : "";
+  g.fillStyle = "#f2c94c"; g.beginPath(); g.moveTo(620, 0); g.lineTo(W, 0); g.lineTo(W, 52); g.lineTo(600, 52); g.closePath(); g.fill();
+  txt(`${date}（${wd}）${r.postTime || ""}発走`, W - 24, 36, 26, "#1a1a1a", { al: "right" });
+  txt(`${r.venue}${r.no}R`, 44, 112, 72, "#fff", { f: FD, w: "normal" });
+  txt(r.name || "", 44, 196, 64, "#fff", { f: FD, w: "normal", max: 560 });
+  const pace = x.pace ? `${PACE_JA[x.pace.best]}ペース想定` : "";
+  txt(`${r.surface}${r.distance}m｜${pace}｜${x.field}頭`, 46, 244, 30, "#e8e8e8");
+  // 注目穴馬
+  const d = x.dark; let y = 270;
+  const DS = (x.darks?.length ? x.darks : (x.marks || []).map((m, k) => ({ ...m, mk: k })).filter(m => (m.pop || 0) >= 5)).slice(0, 2);
+  rr(24, y, W - 48, 520, 18, "rgba(0,0,0,0.45)", "rgba(242,201,76,0.35)");
+  rr(44, y + 18, 8, 50, 4, "#f2c94c"); txt("注目穴馬", 66, y + 60, 44, "#f2c94c", { f: FD, w: "normal" });
+  if (DS.length >= 2 || d?.conf){ const lbl = DS.length >= 2 ? `◎○▲に入った穴馬 ${DS.length}頭` : "◎○▲に入った穴馬"; font(22); const lw = g.measureText(lbl).width + 28; rr(300, y + 28, lw, 38, 19, "rgba(242,201,76,0.15)", "#f2c94c", 1.5); txt(lbl, 300 + lw / 2, y + 55, 22, "#f2c94c", { al: "center" }); }
+  g.strokeStyle = "rgba(242,201,76,0.4)"; g.lineWidth = 1.5; g.beginPath(); g.moveTo(44, y + 82); g.lineTo(W - 44, y + 82); g.stroke();
+  if (DS.length >= 2){
+    // 2頭版：左右に並べる
+    DS.forEach((h, k) => { const x0 = 44 + k * 476, cw = 460, hy = y + 98; const wk = wakuNo(r, h.num, x.field, h.waku);
+      rr(x0, hy, cw, 400, 14, "rgba(255,255,255,0.05)", "rgba(242,201,76,0.3)", 1.5);
+      txt(MARKS[h.mk] || "", x0 + 18, hy + 58, 44, "#f2c94c");
+      rr(x0 + 70, hy + 16, 72, 72, 8, WAKU[wk - 1] || "#fff", "#999"); txt(h.num, x0 + 106, hy + 74, 54, WAKU_TX[wk - 1] || "#111", { al: "center", f: FD, w: "normal" });
+      txt(h.name || "", x0 + 156, hy + 62, 40, "#fff", { f: FD, w: "normal", max: cw - 170 });
+      txt(`${h.pop ? h.pop + "番人気" : ""}｜単勝`, x0 + 20, hy + 128, 28, "#fff"); font(28); const ow = g.measureText(`${h.pop ? h.pop + "番人気" : ""}｜単勝`).width; txt(`${h.odds ?? "—"}倍`, x0 + 28 + ow, hy + 130, 36, "#f2c94c");
+      rr(x0 + 16, hy + 152, cw - 32, 96, 10, "#c62828"); txt("1着率（シミュ）", x0 + 34, hy + 190, 24, "#fff"); txt(P(h.win), x0 + cw - 34, hy + 230, 56, "#fff", { al: "right", f: FD, w: "normal" });
+      const t2 = (xx, lb, v) => { rr(xx, hy + 262, (cw - 48) / 2, 84, 10, "#fff"); txt(lb, xx + (cw - 48) / 4, hy + 292, 22, "#222", { al: "center" }); txt(v, xx + (cw - 48) / 4, hy + 334, 36, "#111", { al: "center", f: FD, w: "normal" }); };
+      t2(x0 + 16, "連対率", P(h.top2)); t2(x0 + 32 + (cw - 48) / 2, "複勝率", P(h.top3));
+      const tg = [...(h.ana || []), h.style].filter(Boolean).slice(0, 2).join("・"); if (tg) txt(tg, x0 + cw / 2, hy + 382, 22, "#f7e7a6", { al: "center", max: cw - 30 }); });
+  } else if (d){
+    const wk = wakuNo(r, d.num, x.field, d.waku);
+    rr(48, y + 96, 112, 112, 10, WAKU[wk - 1] || "#fff", "#999"); txt(d.num, 104, y + 186, 86, WAKU_TX[wk - 1] || "#111", { al: "center", f: FD, w: "normal" });
+    txt(d.name || "", 190, y + 162, 70, "#fff", { f: FD, w: "normal", max: 790 });
+    txt(`${d.pop ? d.pop + "番人気" : ""}｜単勝 `, 192, y + 214, 34, "#fff"); font(34); const ow = g.measureText(`${d.pop ? d.pop + "番人気" : ""}｜単勝 `).width; txt(`${d.odds ?? "—"}`, 192 + ow, y + 216, 46, "#f2c94c"); font(46); txt("倍", 192 + ow + g.measureText(`${d.odds ?? "—"}`).width + 6, y + 214, 34, "#fff");
+    // 数字のタイル
+    const ty = y + 236; rr(44, ty, 420, 112, 12, "#c62828"); txt("1着率", 78, ty + 44, 30, "#fff"); txt("（シミュレーション）", 58, ty + 82, 20, "#fff"); txt(P(d.win), 444, ty + 92, 66, "#fff", { al: "right", f: FD, w: "normal" });
+    const tile = (x0, lb, v) => { rr(x0, ty, 160, 112, 12, "#fff"); txt(lb, x0 + 80, ty + 38, 24, "#222", { al: "center" }); txt(v, x0 + 80, ty + 92, 44, "#111", { al: "center", f: FD, w: "normal" }); };
+    tile(476, "連対率", P(d.top2)); tile(646, "複勝率", P(d.top3)); tile(816, "人気", d.pop ? d.pop + "番" : "—");
+    // タグ
+    const tags = [...(d.ana || []), d.style ? `${d.style}` : null, d.conf ? "◎○▲に入った穴" : null].filter(Boolean).slice(0, 4);
+    tags.forEach((t, k) => { const x0 = 44 + k * 236; rr(x0, ty + 128, 222, 52, 10, "#f7e7a6"); txt(t, x0 + 111, ty + 163, 24, "#1a1a1a", { al: "center", max: 206 }); });
+    const why = (d.why || []).slice(0, 2).join("。") || `${d.pop || ""}番人気ながらシミュレーションの1着率${P(d.win)}。`;
+    wrap(why, 48, ty + 222, W - 110, 38, 26, "#fff");
+  } else txt("この レースは注目穴馬なし", 60, y + 200, 40, "#fff");
+  // 印の表
+  y = 810; const rows = [...(x.marks || []).map((m, k) => [MARKS[k], m]), ...((x.subs || []).slice(0, 1).map(m => ["△", m]))].slice(0, 4);
+  rr(24, y, W - 48, 70 + rows.length * 86, 16, "#fff");
+  g.save(); g.beginPath(); g.roundRect(24, y, W - 48, 70, [16, 16, 0, 0]); g.fillStyle = "#0f3d22"; g.fill(); g.restore();
+  const cols = [[64, "印"], [140, "馬番"], [190, "馬名（騎手・脚質・人気）"], [500, "1着率"], [620, "連対率"], [740, "複勝率"], [880, "単勝オッズ"]];
+  cols.forEach(([cx, t], k) => txt(t, k < 3 ? (k === 2 ? cx : cx) : cx, y + 44, k === 2 ? 22 : 22, "#fff", { al: k === 2 ? "left" : "center" }));
+  rows.forEach(([mk, m], k) => { const ry = y + 70 + k * 86; if (k % 2) { g.fillStyle = "#f4f4f4"; g.fillRect(24, ry, W - 48, 86); } if ((d && m.num === d.num) || DS.some(h => h.num === m.num && DS.length >= 2)){ g.fillStyle = "#fff6d5"; g.fillRect(24, ry, W - 48, 86); }
+    txt(mk, 64, ry + 58, 46, mk === "◎" || mk === "○" ? "#c62828" : "#111", { al: "center" });
+    const wk = wakuNo(r, m.num, x.field, m.waku); rr(116, ry + 18, 50, 50, 6, WAKU[wk - 1] || "#fff", "#999"); txt(m.num, 141, ry + 55, 30, WAKU_TX[wk - 1] || "#111", { al: "center" });
+    txt(m.name || "", 190, ry + 42, 28, "#111", { max: 270 }); txt([m.jockey, m.style, m.pop ? m.pop + "番人気" : null].filter(Boolean).join("・"), 190, ry + 74, 19, "#444", { w: "normal", max: 270 });
+    txt(P(m.win), 500, ry + 54, 27, "#111", { al: "center" }); txt(P(m.top2), 620, ry + 54, 25, "#111", { al: "center", w: "normal" }); txt(P(m.top3), 740, ry + 54, 25, "#111", { al: "center", w: "normal" });
+    txt(m.odds ? m.odds + "倍" : "—", 880, ry + 54, 27, "#111", { al: "center" }); });
+  // ポイントとヒント
+  y = 810 + 70 + rows.length * 86 + 22; const bh = H - y - 36;
+  rr(24, y, 470, bh, 16, "rgba(0,0,0,0.5)", "rgba(255,255,255,0.25)"); rr(530, y, 470, bh, 16, "rgba(0,0,0,0.5)", "#2a6fdb", 3);
+  const head = (x0, t, col) => { rr(x0, y + 22, 8, 40, 4, col); txt(t, x0 + 20, y + 56, 32, "#fff", { f: FD, w: "normal" }); g.strokeStyle = col; g.globalAlpha = 0.5; g.lineWidth = 1.5; g.beginPath(); g.moveTo(x0, y + 74); g.lineTo(x0 + 430, y + 74); g.stroke(); g.globalAlpha = 1; };
+  head(44, "レースのポイント", "#e53935"); head(550, "買い目のヒント", "#4f8ef7");
+  const check = (x0, yy, t, col) => { font(22); rr(x0, yy - 28, 34, 34, 6, "#fff"); g.strokeStyle = col; g.lineWidth = 5; g.beginPath(); g.moveTo(x0 + 7, yy - 11); g.lineTo(x0 + 15, yy - 3); g.lineTo(x0 + 28, yy - 21); g.stroke(); txt(t, x0 + 46, yy, 22, "#fff", { max: 400 }); };
+  const pts = []; if (x.pace) pts.push(`${PACE_JA[x.pace.best]}ペース想定（スロー${Math.round(x.pace.slow * 100)}%・ハイ${Math.round(x.pace.high * 100)}%）`, `前に行きたい馬${x.pace.front}頭`);
+  const ft = x.mktFav != null ? favTrust(x.favOdds) : null; if (ft) pts.push(`1番人気の信頼度「${ft.lb}」（3着内${Math.round(ft.top3)}%）`);
+  if (x.going) pts.push(`馬場「${x.going}」想定`);
+  const hints = []; const m0 = x.marks?.[0], m1 = x.marks?.[1], m2 = x.marks?.[2];
+  if (m0) hints.push(`本命は${m0.num}（1着率${P(m0.win)}）`); if (m1 && m2) hints.push(`相手は${m1.num}・${m2.num}`); if (DS.length >= 2) hints.push(`穴なら${DS.map(h => h.num).join("・")}（${DS.map(h => h.pop + "番人気").join("・")}）`); else if (d) hints.push(`穴なら${d.num}（${d.pop || "?"}番人気）`);
+  if (x.mo9?.length) hints.push(`★★馬連${x.mo9[0].nums.join("-")}（道悪の言い訳）`); else if (x.mo5?.length) hints.push(`★馬連${x.mo5[0].nums.join("-")}（本命ルール）`);
+  pts.slice(0, 4).forEach((t, k) => check(48, y + 106 + k * 42, t, "#c62828")); hints.slice(0, 4).forEach((t, k) => check(554, y + 106 + k * 42, t, "#1e5bc6"));
+  txt("※シミュレーションによる予想です。馬券は余裕資金の範囲で。", W / 2, H - 10, 18, "rgba(255,255,255,0.6)", { al: "center", w: "normal" });
+  return c.toDataURL("image/png");
+}
+async function showRaceImage(id){
+  const r = DB.races[id]; const x = moFill(r, BATCH.rows[id] || BATCH.saved[r?.date]?.rows?.find(q => q.id === id)); if (!r || !x?.marks?.length){ toast("先にこのレースを計算してください"); return; }
+  toast("画像を作っています…"); const url = await raceImage(r, x);
+  let m = $("#imgModal"); if (!m){ m = document.createElement("div"); m.id = "imgModal"; m.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px"; document.body.appendChild(m); m.onclick = e => { if (e.target === m) m.remove(); }; }
+  const fn = `${r.date}_${r.venue}${r.no}R.png`;
+  m.innerHTML = `<div style="background:#111;padding:12px;border-radius:12px;max-height:100%;overflow:auto;text-align:center"><img src="${url}" style="max-width:min(480px,90vw);height:auto;display:block;margin:0 auto 10px"><a class="btn primary" href="${url}" download="${fn}">画像を保存</a> <button class="btn" id="imgCopy">画像をコピー</button> <button class="btn" id="imgClose">閉じる</button></div>`;
+  $("#imgClose").onclick = () => m.remove();
+  $("#imgCopy").onclick = async () => { try { const blob = await (await fetch(url)).blob(); await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]); toast("画像をコピーしました（Xなどに貼り付けできます）"); } catch (e) { toast("コピーできませんでした。画像を右クリック（スマホは長押し）してコピーしてください"); } };
+}
+window.raceImage = raceImage; window.showRaceImage = showRaceImage;
 function dayPicks(items){
   const out = new Map(), core = [], rest = [];
   items.forEach(({ r, row }) => { if (!row?.marks?.length || row.marks.length < 2) return; const x = row;
@@ -5537,7 +5683,7 @@ function dayPicks(items){
 function summarizeSim(r, sim){
   const w = sim.weighted.slice().sort((a, b) => b.win - a.win);
   const f = sim.ctx.field;
-  const mk = s => ({ num: s.num, name: s.name, win: s.win, top3: s.top3, odds: f[s.i].odds ?? null, pop: f[s.i].pop ?? null });
+  const mk = s => ({ num: s.num, name: s.name, win: s.win, top2: s.top2, top3: s.top3, odds: f[s.i].odds ?? null, pop: f[s.i].pop ?? null, waku: f[s.i].waku ?? null, jockey: f[s.i].jockey || null, style: f[s.i].prof?.style || f[s.i].style || null });
   const tri = sim.triTop[0];
   const tk = t => `${t.type} ${t.nums.join("-")} ${t.stake}円→的中${Math.round(t.stake * t.odds).toLocaleString()}円`;
   const tks = pl => pl && !pl.none && !pl.noOdds && pl.tickets?.length ? pl.tickets.map(t => ({ type: t.type, nums: t.nums, stake: t.stake, odds: t.odds })) : null;
@@ -5553,6 +5699,8 @@ function summarizeSim(r, sim){
     going: sim.going, runs: sim.runs, at: new Date().toISOString(),
     marks: w.slice(0, 3).map(mk),
     subs: (() => { const dn = sim.dark?.f.num; const m = marksFor(w, dn != null ? s => s.num === dn : null); return w.map((x, k) => m[k] === "△" ? mk(x) : null).filter(Boolean); })(),
+    // ◎○▲に入った5番人気以下（2頭以上なら画像は2頭版）
+    darks: w.slice(0, 3).map((x, k) => ({ x, k })).filter(q => (f[q.x.i].pop || 0) >= 5).map(q => ({ ...mk(q.x), mk: q.k, ana: (f[q.x.i].ana || []).slice(0, 3) })),
     star: (() => { const dn = sim.dark?.f.num; const k = w.findIndex(s => s.num === dn); return dn != null && k >= 3 ? mk(w[k]) : null; })(),
     pace: (() => { const pf = Engine.paceForecast(sim.ctx); return { slow: pf.slow, mid: pf.mid, high: pf.high, best: pf.best, front: pf.frontCount }; })(),
     t1: tks(sim.plans?.[1000]), t5: tks(sim.plans?.[5000]),
@@ -5571,7 +5719,7 @@ function summarizeSim(r, sim){
     uma: (() => { if (!sim.triMap) return null; const P = new Map(); sim.triMap.forEach((p, k) => { const [a, b] = k.split("-").map(Number); const kk = [f[a].num, f[b].num].sort((x, y) => x - y).join("-"); P.set(kk, (P.get(kk) || 0) + p); });
       const best = [...P.entries()].sort((a, b) => b[1] - a[1])[0]; if (!best) return null; const o = r.comboOdds?.馬連?.[best[0]];
       return { nums: best[0].split("-").map(Number), p: best[1], odds: o ? +(+o).toFixed(1) : null }; })(),
-    dark: sim.dark ? { conf: !!sim.dark.conf, num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: MM ? MM.place[sim.dark.i] : sim.dark.a.top3, win: MM ? MM.win[sim.dark.i] : sim.dark.a.win, jockey: sim.dark.f.jockey || null, style: sim.dark.f.prof?.style || null, why: darkWhy(sim) } : null,
+    dark: sim.dark ? { waku: sim.dark.f.waku ?? null, conf: !!sim.dark.conf, ana: (sim.dark.f.ana || []).slice(0, 4), top2: sim.dark.a.top2 ?? null, num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: MM ? MM.place[sim.dark.i] : sim.dark.a.top3, win: MM ? MM.win[sim.dark.i] : sim.dark.a.win, jockey: sim.dark.f.jockey || null, style: sim.dark.f.prof?.style || null, why: darkWhy(sim) } : null,
     ...dkTickets(w.map(x => x.num), sim.dark?.f.num),
     ...moTickets(w, f, r),
     fr: (() => { const H = f.filter(x => x.odds > 1), pw = MM ? H.map(x => MM.win[f.indexOf(x)]) : H.map(x => sim.weighted.find(s2 => s2.num === x.num)?.win || 0);
@@ -7229,7 +7377,7 @@ function renderAllTab(){
       ${x.oddsAsOf ? `<div class="cond">オッズ ${esc(x.oddsAsOf)} 時点</div>` : ""}
       ${(() => { const c = CHECK[d]?.per?.[r.id]; const moR = x.mo5?.length && r.result?.pay ? (() => { const inv = x.mo5.reduce((a, t) => a + t.stake, 0), ret = x.mo5.reduce((a, t) => a + payOf(t, r.result), 0); return `<br>★本命ルール（馬連${x.mo5[0].nums.join("-")}・${inv.toLocaleString()}円） <b class="${ret >= inv ? "pos" : "neg"}">${ret - inv >= 0 ? "+" : "−"}${Math.abs(Math.round(ret - inv)).toLocaleString()}円</b>`; })() : ""; if (!c) return r.result ? `<div class="resline">結果 <b>${r.result.order.slice(0, 3).join("→")}</b>${moR}</div>` : ""; const pl = k => c.plans[k] ? `${c.plans[k].ret - c.plans[k].inv >= 0 ? "+" : "−"}${Math.abs(Math.round(c.plans[k].ret - c.plans[k].inv)).toLocaleString()}円` : "見送り";
         return `<div class="resline">結果 <b>${c.order.join("→")}</b>　◎${c.favPos ? c.favPos + "着" : "着外"}${moR}</div>`; })()}
-      <div class="foot"><button class="btn" data-open="${r.id}">詳しく見る・3D再生</button></div>
+      <div class="foot"><button class="btn" data-open="${r.id}">詳しく見る・3D再生</button> <button class="btn" data-img="${r.id}">画像を作る</button></div>
     </div>`;
   };
   const done = list.map(rowOf).filter(x => x && x.marks?.length);
@@ -7260,6 +7408,7 @@ function renderAllTab(){
   el.querySelectorAll("[data-cm]").forEach(b => b.onclick = () => { CHECK_MODE.v = b.dataset.cm; CHECK_ALL.res = null; computeCheck(d); renderAllTab(); });
   const pr = el.querySelector("#perfRace"); if (pr) pr.onchange = e => { PERF.race = e.target.value; renderAllTab(); };
   const ca = el.querySelector("#checkAll"); if (ca) ca.onclick = () => checkAllDates();
+  el.querySelectorAll("[data-img]").forEach(b => b.onclick = () => showRaceImage(b.dataset.img));
   el.querySelectorAll("[data-open]").forEach(b => b.onclick = () => { ST.raceId = b.dataset.open; ST.venue = DB.races[ST.raceId]?.venue; renderVenues(); renderAll(); setTab(ST.sims[ST.raceId] ? "result" : "card"); window.scrollTo({ top: 0, behavior: "smooth" }); });
 }
 
