@@ -4810,7 +4810,12 @@ function pickDarkHorse(ctx, stats, avgStats, M){
   const cand0 = ctx.field.map((f, i) => ({ f, i, s: stats[i], a: avgStats[i] })).filter(x => x.f.odds > 1 && (x.f.pop ? x.f.pop >= 5 : x.f.odds >= 10));
   if (!cand0.length || !Engine.oddsReady(ctx.field)) return null;
   cand0.forEach(x => { x.winEV = (M ? M.win[x.i] : x.a.win) * x.f.odds; x.placeEV = null; });
-  cand0.sort((a, b) => a.f.odds - b.f.odds || (b.a.top3 - a.a.top3));
+  // 2026-10-12：◎○▲（シミュの上位3頭）に5番人気以下がいれば、その馬が注目穴馬（複数なら人気が上の馬）。過去2,133レース・3着内22%・複勝回収79%
+  //  いなければ、5番人気以下でシミュの勝率が一番高い馬（印の外・参考。過去4,603レース・3着内19%）。シミュで下位の馬が選ばれることはない
+  const top3 = avgStats.map((a, i) => ({ i, w: a.win })).sort((a, b) => b.w - a.w).slice(0, 3).map(q => q.i);
+  const conf = cand0.filter(x => top3.includes(x.i)).sort((a, b) => a.f.pop - b.f.pop)[0];
+  if (conf){ conf.conf = true; return conf; }
+  cand0.sort((a, b) => (b.a.win - a.a.win) || (a.f.odds - b.f.odds));
   return cand0[0];
   // 旧：期待値重視
   const cand = cand0;
@@ -5566,7 +5571,7 @@ function summarizeSim(r, sim){
     uma: (() => { if (!sim.triMap) return null; const P = new Map(); sim.triMap.forEach((p, k) => { const [a, b] = k.split("-").map(Number); const kk = [f[a].num, f[b].num].sort((x, y) => x - y).join("-"); P.set(kk, (P.get(kk) || 0) + p); });
       const best = [...P.entries()].sort((a, b) => b[1] - a[1])[0]; if (!best) return null; const o = r.comboOdds?.馬連?.[best[0]];
       return { nums: best[0].split("-").map(Number), p: best[1], odds: o ? +(+o).toFixed(1) : null }; })(),
-    dark: sim.dark ? { num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: MM ? MM.place[sim.dark.i] : sim.dark.a.top3, win: MM ? MM.win[sim.dark.i] : sim.dark.a.win, jockey: sim.dark.f.jockey || null, style: sim.dark.f.prof?.style || null, why: darkWhy(sim) } : null,
+    dark: sim.dark ? { conf: !!sim.dark.conf, num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: MM ? MM.place[sim.dark.i] : sim.dark.a.top3, win: MM ? MM.win[sim.dark.i] : sim.dark.a.win, jockey: sim.dark.f.jockey || null, style: sim.dark.f.prof?.style || null, why: darkWhy(sim) } : null,
     ...dkTickets(w.map(x => x.num), sim.dark?.f.num),
     ...moTickets(w, f, r),
     fr: (() => { const H = f.filter(x => x.odds > 1), pw = MM ? H.map(x => MM.win[f.indexOf(x)]) : H.map(x => sim.weighted.find(s2 => s2.num === x.num)?.win || 0);
@@ -7220,7 +7225,7 @@ function renderAllTab(){
       ${x.mo5?.length ? `<div class="line"><span class="verdict go">★買い：馬連 ◎-○（本命ルール）</span> <b>${x.mo5[0].nums.join("-")}</b> <b class="pos">${x.mo5[0].stake.toLocaleString()}円</b>${x.mo5[0].stake >= 2000 ? `<span class="small">（悪い材料2つ以上＝信頼度 高${x.moGap === false ? "。検証中の候補では1,000円" : ""}）</span>` : ""}${x.moBad?.length ? `<span class="small">（◎の前走：${esc(x.moBad.join("・"))}）</span>` : ""}${x.mo9?.length ? `<br><b class="pos">★★道悪の言い訳ルールにも該当</b><span class="small">（◎の前走は「${esc(x.moWet || "")}」の馬場で凡走＝言い訳あり。過去99レースで回収率402%）</span>` : x.moWet === null ? `<br><span class="small">◎の前走は良馬場（言い訳なし。この形は過去の回収率が低め）</span>` : ""}</div>` : x.mo?.length ? `<div class="line"><span class="small">馬連 ◎-○ ${x.mo[0].nums.join("-")}：元のルールには当てはまるが本命ルール外（買わない）${x.moBad?.length ? "" : "・◎の前走に悪い材料なし"}${x.moBad?.length ? "・1番人気が2倍未満" : ""}</span></div>` : ""}
       ${x.uma ? `<div class="line">最有力の馬連 <b>${x.uma.nums.join("-")}</b> <span class="small">（シミュの的中確率${pct(x.uma.p)}%${x.uma.odds ? `・${x.uma.odds}倍` : ""}）</span></div>` : ""}
       ${x.tri ? `<div class="line">最有力の3連単 <b>${x.tri.nums.join("→")}</b> <span class="small">（${pct(x.tri.p)}%）</span></div>` : ""}
-      ${x.dark ? `<div class="line">注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}${x.dark.win != null ? "勝率" + pct(x.dark.win) + "%・" : ""}3着内${pct(x.dark.top3)}%</span>${bestDark === x ? ` <span class="chip ana">この日の最注目穴馬</span>` : ""}</div>` : ""}
+      ${x.dark ? `<div class="line">注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}${x.dark.win != null ? "勝率" + pct(x.dark.win) + "%・" : ""}3着内${pct(x.dark.top3)}%</span>${x.dark.conf ? ` <b class="pos">◎○▲に入った穴馬</b><span class="small">（過去の3着内22%）</span>` : ` <span class="small">（◎○▲には5番人気以下がいないので、印の外でシミュ評価が一番上の穴。参考・過去の3着内19%）</span>`}${bestDark === x ? ` <span class="chip ana">この日の最注目穴馬</span>` : ""}</div>` : ""}
       ${x.oddsAsOf ? `<div class="cond">オッズ ${esc(x.oddsAsOf)} 時点</div>` : ""}
       ${(() => { const c = CHECK[d]?.per?.[r.id]; const moR = x.mo5?.length && r.result?.pay ? (() => { const inv = x.mo5.reduce((a, t) => a + t.stake, 0), ret = x.mo5.reduce((a, t) => a + payOf(t, r.result), 0); return `<br>★本命ルール（馬連${x.mo5[0].nums.join("-")}・${inv.toLocaleString()}円） <b class="${ret >= inv ? "pos" : "neg"}">${ret - inv >= 0 ? "+" : "−"}${Math.abs(Math.round(ret - inv)).toLocaleString()}円</b>`; })() : ""; if (!c) return r.result ? `<div class="resline">結果 <b>${r.result.order.slice(0, 3).join("→")}</b>${moR}</div>` : ""; const pl = k => c.plans[k] ? `${c.plans[k].ret - c.plans[k].inv >= 0 ? "+" : "−"}${Math.abs(Math.round(c.plans[k].ret - c.plans[k].inv)).toLocaleString()}円` : "見送り";
         return `<div class="resline">結果 <b>${c.order.join("→")}</b>　◎${c.favPos ? c.favPos + "着" : "着外"}${moR}</div>`; })()}
