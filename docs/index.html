@@ -4807,7 +4807,9 @@ function averageStats(list, field){
 function pickDarkHorse(ctx, stats, avgStats, M){
   // 2026-10-12：3着以内の的中率を優先して、5番人気以下で「オッズから見た3着内率」が一番高い馬を選ぶ（過去6,700レースで3着内24%・複勝回収76%。
   //  以前の期待値重視の選び方は3着内12%・複勝回収68%。シミュの評価・穴パターンなどの材料を足しても的中率は上がらなかった）
-  const cand0 = ctx.field.map((f, i) => ({ f, i, s: stats[i], a: avgStats[i] })).filter(x => x.f.odds > 1 && (x.f.pop ? x.f.pop >= 5 : x.f.odds >= 10));
+  // 7番人気以下で「3か月以上の休み明け＋馬体重+10kg以上」は、同じ人気より3着内が2割少ない（過去2,068頭・前半後半とも）ので注目穴馬から外す
+  const longGain = f => { const e = (ctx.race?.entries || []).find(q => +q.num === +f.num), bd = e?.bwDiff ?? f.bwDiff, L = f.prof?.runs?.[0]; const days = L?.date && ctx.race?.date ? (new Date(ctx.race.date) - new Date(L.date)) / 864e5 : null; return (f.pop || 0) >= 7 && bd != null && bd >= 10 && days != null && days >= 90; };
+  const cand0 = ctx.field.map((f, i) => ({ f, i, s: stats[i], a: avgStats[i] })).filter(x => x.f.odds > 1 && (x.f.pop ? x.f.pop >= 5 : x.f.odds >= 10) && !longGain(x.f));
   if (!cand0.length || !Engine.oddsReady(ctx.field)) return null;
   cand0.forEach(x => { x.winEV = (M ? M.win[x.i] : x.a.win) * x.f.odds; x.placeEV = null; });
   // 2026-10-12：◎○▲（シミュの上位3頭）に5番人気以下がいれば、その馬が注目穴馬（複数なら人気が上の馬）。過去2,133レース・3着内22%・複勝回収79%
@@ -5713,11 +5715,11 @@ function raceXText(r, x){
   const mk = (x.marks || []).slice(0, 3).map((m, k) => `${"◎○▲"[k]}${m.num}${nm(m.name)}`);
   const DS = (x.darks?.length ? x.darks : (x.marks || []).map((m, k) => ({ ...m, mk: k })).filter(m => (m.pop || 0) >= 5)).slice(0, 2);
   const ana = DS.length ? `穴馬は${DS.map(h => `${h.num}${nm(h.name)}(${h.pop}人気)`).join("と")}` : x.dark ? `穴馬は${x.dark.num}${nm(x.dark.name)}(${x.dark.pop}人気)` : "";
-  const buy = x.mo9?.length ? `★★馬連${x.mo9[0].nums.join("-")}勝負` : x.mo5?.length ? `★馬連${x.mo5[0].nums.join("-")}` : "";
+  const buy = "";   // 買い目（★馬連）はX投稿文には入れない
   const tags = [`#${r.venue}${r.no}R`, race && race.length <= 12 ? `#${race}` : null, `#${r.venue}競馬`, "#競馬予想"].filter(Boolean);
   const m0 = x.marks?.[0], pc = v => v == null ? "" : (v * 100).toFixed(1) + "%";
   const note = m0 ? `本命の1着率${pc(m0.win)}${DS[0] ? `、穴の${DS[0].num}も3着内${pc(DS[0].top3)}` : ""}` : "";
-  const build = (useBuy, nt, useNote) => [head, mk.join(" "), ana, useBuy ? buy : "", useNote ? note : "", tags.slice(0, nt).join(" ")].filter(Boolean).join("\n");
+  const build = (useBuy, nt, useNote) => [head, mk.join("\n"), ana, useBuy ? buy : "", useNote ? note : "", tags.slice(0, nt).join(" ")].filter(Boolean).join("\n");
   for (const [b, nt, n] of [[1, 4, 1], [1, 3, 1], [1, 4, 0], [1, 3, 0], [0, 4, 0], [0, 3, 0], [0, 2, 0], [0, 1, 0]]){ const t = build(b, nt, n); if (L(t) <= 280) return t; }
   return build(0, 1).slice(0, 140);
 }
