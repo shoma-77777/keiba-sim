@@ -328,7 +328,7 @@ tr.darkrow{background:color-mix(in srgb,var(--gold) 9%,transparent)}
 .allhead h3{font-size:15px}
 @media (prefers-reduced-motion: reduce){ *{transition:none!important} }
 @media (max-width:520px){ .raceband h2{font-size:18px} .finish{left:10px;right:10px;top:auto;bottom:46px;min-width:0} }
-.mainbuy{background:rgba(255,200,0,.12);border-radius:6px;padding:4px 6px}.learnbox.mainplan{border:2px solid #e0a800}
+.fillbuy{background:rgba(128,128,128,.10);border-radius:6px;padding:4px 6px}.mainbuy{background:rgba(255,200,0,.12);border-radius:6px;padding:4px 6px}.learnbox.mainplan{border:2px solid #e0a800}.planbox{border-radius:8px;padding:6px 10px;margin:6px 0}.planbox .ph{font-weight:700;margin-bottom:2px}.planbox.hon{background:rgba(255,200,0,.16);border-left:5px solid #e0a800}.planbox.fil{background:rgba(128,128,128,.10);border-left:5px solid #999;opacity:.9}.fillbuy .verdict{background:#888;color:#fff}.fillbuy{opacity:.85}
 </style>
 
 <div class="wrap">
@@ -5740,7 +5740,7 @@ function dayPicks(items){
     else if (x.marks[0]?.odds || x.hasOdds) rest.push({ r, x }); });
   core.forEach(c => out.set(c.r.id, { tickets: c.t, why: c.why }));
   rest.sort((a, b) => (b.x.marks[0].win || 0) - (a.x.marks[0].win || 0)).slice(0, Math.max(0, 4 - core.length))
-    .forEach(({ r, x }) => out.set(r.id, { tickets: [{ type: "馬連", nums: [x.marks[0].num, x.marks[1].num].sort((a, b) => a - b), stake: 1000 }], why: "埋め（◎の勝率が高いレース）" }));
+    .forEach(({ r, x }) => out.set(r.id, { tickets: [{ type: "馬連", nums: [x.marks[0].num, x.marks[1].num].sort((a, b) => a - b), stake: 1000 }], why: "埋め：ルールに当たるレースが4つ未満の日に、◎の勝率が高いレースで補充。回収率は90%台" }));
   return out;
 }
 function summarizeSim(r, sim){
@@ -7443,9 +7443,9 @@ function renderAllTab(){
       ${x.pace ? `<div class="line small">展開予想 <b>${PACE_JA[x.pace.best]}ペース ${pct(x.pace[x.pace.best])}%</b>（前に行く馬${x.pace.front}頭）</div>` : ""}
       <div class="marks">${x.marks.map((m, k) => `<span class="mk">${MARKS[k]}</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">勝率${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}${((x.field >= 14 && x.subs5?.length) ? x.subs5 : (x.subs || [])).filter(m => m.num !== starOf(x)?.num).map(m => `<span class="mk">△</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気）</span>` : ""}</span><span class="wpct">勝率${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}${(() => { const m = starOf(x); return m ? `<span class="mk">☆</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">勝率${pct(m.win)}%・3着内${pct(m.top3)}%</span>` : ""; })()}</div>
       ${favLine(x)}
-      ${D4.get(r.id) ? `<div class="line mainbuy"><span class="verdict go">◆メインの買い</span> 馬連 <b>${D4.get(r.id).tickets[0].nums.join("-")}</b> <b>${D4.get(r.id).tickets[0].stake.toLocaleString()}円</b> <span class="small">（${esc(D4.get(r.id).why)}）</span></div>` : ""}
+      ${D4.get(r.id) ? `<div class="line ${D4.get(r.id).why.startsWith("埋め") ? "fillbuy" : "mainbuy"}"><span class="verdict ${D4.get(r.id).why.startsWith("埋め") ? "" : "go"}">${D4.get(r.id).why.startsWith("埋め") ? "◇埋め（ルール外・90%台）" : "★本体の買い"}</span> 馬連 <b>${D4.get(r.id).tickets[0].nums.join("-")}</b> <b>${D4.get(r.id).tickets[0].stake.toLocaleString()}円</b> <span class="small">（${esc(D4.get(r.id).why)}）</span></div>` : ""}
       ${r.no === 11 && x.acc?.length ? `<div class="line small">11R 精度重視の予想（市場7：シミュ3）：${x.acc.map((m, k) => `${"◎○▲"[k]}${m.num} ${esc(m.name || "")}（勝率${pct(m.win)}%）`).join("・")}</div>` : ""}
-      ${x.mo10?.length && !D4.get(r.id) ? `<div class="line"><span class="verdict go">★中距離ルール</span> 馬連 <b>${x.mo10[0].nums.join("-")}</b> <b class="pos">1,000円</b> <span class="small">（◎3〜4番人気・○1番人気・1500〜1800m。過去5年304レースで154%、どの年も118%以上）</span></div>` : ""}
+      ${x.mo10?.length && !D4.get(r.id) ? `<div class="line"><span class="verdict go">★中距離ルール</span> 馬連 <b>${x.mo10[0].nums.join("-")}</b> <b class="pos">1,000円</b> <span class="small">（◎3〜4番人気・○1番人気・1500〜1800m。過去5年304レースで154%。ただし同じ探し方だとランダムなデータでも似た成績の条件が見つかるため、偶然の可能性あり。実戦の記録で確認中）</span></div>` : ""}
       ${D4.get(r.id) ? (x.mo5?.length ? `<div class="line small">（本命ルールの形${x.moBad?.length ? "・◎の前走：" + esc(x.moBad.join("・")) : ""}）</div>` : "") : x.mo5?.length && !x.mo9?.length && String(x.going || "").startsWith("良") ? `<div class="line small">本命ルールの形だが、◎の前走も今回も良馬場なので買わない（メインの買い方から外しています）</div>` : x.mo5?.length ? `<div class="line"><span class="verdict go">★買い：馬連 ◎-○（本命ルール）</span> <b>${x.mo5[0].nums.join("-")}</b> <b class="pos">${x.mo5[0].stake.toLocaleString()}円</b>${x.mo5[0].stake >= 2000 ? `<span class="small">（悪い材料2つ以上＝信頼度 高${x.moGap === false ? "。検証中の候補では1,000円" : ""}）</span>` : ""}${x.moBad?.length ? `<span class="small">（◎の前走：${esc(x.moBad.join("・"))}）</span>` : ""}${x.mo9?.length ? `<br><b class="pos">★★道悪の言い訳ルールにも該当</b><span class="small">（◎の前走は「${esc(x.moWet || "")}」の馬場で凡走。2024-26年は340%だが、2021-22年では81%と年による差が大きい）</span>` : x.moWet === null ? `<br><span class="small">◎の前走は良馬場（言い訳なし。この形は過去の回収率が低め）</span>` : ""}</div>` : x.mo?.length ? `<div class="line"><span class="small">馬連 ◎-○ ${x.mo[0].nums.join("-")}：元のルールには当てはまるが本命ルール外（買わない）${x.moBad?.length ? "" : "・◎の前走に悪い材料なし"}${x.moBad?.length ? "・1番人気が2倍未満" : ""}</span></div>` : ""}
       ${x.uma ? `<div class="line">最有力の馬連 <b>${x.uma.nums.join("-")}</b> <span class="small">（シミュの的中確率${pct(x.uma.p)}%${x.uma.odds ? `・${x.uma.odds}倍` : ""}）</span></div>` : ""}
       ${x.tri ? `<div class="line">最有力の3連単 <b>${x.tri.nums.join("→")}</b> <span class="small">（${pct(x.tri.p)}%）</span></div>` : ""}
@@ -7469,13 +7469,17 @@ function renderAllTab(){
       <span class="small">参考：JRAでは1番人気の勝率はおよそ3割強、1〜3番人気のどれかが勝つのは全体のおよそ3分の2。上位人気が◎に多いのは自然です。もうけは◎ではなく、モデルと市場（オッズ）の見立てがずれる馬から出るので、買い方は◎ではなく期待値で選んでいます。</span></div>`;
   })();
   el.innerHTML = `
-    ${(() => { const L = list.filter(r => D4.get(r.id)), tot = L.reduce((a, r) => a + D4.get(r.id).tickets[0].stake, 0);
-      return `<div class="learnbox mainplan"><h3>◆メインの買い方（${L.length}レース・合計${tot.toLocaleString()}円）</h3>
-      <ol class="small"><li><b>中距離の形</b>：○が1番人気・◎が3〜4番人気・1400〜2000m → 馬連◎-○（1500〜1800mは2,000円、それ以外は1,000円）</li>
-      <li><b>本命ルール</b>：ただし◎の前走も今回も良馬場のときは買わない → 1,000円</li>
-      <li>足りなければ<b>◎の勝率が高いレース</b>で1日4レースまで埋める → 1,000円</li></ol>
-      <p class="small">過去5年（13,456レース）：全体116%（2021-22年104%・2024-26年127%）。埋め分だけだと90%台なので、①②に当たるレースが多い日ほど期待できます。</p>
-      ${L.length ? `<ul>${L.map(r => { const p = D4.get(r.id); return `<li>${esc(r.venue)}${r.no}R 馬連 <b>${p.tickets[0].nums.join("-")}</b> <b>${p.tickets[0].stake.toLocaleString()}円</b>（${esc(p.why)}）</li>`; }).join("")}</ul>` : `<p class="small">まだ計算済みのレースがありません。全レースを計算すると、ここに今日の買いが出ます。</p>`}</div>`; })()}
+    ${(() => { const L = list.filter(r => D4.get(r.id)), isF = r => D4.get(r.id).why.startsWith("埋め"), M = L.filter(r => !isF(r)), F = L.filter(isF), sum = A => A.reduce((a, r) => a + D4.get(r.id).tickets[0].stake, 0);
+      const li = r => { const p = D4.get(r.id); return `<li>${esc(r.venue)}${r.no}R 馬連 <b>${p.tickets[0].nums.join("-")}</b> <b>${p.tickets[0].stake.toLocaleString()}円</b>${isF(r) ? "" : `（${esc(p.why)}）`}</li>`; };
+      return `<div class="learnbox mainplan"><h3>◆メインの買い方（${L.length}レース・合計${sum(L).toLocaleString()}円）</h3>
+      ${!L.length ? `<p class="small">まだ計算済みのレースがありません。全レースを計算すると、ここに今日の買いが出ます。</p>` : ""}
+      <div class="planbox hon"><div class="ph">★本体（過去の回収率が高かった形）${M.length}レース・${sum(M).toLocaleString()}円</div>
+        <p class="small">○が1番人気のレースだけ。①中距離の形（◎3〜4番人気・1400〜2000m／1500〜1800mは2,000円）②本命ルール（前走良→今回良は除く）。</p>
+        ${M.length ? `<ul>${M.map(li).join("")}</ul>` : `<p class="small">今日は本体に当たるレースがありません。</p>`}</div>
+      <div class="planbox fil"><div class="ph">◇埋め（ルール外・回収率は90%台）${F.length}レース・${sum(F).toLocaleString()}円</div>
+        <p class="small">本体が4レースに足りない日に、◎の勝率が高いレース（ほぼ◎が1番人気）で補充しています。回収率を優先するなら買わなくてOK。</p>
+        ${F.length ? `<ul>${F.map(li).join("")}</ul>` : `<p class="small">今日は埋めなし（本体だけで4レース以上）。</p>`}</div>
+      <p class="small">過去5年（13,456レース）：本体＋埋めの全体で116%（2021-22年104%・2024-26年127%）。10/15の検証：馬連は配当のブレが大きく、5年分でも「偶然ではない」と言い切れる差はまだ出ていません。下の成績の記録で本当に勝てるかを確かめていきます。</p></div>`; })()}
     ${checkPanel(d)}
     ${CHECK[d] ? checkAllPanel() : ""}
     ${safePanel("WIN5予想", () => win5Panel(d, list, rowOf))}
