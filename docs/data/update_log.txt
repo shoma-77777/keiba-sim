@@ -1,8 +1,3 @@
-2026-10-14 06:51:26 学習を更新しました（7768レース分）
-2026-10-14 06:52:10 学習を更新しました（7804レース分）
-2026-10-14 06:52:53 学習を更新しました（7840レース分）
-2026-10-14 06:53:35 学習を更新しました（7876レース分）
-2026-10-14 06:54:18 学習を更新しました（7912レース分）
 2026-10-14 06:55:00 学習を更新しました（7936レース分）
 2026-10-14 06:55:43 学習を更新しました（7960レース分）
 2026-10-14 06:56:27 学習を更新しました（7996レース分）
@@ -298,3 +293,8 @@
 2026-10-16 23:27:20 オッズ取得できず 東京3R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/12頭分しか読めず
 2026-10-16 23:27:20 オッズ取得できず 東京4R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/16頭分しか読めず
 2026-10-16 23:27:20 オッズを更新しました（2/36レース・netkeiba・2026-10-16 23:26:16時点）
+2026-10-17 00:23:41 オッズ取得できず 東京1R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/12頭分しか読めず
+2026-10-17 00:23:41 オッズ取得できず 東京2R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/10頭分しか読めず
+2026-10-17 00:23:41 オッズ取得できず 東京3R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/12頭分しか読めず
+2026-10-17 00:23:41 オッズ取得できず 東京4R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/16頭分しか読めず
+2026-10-17 00:23:41 オッズを更新しました（2/36レース・netkeiba・2026-10-17 00:22:06時点）
