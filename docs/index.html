@@ -593,7 +593,23 @@ const Engine = (() => {
   }
 
   // --- 馬プロファイル（DBに保持する派生指標） ---
-  function profile(horse, race, entry, model){
+  // ===== 過去のレースの「相手の強さ」（2026-10-17）=====
+  //  1走ごとの評価は「クラスの基準値＋勝ち馬との着差」。同じクラスでも相手が強いレースだったか弱いレースだったかで値打ちが違うので、
+  //  そのレースに出ていた他の馬の、前後1年の走り（予想するレースより前のものだけ）の評価の中央値を平均して、クラスの標準との差を足す（最大±4・相手が少ないほど控えめ）。
+  //  直近265レースで比較：勝ちの予測・3着内の予測の誤差がどちらも小さくなり、本命の勝率 31.7・32.1% → 32.8・33.2%（同じ条件で2回ずつ計算して、2回とも改善）
+  const OPP_C = -3.22;   // 相手の評価平均とクラス基準値の差の全体平均（これを0とみなす）
+  const OPP_CACHE = new WeakMap();
+  function oppIndex(horses){ let x = OPP_CACHE.get(horses); const n = Object.keys(horses).length; if (x && x.n === n) return x;
+    const idx = {}; for (const h of Object.values(horses)) for (const q of (h.runs || [])) if (q.raceId) (idx[q.raceId] ||= []).push(h);
+    x = { n, idx, memo: new Map() }; OPP_CACHE.set(horses, x); return x; }
+  function quickRating(q){ const p = parseRun(q); if (!(p.pos > 0) || p.margin == null || p.overseas) return null; return (GRADE_BASE[p.grade] ?? 64) + 4 - 9 * clamp(p.margin, -0.8, 3); }
+  function oppAdj(r, raceDate, horse, horses){
+    if (!horses || !r.raceId || !raceDate) return 0; const X = oppIndex(horses), k = r.raceId + "|" + raceDate; if (X.memo.has(k)) return X.memo.get(k);
+    const d0 = new Date(r.date).getTime();
+    const ab = (X.idx[r.raceId] || []).filter(h => h !== horse).map(h => { const v = (h.runs || []).filter(q => q.date && q.date !== r.date && q.date < raceDate && Math.abs(new Date(q.date) - d0) <= 365 * 864e5).map(quickRating).filter(x => x != null).sort((a, b) => a - b); return v.length >= 2 ? v[Math.floor(v.length / 2)] : null; }).filter(x => x != null);
+    const v = ab.length >= 4 ? clamp(0.5 * (mean(ab) - (GRADE_BASE[r.grade] ?? 64) - OPP_C) * ab.length / (ab.length + 4), -4, 4) : 0;
+    X.memo.set(k, v); return v; }
+  function profile(horse, race, entry, model, horses){
     // そのレースより前の出走だけを使う（過去の開催日を予想し直すときに、未来の結果が混ざらないように）
     const runs = (horse.runs || []).map(parseRun).filter(r => r.pos > 0 && r.field > 0 && (!race.date || !r.date || r.date < race.date))
       .sort((a,b) => b.date.localeCompare(a.date));
@@ -616,7 +632,7 @@ const Engine = (() => {
     out.avgLast3f = l3.length ? mean(l3) : null;
 
     // 1走ごとの評価と度外視判定
-    runs.forEach((r, i) => { r.rating = runRating(r); r.trouble = detectTrouble(r, runs[i + 1], usualEarly, out.avgLast3f, mainSurf); });
+    runs.forEach((r, i) => { r.opp = oppAdj(r, race.date, horse, horses); r.rating = runRating(r) + r.opp; r.trouble = detectTrouble(r, runs[i + 1], usualEarly, out.avgLast3f, mainSurf); });
     const baseLine = median(runs.map(r => r.rating)) ?? 60;
     runs.forEach(r => {
       r.adjRating = r.rating;
@@ -803,7 +819,7 @@ const Engine = (() => {
     const trend = opts.trend || null, track = opts.track || null;
     const field = R.entries.map(e => {
       const h = horsesDB[e.horseId] || horsesDB[e.name] || { runs: [] };
-      const p = profile(h, R, e, model);
+      const p = profile(h, R, e, model, horsesDB);
       const age = parseInt((e.sexAge||"").slice(1),10) || 4;
       const jNow = jockeyPts(e.jockey), jLast = p.lastJockey ? jockeyPts(p.lastJockey) : jNow;
       const adj = {
@@ -6856,7 +6872,7 @@ async function serverInit(){
   if (!Object.keys(ST.sims).length) runSim(true);
 }
 // ===== 学習（答え合わせの蓄積から、統合の仕方・要素の効き・馬場の偏りを更新） =====
-const LOGIC_VER = "a6b4b195";
+const LOGIC_VER = "4094be49";
 const LEARN = { model: null, base: null, saved: null };
 // 実戦テスト（ルール固定）：固定した学習モデル。固定中は、全部の記録での学習は続けても予想には固定したモデルを使う
 const LOCK = { info: null, confirmOff: false };
