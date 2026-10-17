@@ -329,6 +329,7 @@ tr.darkrow{background:color-mix(in srgb,var(--gold) 9%,transparent)}
 @media (prefers-reduced-motion: reduce){ *{transition:none!important} }
 @media (max-width:520px){ .raceband h2{font-size:18px} .finish{left:10px;right:10px;top:auto;bottom:46px;min-width:0} }
 .fillbuy{background:rgba(128,128,128,.10);border-radius:6px;padding:4px 6px}.mainbuy{background:rgba(255,200,0,.12);border-radius:6px;padding:4px 6px}.learnbox.mainplan{border:2px solid #e0a800}.planbox{border-radius:8px;padding:6px 10px;margin:6px 0}.planbox .ph{font-weight:700;margin-bottom:2px}.planbox.hon{background:rgba(255,200,0,.16);border-left:5px solid #e0a800}.planbox.fil{background:rgba(128,128,128,.10);border-left:5px solid #999;opacity:.9}.fillbuy .verdict{background:#888;color:#fff}.fillbuy{opacity:.85}
+.rc .hd .vn{background:#1e5bc6;color:#fff;border-radius:4px;padding:0 6px;margin-right:6px;font-size:.85em}.rc .hd .pt{margin-left:auto;font-size:.85em;opacity:.8}.rc.topdark{border:2px solid #e0a800}.topbadge{background:#fff3c4;color:#5a4300;border-radius:6px;padding:3px 8px;margin:4px 0;font-weight:700;font-size:.9em}.learnbox.topdarks{border:2px solid #e0a800}.biasline{background:rgba(30,91,198,.08);border-radius:6px;padding:3px 6px}
 </style>
 
 <div class="wrap">
@@ -4729,8 +4730,12 @@ function raceBiasOf(x){
   const c = res.corners?.length ? res.corners[Math.min(1, res.corners.length - 1)] : null;
   const early = {}; if (c) c.forEach((num, k) => early[num] = k / Math.max(1, c.length - 1));
   const fe = fin.filter(h => early[h.num] != null);
+  // 2026-10-17：前残り・差しの偏りは4番人気以下の馬だけで測る（1〜3番人気が実力どおり前で決着したレースに引っ張られないように）。
+  //  過去5年・7,764レースで比較：前残り判定のレースで先行型の馬の「実際の3着内−市場の見込み」が 全頭で測る −1.23pt → 4番人気以下で測る −0.76pt（ふだんの先行型は −1.09pt）。5年とも新しい方が良かった。
+  //  内枠・外枠は年によって良し悪しが入れ替わったので、今までどおり全頭で測る。人気の記録がないレースは全頭で測る
+  const hasPop = fin.filter(h => +h.pop > 0).length >= n * 0.8, fa = hasPop ? fe.filter(h => +h.pop >= 4) : fe;
   const N = x.entries?.length || n;
-  return { ce: fe.length >= 6 ? biasCorr(fe.map(h => early[h.num]), fe.map(pr)) : null, cg: biasCorr(fin.map(h => (h.num - 1) / Math.max(1, N - 1)), fin.map(pr)) };
+  return { ce: fa.length >= (hasPop ? 5 : 6) ? biasCorr(fa.map(h => early[h.num]), fa.map(pr)) : null, cg: biasCorr(fin.map(h => (h.num - 1) / Math.max(1, N - 1)), fin.map(pr)) };
 }
 function dayBias(r){
   if (r.surface === "障") return null;
@@ -4816,9 +4821,11 @@ function pickDarkHorse(ctx, stats, avgStats, M){
   // 2026-10-12：◎○▲（シミュの上位3頭）に5番人気以下がいれば、その馬が注目穴馬（複数なら人気が上の馬）。過去2,133レース・3着内22%・複勝回収79%
   //  いなければ、5番人気以下でシミュの勝率が一番高い馬（印の外・参考。過去4,603レース・3着内19%）。シミュで下位の馬が選ばれることはない
   const top3 = avgStats.map((a, i) => ({ i, w: a.win })).sort((a, b) => b.w - a.w).slice(0, 3).map(q => q.i);
-  const conf = cand0.filter(x => top3.includes(x.i)).sort((a, b) => a.f.pop - b.f.pop)[0];
+  // 2026-10-15：狙いは3着内なので、並べ替えを「1着率」から「3着内率」（展開ごとの結果をまとめたもの）に変更。
+  //  直近265レースで、今の選び方 3着内18.5% → 印優先・3着内率順 20.8%（違う馬を選んだ60レースでは 9勝 → 16勝）。レース数が少ないので記録で確認を続ける
+  const conf = cand0.filter(x => top3.includes(x.i)).sort((a, b) => (b.a.top3 - a.a.top3) || (a.f.pop - b.f.pop))[0];
   if (conf){ conf.conf = true; return conf; }
-  cand0.sort((a, b) => (b.a.win - a.a.win) || (a.f.odds - b.f.odds));
+  cand0.sort((a, b) => (b.a.top3 - a.a.top3) || (a.f.odds - b.f.odds));
   return cand0[0];
   // 旧：期待値重視
   const cand = cand0;
@@ -5440,26 +5447,109 @@ const BATCH = { running: false, rows: {}, done: 0, total: 0, date: null, saved: 
 const BATCH_RUNS = 2000;   // 軽くするため（確率はオッズとの統合が中心で、回数を減らしても予想はほぼ変わらない）
 const ymdOf = d => d.replace(/-/g, "");
 const isoOf = y => `${y.slice(0, 4)}-${y.slice(4, 6)}-${y.slice(6, 8)}`;
+// ===== 前日の馬場傾向（日曜・月曜開催だけ）=====
+//  前日の同じ競馬場・同じ芝ダの結果から、4番人気以下で3着内に来た馬の「1角の位置」と「馬番」を、4番人気以下の出走馬全体と比べる。
+//  1〜3番人気の決着（実力どおりの前残りなど）は数えない。過去5年の検証：前日が強い前残り→翌日の4番人気以下の先行馬 3着内15.8%（ふつうの日15.1%）、
+//  前日が外有利→翌日の内枠 11.4%（ふつう12.5%）。向きは毎年同じだが効きは1ポイント前後と小さいので参考情報
+const BIAS_CACHE = {};
+const ODDS_TAGS = new Set(["直前に買われた"]);
+function prevDayBias(r){
+  if (!r?.date || !r.venue) return null; const dow = new Date(r.date + "T00:00:00").getDay(); if (dow !== 0 && dow !== 1) return null;
+  const t = new Date(r.date + "T00:00:00"); t.setDate(t.getDate() - 1); const pd = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+  const key = pd + "|" + r.venue + "|" + r.surface; if (BIAS_CACHE[key] !== undefined) return BIAS_CACHE[key];
+  const races = Object.values(DB.races).filter(q => q.date === pd && q.venue === r.venue && q.surface === r.surface && q.result?.rows?.length);
+  let pn = 0, pf = 0, pb = 0, pi = 0, po = 0, an = 0, af = 0, ab = 0, ai = 0, ao = 0;
+  races.forEach(q => { const rows = q.result.rows.filter(x => x.pos > 0), n = rows.length;
+    // 1角の位置：結果の通過順 → なければコーナー通過順位 → なければ各馬の成績にある通過順
+    const c0 = Array.isArray(q.result.corners?.[0]) ? q.result.corners[0] : null, idx = raceIndex()[q.id] || [];
+    const c1of = x => { const p0 = +String(x.pass || "").split("-")[0]; if (p0 > 0) return p0; if (c0){ const k = c0.indexOf(+x.num); if (k >= 0) return k + 1; }
+      const m = idx.find(o => +o.run.pos === +x.pos); const p1 = m ? +String(m.run.passing || "").split("-")[0] : 0; return p1 > 0 ? p1 : null; };
+    rows.forEach(x => { if (!(+x.pop >= 4)) return; const c1 = c1of(x); if (!(c1 > 0)) return; const e = (c1 - 1) / Math.max(1, n - 1), fr = e <= 0.3 ? 1 : 0, bk = e >= 0.6 ? 1 : 0, inn = x.num / n <= 0.34 ? 1 : 0, out = x.num / n >= 0.67 ? 1 : 0;
+      an++; af += fr; ab += bk; ai += inn; ao += out; if (x.pos <= 3){ pn++; pf += fr; pb += bk; pi += inn; po += out; } }); });
+  const res = pn >= 5 && an ? { date: pd, races: races.length, n: pn, pf, pb, pi, po, front: pf / pn - af / an, inner: pi / pn - ai / an } : null;
+  BIAS_CACHE[key] = res; return res;
+}
+function earlyRate(e){ const h = DB.horses?.[e.horseId]; const runs = (h?.runs || []).filter(q => q.surface !== "障" && q.field > 4 && q.passing).slice(0, 5);
+  const v = runs.map(q => { const c = +String(q.passing).split("-")[0]; return c > 0 ? (c - 1) / Math.max(1, q.field - 1) : null; }).filter(x => x != null); return v.length >= 2 ? v.reduce((a, b) => a + b, 0) / v.length : null; }
+function prevBiasLine(r){
+  const b = prevDayBias(r); if (!b) return "";
+  const dl = ["日", "月", "火", "水", "木", "金", "土"][new Date(b.date + "T00:00:00").getDay()];
+  const tags = []; let want = null;
+  if (b.front >= 0.37){ tags.push(`<b>前残り</b>（4番人気以下の3着内${b.n}頭のうち先行${b.pf}頭）`); want = "front"; }
+  else if (b.front <= 0.05){ tags.push(`<b>差し決着が多い</b>（4番人気以下の3着内${b.n}頭のうち後方から${b.pb}頭）`); want = "back"; }
+  else tags.push(`前後の偏りは目立たない（4番人気以下の3着内${b.n}頭）`);
+  let wantG = null; if (b.inner >= 0.15){ tags.push(`<b>内枠有利</b>（内枠${b.pi}頭）`); wantG = "in"; } else if (b.inner <= -0.14){ tags.push(`<b>外枠有利</b>（外枠${b.po}頭）`); wantG = "out"; }
+  const n = r.entries?.length || 0, fit = (r.entries || []).filter(e => +e.pop >= 4).filter(e => { const er = earlyRate(e); const okP = want === "front" ? er != null && er <= 0.3 : want === "back" ? er != null && er >= 0.6 : false; const okG = wantG === "in" ? e.num / n <= 0.34 : wantG === "out" ? e.num / n >= 0.67 : false; return okP || okG; }).map(e => e.num);
+  return `<div class="line small biasline">前日（${dl}）${esc(r.venue)}${esc(r.surface)}の傾向：${tags.join("・")}${fit.length ? `<br>傾向に合う4番人気以下：<b>${fit.join("・")}</b>` : ""}<br><span class="small">1〜3番人気の決着は除いて計算。翌日も続く効きは過去5年で1ポイント前後と小さいので参考に</span></div>`;
+}
+// ===== 注目穴馬の考察文（過去の走りから、数字で言える事実だけを使う）=====
+//  10/17検証（13,456レース）：「前走で負かした相手がその後勝った」穴馬は3着内が同じ人気帯より1〜1.2ポイント高い（10番人気以下 5.7%対4.5%・毎年同じ向き）。
+//  「前走のレースから2頭以上勝ち上がり」だけでは差がなかったので弱い材料として扱う
+let RACE_IDX = null, RACE_IDX_N = -1;
+function raceIndex(){ const hs = DB.horses || {}, n = Object.keys(hs).length; if (RACE_IDX && RACE_IDX_N === n) return RACE_IDX; const m = {};
+  for (const [id, h] of Object.entries(hs)) for (const q of (h.runs || [])) if (q.raceId) (m[q.raceId] ||= []).push({ id, name: h.name || id, run: q, runs: h.runs });
+  RACE_IDX = m; RACE_IDX_N = n; return m; }
+const tsecOf = t => { const m = /^(\d+):(\d+(?:\.\d+)?)$/.exec(String(t || "")); return m ? +m[1] * 60 + +m[2] : (/^\d+(\.\d+)?$/.test(String(t || "")) ? +t : null); };
+const fmtT = v => { const m = Math.floor(v / 60), s2 = (v - m * 60).toFixed(1); return m ? `${m}:${s2.padStart(4, "0")}` : s2; };
+function darkInsight(ctx, f){
+  const race = ctx.race || {}, D = race.distance, S = race.surface, out = [];
+  const runsOf = g => (g.prof?.runs || []).filter(q => q.surface !== "障" && q.pos > 0 && (!race.date || !q.date || q.date < race.date));
+  const R = runsOf(f), L = R[0];
+  // ①前走のレースレベル：同じレースに出ていた馬が、その後に勝ち上がっているか
+  try { if (L?.raceId){ const idx = raceIndex(), mates = (idx[L.raceId] || []).filter(m => m.name !== f.name);
+      const later = mates.map(m => ({ ...m, win: (m.runs || []).find(q => q.date > L.date && (!race.date || q.date < race.date) && +q.pos === 1) })).filter(m => m.win);
+      const beat = later.filter(m => +m.run.pos > L.pos).sort((a, b) => a.run.pos - b.run.pos)[0];
+      if (beat) out.push({ w: 10, t: L.pos === 1 ? `前走で負かした${beat.name}（${beat.run.pos}着）は、その後のレースで1着。勝った相手が次に勝ち上がっており、前走の勝ちは価値が高い` : `前走${L.pos}着で、後ろに負かした${beat.name}（${beat.run.pos}着）はその後1着。着順以上にメンバーは強かった` });
+      else if (later.length >= 2) out.push({ w: 5, t: `前走（${L.pos}着）の同じレースから、その後${later.length}頭が勝ち上がり（${later.slice(0, 2).map(m => m.name).join("・")}）` });
+      else if (later.length === 1 && L.pos <= 6) out.push({ w: 6, t: `前走で先着された${later[0].name}はその後1着。強い相手に${L.pos}着と食い下がった` }); } } catch (e) {}
+  // ②持ち時計：同じ芝ダ・同じ距離のベストタイムをメンバーと比べる
+  const best = g => { const v = runsOf(g).filter(q => q.surface === S && +q.dist === +D).map(q => tsecOf(q.time)).filter(x => x > 20); return v.length ? Math.min(...v) : null; };
+  const bt = ctx.field.map(g => ({ g, t: best(g) })).filter(x => x.t != null).sort((a, b) => a.t - b.t);
+  const me = bt.findIndex(x => x.g === f);
+  if (bt.length >= 5 && me >= 0 && me <= 2){ const top = bt[0]; out.push({ w: 8 - me, t: me === 0 ? `${S}${D}mの持ち時計${fmtT(bt[me].t)}はメンバー最速（2位と${(bt[1].t - bt[0].t).toFixed(1)}秒差）` : `${S}${D}mの持ち時計${fmtT(bt[me].t)}はメンバー${me + 1}位（最速の${top.g.name}と${(bt[me].t - top.t).toFixed(1)}秒差）` }); }
+  // ③上がりの脚：同じ芝ダ・距離±200mの上がり3Fのベスト
+  const l3 = g => { const v = runsOf(g).filter(q => q.surface === S && Math.abs(q.dist - D) <= 200).map(q => q.last3f).filter(x => x > 30 && x < 45); return v.length ? Math.min(...v) : null; };
+  const lt = ctx.field.map(g => ({ g, t: l3(g) })).filter(x => x.t != null).sort((a, b) => a.t - b.t), ml = lt.findIndex(x => x.g === f);
+  if (lt.length >= 5 && ml >= 0 && ml <= 1) out.push({ w: 7 - ml, t: ml === 0 ? `この距離帯で使った上がり${lt[0].t.toFixed(1)}秒はメンバー最速` : `この距離帯の上がり${lt[ml].t.toFixed(1)}秒はメンバー2位（最速と${(lt[ml].t - lt[0].t).toFixed(1)}秒差）` });
+  if (L){
+    // ④前走の展開：ペース（前半3F-後半3F）と位置取り
+    const pm = /^(\d+\.\d)-(\d+\.\d)$/.exec(L.pace || ""), c1 = L.passing?.[0], fld = L.field || 0;
+    if (pm && c1 && fld){ const a = +pm[1], b = +pm[2], e = (c1 - 1) / Math.max(1, fld - 1);
+      if (a - b <= -1.5 && e <= 0.3 && L.pos >= 4) out.push({ w: 7, t: `前走はハイペース（前半${a}-後半${b}）を${c1}番手で追いかけて${L.pos}着。前が苦しい流れで、着順ほど内容は悪くない` });
+      else if (a - b >= 1.5 && e >= 0.6 && L.pos >= 4 && L.last3f) out.push({ w: 7, t: `前走はスロー（前半${a}-後半${b}）で${c1}番手の後方から上がり${L.last3f}秒で${L.pos}着。展開が向かなかっただけ` }); }
+    // ⑤着差
+    if (L.pos >= 4 && L.margin != null && L.margin <= 0.6) out.push({ w: 5, t: `前走${L.pos}着でも勝ち馬とは${L.margin < 0.05 ? "タイム差なし" : L.margin.toFixed(1) + "秒差"}` });
+    // ⑥4角からの追い上げ
+    if (L.passing?.length >= 2 && fld && (L.passing[L.passing.length - 1] - L.pos) / fld >= 0.25) out.push({ w: 4, t: `前走は4角${L.passing[L.passing.length - 1]}番手から${L.pos}着まで追い上げた` });
+    // ⑦斤量
+    const kg = +(f.weight ?? f.kg); if (kg > 0 && L.weight > 0 && L.weight - kg >= 2) out.push({ w: 4, t: `斤量${L.weight}kg→${kg}kgと${(L.weight - kg).toFixed(L.weight - kg >= 1 && Number.isInteger(L.weight - kg) ? 0 : 1)}kg軽くなる` });
+    // ⑧叩き2戦目
+    const P2 = R[1]; if (P2 && race.date){ const g1 = (new Date(L.date) - new Date(P2.date)) / 864e5, g0 = (new Date(race.date) - new Date(L.date)) / 864e5; if (g1 >= 90 && g0 <= 60) out.push({ w: 3, t: `約${Math.round(g1 / 30)}か月の休み明けを1度使われての叩き2戦目` }); }
+  }
+  // ⑨コース実績
+  const cr = R.filter(q => q.venue === race.venue && q.surface === S && Math.abs(q.dist - D) <= 200 && q.pos <= 3);
+  if (cr.length) out.push({ w: 4, t: `${race.venue}${S}${D}m前後で3着内${cr.length}回（${cr.slice(0, 2).map(q => `${q.pos}着`).join("・")}）` });
+  return out.sort((a, b) => b.w - a.w).map(x => x.t);
+}
 // 注目穴馬の推奨理由（記録にある材料から作る文。作り話はしない）
 function darkWhy(sim){
   const d = sim.dark; if (!d) return [];
   const f = d.f, p = f.prof || {}, ad = f.adj || {}, L = p.last, MM = sim.cands?.M, out = [];
   const w = MM ? MM.win[d.i] : d.a.win, t3 = MM ? MM.place[d.i] : d.a.top3, mk = f.odds > 1 ? 0.8 / f.odds : null;
-  if (f.ana?.length) out.push(`穴パターン「${f.ana.slice(0, 3).join("」「")}」に該当`);
-  if (mk && w > mk * 1.05) out.push(`AIの勝率${(w * 100).toFixed(1)}%は単勝オッズの評価（約${(mk * 100).toFixed(1)}%）より高い`);
+  // 2026-10-17：オッズの動きやAIの数字ではなく、過去の走りから言える具体的な事実を先に出す
+  try { darkInsight(sim.ctx, f).forEach(t => out.push(t)); } catch (e) {}
+  const ana = (f.ana || []).filter(a => !ODDS_TAGS.has(a));
   try { const pf = Engine.paceForecast(sim.ctx), st = p.style;
     if ((st === "逃げ" || st === "先行") && pf.best === "slow") out.push(`${st}脚質で、スロー想定（${Math.round(pf.slow * 100)}%）なら前で粘り込める`);
     else if ((st === "差し" || st === "追込") && pf.best === "high") out.push(`${st}脚質で、ハイペース想定（${Math.round(pf.high * 100)}%）なら末脚が生きる`);
     else if (st === "逃げ" && (pf.frontCount ?? 9) <= 2) out.push(`前に行く馬が少なく（${pf.frontCount}頭）、楽にハナを取れそう`); } catch (e) {}
   if (L && L.pos > 0){
-    if (L.pos >= 4 && L.margin != null && L.margin <= 0.8) out.push(`前走${L.pos}着も勝ち馬から${L.margin < 0.05 ? "タイム差なし" : L.margin.toFixed(1) + "秒差"}で、着順ほど負けていない`);
     if (L.pop && L.pos && L.pop - L.pos >= 3) out.push(`前走は${L.pop}番人気で${L.pos}着と、人気以上に走った`);
-    if (L.passing?.length >= 2 && L.field && (L.passing[L.passing.length - 1] - L.pos) / L.field >= 0.25) out.push(`前走は4角${L.passing[L.passing.length - 1]}番手から${L.pos}着まで追い上げた`);
   }
   const PH = { 距離: "距離適性が高い", 芝ダ: "芝・ダートの適性が合う", 馬場: "今日の馬場状態が合う", 競馬場: "この競馬場で実績がある", 回り: "回りの得意な方向", 枠: "枠順が有利", 騎手: `鞍上${f.jockey ? "（" + f.jockey + "）" : ""}が魅力`, 調教: "調教の動きが良い", 斤量: "斤量に恵まれた", 血統: "血統的に条件が合う" };
   Object.entries(PH).map(([k, t]) => [t, ad[k] || 0]).filter(([, v]) => v > 0.4).sort((a, b) => b[1] - a[1]).slice(0, 2).forEach(([t]) => out.push(t));
-  out.push(`シミュレーションの3着以内率${(t3 * 100).toFixed(1)}%${mk && t3 > mk * 2.7 ? `（単勝${f.odds}倍の馬としては高め）` : ""}`);
-  return out.slice(0, 6);
+  if (ana.length) out.push(`穴パターン「${ana.slice(0, 3).join("」「")}」に該当`);
+  return [...new Set(out)].slice(0, 6);
 }
 // 注目穴馬を必ず入れる1,000円の買い方（全レース）。相手はシミュレーションの1着率の順（注目穴馬を除く）＝◎○▲△☆
 //  BOX型：ワイド BOX（注目穴馬・◎・○）3点 ＋ 3連複 注目穴馬軸－◎○▲△ 6点 ＋ 複勝 注目穴馬 1点＝10点
@@ -5646,7 +5736,10 @@ async function raceImage(r, x){
       rr(x0 + 16, hy + 152, cw - 32, 96, 10, "#c62828"); txt("1着率（シミュ）", x0 + 34, hy + 190, 24, "#fff"); txt(P(h.win), x0 + cw - 34, hy + 230, 56, "#fff", { al: "right", f: FD, w: "normal" });
       const t2 = (xx, lb, v) => { rr(xx, hy + 262, (cw - 48) / 2, 84, 10, "#fff"); txt(lb, xx + (cw - 48) / 4, hy + 292, 22, "#222", { al: "center" }); txt(v, xx + (cw - 48) / 4, hy + 334, 36, "#111", { al: "center", f: FD, w: "normal" }); };
       t2(x0 + 16, "連対率", P(h.top2)); t2(x0 + 32 + (cw - 48) / 2, "複勝率", P(h.top3));
-      const tg = [...(h.ana || []), h.style].filter(Boolean).slice(0, 2).join("・"); if (tg) txt(tg, x0 + cw / 2, hy + 382, 22, "#f7e7a6", { al: "center", max: cw - 30 }); });
+      const hw = (h.why?.length ? h.why : d && d.num === h.num ? d.why || [] : [])[0];
+      if (hw){ font(19); g.fillStyle = "#f7e7a6"; g.textAlign = "left"; const lines = []; let ln = ""; for (const ch of String(hw)){ if (g.measureText(ln + ch).width > cw - 36){ lines.push(ln); ln = ch; } else ln += ch; } lines.push(ln);
+        lines.slice(0, 2).forEach((t, q) => g.fillText(q === 1 && lines.length > 2 ? t.slice(0, -1) + "…" : t, x0 + 18, hy + 371 + q * 23)); }
+      else { const tg = [...(h.ana || []).filter(a => !ODDS_TAGS.has(a)), h.style].filter(Boolean).slice(0, 2).join("・"); if (tg) txt(tg, x0 + cw / 2, hy + 382, 22, "#f7e7a6", { al: "center", max: cw - 30 }); } });
   } else if (d){
     const wk = wakuNo(r, d.num, x.field, d.waku);
     rr(48, y + 96, 112, 112, 10, WAKU[wk - 1] || "#fff", "#999"); txt(d.num, 104, y + 186, 86, WAKU_TX[wk - 1] || "#111", { al: "center", f: FD, w: "normal" });
@@ -5657,7 +5750,7 @@ async function raceImage(r, x){
     const tile = (x0, lb, v) => { rr(x0, ty, 160, 112, 12, "#fff"); txt(lb, x0 + 80, ty + 38, 24, "#222", { al: "center" }); txt(v, x0 + 80, ty + 92, 44, "#111", { al: "center", f: FD, w: "normal" }); };
     tile(476, "連対率", P(d.top2)); tile(646, "複勝率", P(d.top3)); tile(816, "人気", d.pop ? d.pop + "番" : "—");
     // タグ
-    const tags = [...(d.ana || []), d.style ? `${d.style}` : null, d.conf ? "◎○▲に入った穴" : null].filter(Boolean).slice(0, 4);
+    const tags = [...(d.ana || []).filter(a => !ODDS_TAGS.has(a)), d.style ? `${d.style}` : null, d.conf ? "◎○▲に入った穴" : null].filter(Boolean).slice(0, 4);
     tags.forEach((t, k) => { const x0 = 44 + k * 236; rr(x0, ty + 128, 222, 52, 10, "#f7e7a6"); txt(t, x0 + 111, ty + 163, 24, "#1a1a1a", { al: "center", max: 206 }); });
     const why = (d.why || []).slice(0, 2).join("。") || `${d.pop || ""}番人気ながらシミュレーションの1着率${P(d.win)}。`;
     wrap(why, 48, ty + 222, W - 110, 38, 26, "#fff");
@@ -5721,7 +5814,7 @@ function raceXText(r, x){
   const buy = "";   // 買い目（★馬連）はX投稿文には入れない
   const tags = [`#${r.venue}${r.no}R`, race && race.length <= 12 ? `#${race}` : null, `#${r.venue}競馬`, "#競馬予想"].filter(Boolean);
   const m0 = x.marks?.[0], pc = v => v == null ? "" : (v * 100).toFixed(1) + "%";
-  const note = m0 ? `本命の1着率${pc(m0.win)}${DS[0] ? `、穴の${DS[0].num}も3着内${pc(DS[0].top3)}` : ""}` : "";
+  const w0 = (x.dark?.why || [])[0], note = w0 && L(w0) <= 110 ? `${x.dark.num}番：${w0}` : m0 ? `本命の1着率${pc(m0.win)}${DS[0] ? `、穴の${DS[0].num}も3着内${pc(DS[0].top3)}` : ""}` : "";
   const TR = (x.field >= 14 && x.subs5?.length ? x.subs5 : (x.subs || [])).slice(0, 5); const tri = TR.length ? `△${TR.map(m => m.num).join(".")}` : "";
   const build = (useBuy, nt, useNote) => [head, mk.join("\n"), tri, ana, useBuy ? buy : "", useNote ? note : "", tags.slice(0, nt).join(" ")].filter(Boolean).join("\n");
   for (const [b, nt, n] of [[1, 4, 1], [1, 3, 1], [1, 4, 0], [1, 3, 0], [0, 4, 0], [0, 3, 0], [0, 2, 0], [0, 1, 0]]){ const t = build(b, nt, n); if (L(t) <= 280) return t; }
@@ -5765,7 +5858,7 @@ function summarizeSim(r, sim){
     // ◎○▲に入った5番人気以下（2頭以上なら画像は2頭版）
     // 14頭以上は△を5頭まで（画像用）
     subs5: f.length >= 14 ? w.slice(3, 8).map(mk) : null,
-    darks: w.slice(0, 3).map((x, k) => ({ x, k })).filter(q => (f[q.x.i].pop || 0) >= 5).map(q => ({ ...mk(q.x), mk: q.k, ana: (f[q.x.i].ana || []).slice(0, 3) })),
+    darks: w.slice(0, 3).map((x, k) => ({ x, k })).filter(q => (f[q.x.i].pop || 0) >= 5).map(q => ({ ...mk(q.x), mk: q.k, ana: (f[q.x.i].ana || []).filter(a => !ODDS_TAGS.has(a)).slice(0, 3), why: (() => { try { return darkInsight(sim.ctx, f[q.x.i]).slice(0, 2); } catch (e) { return []; } })() })),
     star: (() => { const dn = sim.dark?.f.num; const k = w.findIndex(s => s.num === dn); return dn != null && k >= 3 ? mk(w[k]) : null; })(),
     pace: (() => { const pf = Engine.paceForecast(sim.ctx); return { slow: pf.slow, mid: pf.mid, high: pf.high, best: pf.best, front: pf.frontCount }; })(),
     t1: tks(sim.plans?.[1000]), t5: tks(sim.plans?.[5000]),
@@ -5784,7 +5877,9 @@ function summarizeSim(r, sim){
     uma: (() => { if (!sim.triMap) return null; const P = new Map(); sim.triMap.forEach((p, k) => { const [a, b] = k.split("-").map(Number); const kk = [f[a].num, f[b].num].sort((x, y) => x - y).join("-"); P.set(kk, (P.get(kk) || 0) + p); });
       const best = [...P.entries()].sort((a, b) => b[1] - a[1])[0]; if (!best) return null; const o = r.comboOdds?.馬連?.[best[0]];
       return { nums: best[0].split("-").map(Number), p: best[1], odds: o ? +(+o).toFixed(1) : null }; })(),
-    dark: sim.dark ? { waku: sim.dark.f.waku ?? null, conf: !!sim.dark.conf, ana: (sim.dark.f.ana || []).slice(0, 4), top2: sim.dark.a.top2 ?? null, num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: MM ? MM.place[sim.dark.i] : sim.dark.a.top3, win: MM ? MM.win[sim.dark.i] : sim.dark.a.win, jockey: sim.dark.f.jockey || null, style: sim.dark.f.prof?.style || null, why: darkWhy(sim) } : null,
+    // 検証中（10/15）：混戦の穴＝7番人気以下なのに単勝10倍以下。過去5年88頭で3着内42%・複勝回収126%（頭数が少なく確定ではない）
+    konsen: f.filter(h => +h.pop >= 7 && h.odds > 1 && h.odds <= 10).map(h => ({ num: h.num, name: h.name, pop: +h.pop, odds: h.odds })),
+    dark: sim.dark ? { waku: sim.dark.f.waku ?? null, conf: !!sim.dark.conf, ana: (sim.dark.f.ana || []).filter(a => !ODDS_TAGS.has(a)).slice(0, 4), top2: sim.dark.a.top2 ?? null, num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: MM ? MM.place[sim.dark.i] : sim.dark.a.top3, win: MM ? MM.win[sim.dark.i] : sim.dark.a.win, jockey: sim.dark.f.jockey || null, style: sim.dark.f.prof?.style || null, why: darkWhy(sim) } : null,
     ...dkTickets(w.map(x => x.num), sim.dark?.f.num),
     ...moTickets(w, f, r),
     fr: (() => { const H = f.filter(x => x.odds > 1), pw = MM ? H.map(x => MM.win[f.indexOf(x)]) : H.map(x => sim.weighted.find(s2 => s2.num === x.num)?.win || 0);
@@ -7297,14 +7392,14 @@ function xPostPanel(d, list, rowOf, best){
   if (!rows.length) return "";
   const wd = "日月火水木金土"[new Date(d + "T00:00:00+09:00").getDay()], md = `${+d.slice(5, 7)}/${+d.slice(8, 10)}（${wd}）`;
   const pc = v => v == null ? "—" : (v * 100).toFixed(1) + "%";
-  const b = rows.find(o => o.x === best) || rows[0], bd = b.x.dark, why = bd.why || [];
+  const b = rows.find(o => best && o.x.id === best.id) || rows[0], bd = b.x.dark, why = bd.why || [];
   const head = `【${md} AI注目穴馬】\n本日の最注目👉${b.r.venue}${b.r.no}R ${b.r.name || ""}\n${bd.num}番 ${bd.name}（${bd.pop ? bd.pop + "人気・" : ""}${bd.odds}倍）\nAI勝率${pc(bd.win)}・3着内${pc(bd.top3)}`;
   const tags = "\n#競馬 #競馬予想 #AI競馬";
   const fit = (base, items, tail = "") => { let t = base; for (const it of items){ if (xLen(t + "\n" + it + tail) > 280) break; t += "\n" + it; } return t + tail; };
   const posts = [fit(head + "\n", why.slice(0, 2).map(w => "・" + w), tags)];
   if (why.length > 2) posts.push(fit("【推奨理由・詳しく】", why.map(w => "・" + w)));
   // 各レースの注目穴馬（会場ごと・280に収まるように分ける）
-  const lines = rows.map(o => `${o.x === best ? "★" : ""}${o.r.venue.slice(0, 1)}${o.r.no}R ${o.x.dark.num}${o.x.dark.name}(${o.x.dark.odds})`);
+  const lines = rows.map(o => `${best && o.x.id === best.id ? "★" : ""}${o.r.venue.slice(0, 1)}${o.r.no}R ${o.x.dark.num}${o.x.dark.name}(${o.x.dark.odds})`);
   let cur = `【${md} 全レースの注目穴馬】`;
   lines.forEach(l => { if (xLen(cur + "\n" + l) > 280){ posts.push(cur); cur = "（続き）"; } cur += "\n" + l; });
   const tail = "\n※AIシミュレーションによる参考予想です。馬券は自己責任・余裕資金の範囲で。";
@@ -7424,7 +7519,7 @@ function xGradedPanel(d, list, rowOf){
 }
 function renderAllTab(){
   const el = $("#p-all"); if (!el) return;
-  const d = ST.date, list = Object.values(DB.races).filter(r => r.date === d).sort((a, b) => a.venue.localeCompare(b.venue, "ja") || a.no - b.no);
+  const d = ST.date, ptm = r => { const m = /(\d{1,2}):(\d{2})/.exec(r.postTime || ""); return m ? +m[1] * 60 + +m[2] : 9999; }, list = Object.values(DB.races).filter(r => r.date === d).sort((a, b) => ptm(a) - ptm(b) || a.no - b.no || a.venue.localeCompare(b.venue, "ja"));
   loadServerSummary(d);
   const saved = BATCH.saved[d];
   const savedRows = saved?.rows ? Object.fromEntries(saved.rows.map(x => [x.id, x])) : {};
@@ -7433,23 +7528,29 @@ function renderAllTab(){
   if (!list.length){ el.innerHTML = `<div class="empty"><h3>この日のレースがありません</h3>${SERVER.enabled ? "上の「この日の全レースを取得」を押してください。" : "データ取込タブから出馬表を読み込んでください。"}</div>`; return; }
   const venues = [...new Set(list.map(r => r.venue))];
   const D4 = dayPicks(list.map(r => ({ r, row: moFill(r, rowOf(r)) })));
+  // その日の最注目穴馬TOP3（シミュの勝率が高い順）
+  const TOPD = list.map(r => moFill(r, rowOf(r))).filter(x => x?.dark).sort((a, b) => (b.dark.win ?? b.dark.top3 / 3) - (a.dark.win ?? a.dark.top3 / 3)).slice(0, 3);
   const card = r => {
     const x = moFill(r, rowOf(r)), fromSaved = !BATCH.rows[r.id] && x;
-    if (!r.entries?.length) return `<div class="rc pending"><div class="hd"><span class="no">${r.no}R</span><span class="nm">${esc(r.name)}</span></div><div class="cond">出馬表なし</div></div>`;
-    if (!x) return `<div class="rc pending"><div class="hd"><span class="no">${r.no}R</span><span class="nm">${esc(r.name)}</span></div><div class="cond">${r.surface}${r.distance}m・${r.entries.length}頭・${esc(r.postTime || "")}</div><div class="line small">${BATCH.running ? "計算待ち…" : "未計算"}</div><div class="foot"><button class="btn" data-open="${r.id}">このレースを開く</button></div></div>`;
-    return `<div class="rc">
-      <div class="hd"><span class="no">${r.no}R</span><span class="nm">${esc(r.name)}</span></div>
+    if (!r.entries?.length) return `<div class="rc pending"><div class="hd"><span class="vn">${esc(r.venue)}</span><span class="no">${r.no}R</span><span class="nm">${esc(r.name)}</span></div><div class="cond">出馬表なし</div></div>`;
+    if (!x) return `<div class="rc pending"><div class="hd"><span class="vn">${esc(r.venue)}</span><span class="no">${r.no}R</span><span class="nm">${esc(r.name)}</span></div><div class="cond">${r.surface}${r.distance}m・${r.entries.length}頭・${esc(r.postTime || "")}</div><div class="line small">${BATCH.running ? "計算待ち…" : "未計算"}</div><div class="foot"><button class="btn" data-open="${r.id}">このレースを開く</button></div></div>`;
+    const tk = TOPD.findIndex(t => t.id === x.id);
+    return `<div class="rc${tk >= 0 ? " topdark" : ""}">
+      <div class="hd"><span class="vn">${esc(r.venue)}</span><span class="no">${r.no}R</span><span class="nm">${esc(r.name)}</span><span class="pt">${esc(r.postTime || "")}</span></div>
+      ${tk >= 0 ? `<div class="topbadge">🏆 本日の最注目穴馬 第${tk + 1}位：${x.dark.num} ${esc(x.dark.name || "")}（${x.dark.pop || "?"}番人気・勝率${pct(x.dark.win)}%・3着内${pct(x.dark.top3)}%）</div>` : ""}
       <div class="cond">${r.surface}${r.distance}m・${x.field}頭・発走 ${esc(r.postTime || "")}・馬場「${esc(x.going)}」${r.goingAt ? `（${esc(r.goingAt.slice(11))}の発表${r.goingPrev && r.goingPrev !== r.going ? `・${esc(r.goingPrev)}から変更` : ""}）` : "想定"}${fromSaved ? "・保存済みの結果" : ""}</div>
       ${x.pace ? `<div class="line small">展開予想 <b>${PACE_JA[x.pace.best]}ペース ${pct(x.pace[x.pace.best])}%</b>（前に行く馬${x.pace.front}頭）</div>` : ""}
       <div class="marks">${x.marks.map((m, k) => `<span class="mk">${MARKS[k]}</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">勝率${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}${((x.field >= 14 && x.subs5?.length) ? x.subs5 : (x.subs || [])).filter(m => m.num !== starOf(x)?.num).map(m => `<span class="mk">△</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気）</span>` : ""}</span><span class="wpct">勝率${pct(m.win)}%・3着内${pct(m.top3)}%</span>`).join("")}${(() => { const m = starOf(x); return m ? `<span class="mk">☆</span><span>${m.num} ${esc(m.name)}${m.pop ? `<span class="small">（${m.pop}人気${m.odds ? " " + m.odds + "倍" : ""}）</span>` : ""}</span><span class="wpct">勝率${pct(m.win)}%・3着内${pct(m.top3)}%</span>` : ""; })()}</div>
       ${favLine(x)}
+      ${prevBiasLine(r)}
+      ${x.konsen?.length ? `<div class="line small"><b>混戦の穴（検証中）</b>：${x.konsen.map(k => `${k.num} ${esc(k.name || "")}（${k.pop}人気 ${k.odds}倍）`).join("・")}　<span class="small">7番人気以下なのに単勝10倍以下。過去5年88頭で3着内42%・複勝回収126%（年20頭ほどで、まだ確定ではない）</span></div>` : ""}
       ${D4.get(r.id) ? `<div class="line ${D4.get(r.id).why.startsWith("埋め") ? "fillbuy" : "mainbuy"}"><span class="verdict ${D4.get(r.id).why.startsWith("埋め") ? "" : "go"}">${D4.get(r.id).why.startsWith("埋め") ? "◇埋め（ルール外・90%台）" : "★本体の買い"}</span> 馬連 <b>${D4.get(r.id).tickets[0].nums.join("-")}</b> <b>${D4.get(r.id).tickets[0].stake.toLocaleString()}円</b> <span class="small">（${esc(D4.get(r.id).why)}）</span></div>` : ""}
       ${r.no === 11 && x.acc?.length ? `<div class="line small">11R 精度重視の予想（市場7：シミュ3）：${x.acc.map((m, k) => `${"◎○▲"[k]}${m.num} ${esc(m.name || "")}（勝率${pct(m.win)}%）`).join("・")}</div>` : ""}
       ${x.mo10?.length && !D4.get(r.id) ? `<div class="line"><span class="verdict go">★中距離ルール</span> 馬連 <b>${x.mo10[0].nums.join("-")}</b> <b class="pos">1,000円</b> <span class="small">（◎3〜4番人気・○1番人気・1500〜1800m。過去5年304レースで154%。ただし同じ探し方だとランダムなデータでも似た成績の条件が見つかるため、偶然の可能性あり。実戦の記録で確認中）</span></div>` : ""}
       ${D4.get(r.id) ? (x.mo5?.length ? `<div class="line small">（本命ルールの形${x.moBad?.length ? "・◎の前走：" + esc(x.moBad.join("・")) : ""}）</div>` : "") : x.mo5?.length && !x.mo9?.length && String(x.going || "").startsWith("良") ? `<div class="line small">本命ルールの形だが、◎の前走も今回も良馬場なので買わない（メインの買い方から外しています）</div>` : x.mo5?.length ? `<div class="line"><span class="verdict go">★買い：馬連 ◎-○（本命ルール）</span> <b>${x.mo5[0].nums.join("-")}</b> <b class="pos">${x.mo5[0].stake.toLocaleString()}円</b>${x.mo5[0].stake >= 2000 ? `<span class="small">（悪い材料2つ以上＝信頼度 高${x.moGap === false ? "。検証中の候補では1,000円" : ""}）</span>` : ""}${x.moBad?.length ? `<span class="small">（◎の前走：${esc(x.moBad.join("・"))}）</span>` : ""}${x.mo9?.length ? `<br><b class="pos">★★道悪の言い訳ルールにも該当</b><span class="small">（◎の前走は「${esc(x.moWet || "")}」の馬場で凡走。2024-26年は340%だが、2021-22年では81%と年による差が大きい）</span>` : x.moWet === null ? `<br><span class="small">◎の前走は良馬場（言い訳なし。この形は過去の回収率が低め）</span>` : ""}</div>` : x.mo?.length ? `<div class="line"><span class="small">馬連 ◎-○ ${x.mo[0].nums.join("-")}：元のルールには当てはまるが本命ルール外（買わない）${x.moBad?.length ? "" : "・◎の前走に悪い材料なし"}${x.moBad?.length ? "・1番人気が2倍未満" : ""}</span></div>` : ""}
       ${x.uma ? `<div class="line">最有力の馬連 <b>${x.uma.nums.join("-")}</b> <span class="small">（シミュの的中確率${pct(x.uma.p)}%${x.uma.odds ? `・${x.uma.odds}倍` : ""}）</span></div>` : ""}
       ${x.tri ? `<div class="line">最有力の3連単 <b>${x.tri.nums.join("→")}</b> <span class="small">（${pct(x.tri.p)}%）</span></div>` : ""}
-      ${x.dark ? `<div class="line">注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}${x.dark.win != null ? "勝率" + pct(x.dark.win) + "%・" : ""}3着内${pct(x.dark.top3)}%</span>${x.dark.conf ? ` <b class="pos">◎○▲に入った穴馬</b><span class="small">（過去の3着内22%）</span>` : ` <span class="small">（◎○▲には5番人気以下がいないので、印の外でシミュ評価が一番上の穴。参考・過去の3着内19%）</span>`}${bestDark === x ? ` <span class="chip ana">この日の最注目穴馬</span>` : ""}</div>` : ""}
+      ${x.dark ? `<div class="line">注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}${x.dark.win != null ? "勝率" + pct(x.dark.win) + "%・" : ""}3着内${pct(x.dark.top3)}%</span>${x.dark.conf ? ` <b class="pos">◎○▲に入った穴馬</b><span class="small">（過去の3着内22%）</span>` : ` <span class="small">（◎○▲には5番人気以下がいないので、印の外で、シミュの3着内率が一番高い穴）</span>`}${bestDark && bestDark.id === x.id ? ` <span class="chip ana">この日の最注目穴馬</span>` : ""}</div>` : ""}
       ${x.oddsAsOf ? `<div class="cond">オッズ ${esc(x.oddsAsOf)} 時点</div>` : ""}
       ${(() => { const c = CHECK[d]?.per?.[r.id]; const moR = x.mo5?.length && r.result?.pay ? (() => { const inv = x.mo5.reduce((a, t) => a + t.stake, 0), ret = x.mo5.reduce((a, t) => a + payOf(t, r.result), 0); return `<br>★本命ルール（馬連${x.mo5[0].nums.join("-")}・${inv.toLocaleString()}円） <b class="${ret >= inv ? "pos" : "neg"}">${ret - inv >= 0 ? "+" : "−"}${Math.abs(Math.round(ret - inv)).toLocaleString()}円</b>`; })() : ""; if (!c) return r.result ? `<div class="resline">結果 <b>${r.result.order.slice(0, 3).join("→")}</b>${moR}</div>` : ""; const pl = k => c.plans[k] ? `${c.plans[k].ret - c.plans[k].inv >= 0 ? "+" : "−"}${Math.abs(Math.round(c.plans[k].ret - c.plans[k].inv)).toLocaleString()}円` : "見送り";
         return `<div class="resline">結果 <b>${c.order.join("→")}</b>　◎${c.favPos ? c.favPos + "着" : "着外"}${moR}</div>`; })()}
@@ -7457,7 +7558,7 @@ function renderAllTab(){
     </div>`;
   };
   const done = list.map(rowOf).filter(x => x && x.marks?.length);
-  const bestDark = done.filter(x => x.dark).sort((a, b) => (b.dark.win ?? b.dark.top3 / 3) - (a.dark.win ?? a.dark.top3 / 3))[0] || null;
+  const bestDark = TOPD[0] || null;
   const diag = (() => {
     if (done.length < 3) return "";
     const pops = done.map(x => x.favPop).filter(p => p);
@@ -7482,11 +7583,12 @@ function renderAllTab(){
       <p class="small">過去5年（13,456レース）：本体＋埋めの全体で116%（2021-22年104%・2024-26年127%）。10/15の検証：馬連は配当のブレが大きく、5年分でも「偶然ではない」と言い切れる差はまだ出ていません。下の成績の記録で本当に勝てるかを確かめていきます。</p></div>`; })()}
     ${checkPanel(d)}
     ${CHECK[d] ? checkAllPanel() : ""}
+    ${TOPD.length ? `<div class="learnbox topdarks"><h3>🏆 本日の最注目穴馬 TOP${TOPD.length}</h3><ol>${TOPD.map(x => { const rr0 = list.find(q => q.id === x.id) || {}; return `<li><b>${esc(rr0.venue || x.venue || "")}${rr0.no || x.no}R</b>（${esc(rr0.postTime || "")}） <b>${x.dark.num} ${esc(x.dark.name || "")}</b> ${x.dark.pop || "?"}番人気・${x.dark.odds ?? "—"}倍・勝率${pct(x.dark.win)}%・3着内${pct(x.dark.top3)}%${x.dark.why?.length ? `<br><span class="small">${esc(x.dark.why.slice(0, 2).join("。"))}</span>` : ""}</li>`; }).join("")}</ol><p class="small">5番人気以下の注目穴馬のうち、シミュの勝率が高い順の3頭です。各レースのカードにも順位を出しています。</p></div>` : ""}
     ${safePanel("WIN5予想", () => win5Panel(d, list, rowOf))}
     ${safePanel("穴馬の振り返り", () => arvPanel(d))}
     ${xPostPanel(d, list, rowOf, bestDark)}
     <div class="allhead"><h3>${esc(d.slice(5).replace("-", "/"))} 全レース予想</h3><span class="small">${doneN}/${list.length}レース計算済み${BATCH.running ? `（計算中 ${BATCH.done}/${BATCH.total}）` : ""}。一括計算は各条件 ${BATCH_RUNS.toLocaleString()}回×馬場4×ペース3。レースを開いて「シミュレーション実行」を押すと1万回で計算し直せます。</span></div>
-    ${venues.map(v => `<h3 class="sec">${esc(v)}</h3><div class="allgrid">${list.filter(r => r.venue === v).map(card).join("")}</div>`).join("")}
+    <div class="allgrid">${list.map(card).join("")}</div>
     <div class="note">1,000円・5,000円の買い方と◎○▲は、各レースを「馬場4種×ペース3種」の12条件で各${BATCH_RUNS.toLocaleString()}回走らせ、馬場（発表済みなら発表の馬場、発表前は予報）とペース（脚質構成から計算した各ペースの起きやすさ）の確率で混ぜた結果から計算しています。確率は、学習した比率でオッズと統合し、当日の馬場の偏り・クッション値・馬体重の効き（反映条件を満たすときだけ）も入っています。確率は過去データにもとづく推定で、的中を保証するものではありません。馬券は余裕資金の範囲で。</div>`;
   el.querySelectorAll("[data-xcopy]").forEach(b => b.onclick = async () => { const t = XPOST.texts[+b.dataset.xcopy]; try { await navigator.clipboard.writeText(t); toast("コピーしました"); } catch (e) { toast("コピーできませんでした（文字を選んでコピーしてください）"); } });
   const ftb = el.querySelector("#ftRun"); if (ftb) ftb.onclick = () => ftRun(d);
