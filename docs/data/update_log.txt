@@ -1,6 +1,3 @@
-2026-10-14 07:01:02 学習を更新しました（8212レース分）
-2026-10-14 07:01:45 学習を更新しました（8248レース分）
-2026-10-14 07:02:28 学習を更新しました（8284レース分）
 2026-10-14 07:03:12 学習を更新しました（8320レース分）
 2026-10-14 07:03:56 学習を更新しました（8356レース分）
 2026-10-14 07:04:43 学習を更新しました（8392レース分）
@@ -298,3 +295,6 @@
 2026-10-17 10:08:39 オッズ取得できず 東京3R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/12頭分しか読めず
 2026-10-17 10:08:39 オッズ取得できず 東京4R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/16頭分しか読めず
 2026-10-17 10:08:39 オッズを更新しました（2/36レース・Yahoo!競馬/netkeiba・2026-10-17 10:07時点）
+2026-10-17 10:46:07 オッズ取得できず 京都5R: netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+2026-10-17 10:46:07 オッズ取得できず 新潟8R: netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+2026-10-17 10:46:07 オッズを更新しました（34/36レース・Yahoo!競馬/netkeiba・2026-10-17 10:46時点）・結果確定5レース
