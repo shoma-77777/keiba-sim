@@ -5961,7 +5961,11 @@ async function raceImage(r, x){
   txt("※シミュレーションによる予想です。馬券は余裕資金の範囲で。", W / 2, H - 10, 18, "rgba(255,255,255,0.6)", { al: "center", w: "normal" });
   return c.toDataURL("image/png");
 }
+// 予想の計算の版：推奨文・注目穴馬の決め方を変えたら上げる。画像を作るとき、古い版の計算なら計算し直してから作る
+const ROW_VER = "20261018b";
 async function showRaceImage(id){
+  const r0 = DB.races[id]; let row0 = BATCH.rows[id] || BATCH.saved[r0?.date]?.rows?.find(q => q.id === id);
+  if (r0?.entries?.length && row0?.rv !== ROW_VER){ toast("最新の考え方で計算し直しています…"); try { await runSim(true, { id, runs: BATCH_RUNS }); } catch (e) {} }
   const r = DB.races[id]; const x = moFill(r, BATCH.rows[id] || BATCH.saved[r?.date]?.rows?.find(q => q.id === id)); if (!r || !x?.marks?.length){ toast("先にこのレースを計算してください"); return; }
   toast("画像を作っています…"); const url = await raceImage(r, x);
   let m = $("#imgModal"); if (!m){ m = document.createElement("div"); m.id = "imgModal"; m.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px"; document.body.appendChild(m); m.onclick = e => { if (e.target === m) m.remove(); }; }
@@ -6051,6 +6055,7 @@ function summarizeSim(r, sim){
       return { nums: best[0].split("-").map(Number), p: best[1], odds: o ? +(+o).toFixed(1) : null }; })(),
     // 検証中（10/15）：混戦の穴＝7番人気以下なのに単勝10倍以下。過去5年88頭で3着内42%・複勝回収126%（頭数が少なく確定ではない）
     konsen: f.filter(h => +h.pop >= 7 && h.odds > 1 && h.odds <= 10).map(h => ({ num: h.num, name: h.name, pop: +h.pop, odds: h.odds })),
+    rv: ROW_VER,
     dark: sim.dark ? { waku: sim.dark.f.waku ?? null, conf: !!sim.dark.conf, ana: (sim.dark.f.ana || []).filter(a => !ODDS_TAGS.has(a)).slice(0, 4), top2: sim.dark.a.top2 ?? null, num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: MM ? MM.place[sim.dark.i] : sim.dark.a.top3, win: MM ? MM.win[sim.dark.i] : sim.dark.a.win, jockey: sim.dark.f.jockey || null, style: sim.dark.f.prof?.style || null, why: darkWhy(sim) } : null,
     ...dkTickets(w.map(x => x.num), sim.dark?.f.num),
     ...moTickets(w, f, r),
