@@ -221,7 +221,9 @@ const Engine = (() => {
     // 脚質（1角通過/頭数）
     const earlyArr = flat.filter(r => r.passing.length && r.field > 4).map(r => (r.passing[0] - 1) / Math.max(1, r.field - 1));
     const usualEarly = median(earlyArr);
-    out.earlyPos = earlyArr.length ? mean(earlyArr) : 0.5;
+    // 2026-10-18：ふだんの位置は中央値で（1回だけ後ろになった前走などに引っ張られないように）。保存済みの過去777レースを同じ乱数で比較し、
+    //  3着内の予測誤差 0.4304→0.4300・6番人気以下 0.2974→0.2967・注目穴馬の3着内 24.6→25.0%（直近288レースでも3着内・6番人気以下の誤差は改善）。1着の予測はわずかに悪化
+    out.earlyPos = earlyArr.length ? (earlyArr.length >= 3 ? median(earlyArr) : mean(earlyArr)) : 0.5;
     out.style = out.earlyPos < 0.12 ? "逃げ" : out.earlyPos < 0.35 ? "先行" : out.earlyPos < 0.68 ? "差し" : "追込";
     const gains = flat.filter(r => r.passing.length).map(r => (r.passing[r.passing.length-1] - r.pos) / r.field);
     out.kick = gains.length ? mean(gains) : 0;
@@ -538,6 +540,25 @@ const Engine = (() => {
         if (Math.abs(d) >= 0.12){ f.adj.人気変動 = clamp(d * 1.1, -1.0, 1.5) * (WEIGHTS.人気変動 ?? 1); f.P += f.adj.人気変動; }
       }
     });
+    // 直接対決（2026-10-18）：今回の出走馬どうしが過去1年に同じレースを走っていれば、いちばん最近の対戦でどちらが先着したかを記録する。
+    //  過去5年：6番人気以下で、人気が上の馬に直接対決で2勝以上かつ勝ち越している馬は3着内12.2%（同じ人気の平均9.0%）・複勝回収84%（同68%）、5年とも平均を上回った
+    {
+      const lo = R.date ? new Date(new Date(R.date) - 365 * 864e5).toISOString().slice(0, 10) : null;
+      const RR = field.map(f => { const h = horsesDB[f.horseId] || horsesDB[f.name]; const m = new Map();
+        for (const q of (h?.runs || [])) if (q.raceId && +q.pos > 0 && (!R.date || (q.date < R.date && q.date >= lo))) m.set(q.raceId, q); return m; });
+      field.forEach((f, i) => { let beat = 0, lost = 0; const list = [];
+        field.forEach((o, j) => { if (i === j) return; let last = null;
+          for (const [id, x] of RR[i]){ const y = RR[j].get(id); if (y && (!last || x.date > last.x.date)) last = { x, y }; }
+          if (last){ const win = +last.x.pos < +last.y.pos; if (win) beat++; else lost++;
+            list.push({ num: o.num, name: o.name, pop: o.pop || null, win, date: last.x.date, venue: last.x.venue, surface: last.x.surface, dist: +last.x.dist, race: last.x.race || "", me: +last.x.pos, them: +last.y.pos }); } });
+        // 点数に足すのは6番人気以下だけ（全頭に足すと3着内の予測が悪化：強め0.4449・弱め0.4437・なし0.4435）。
+        //  6番人気以下で、人気が上の馬に先着し勝ち越している馬に +1.5（2頭以上）／+0.7（1頭）。直近323レースを同じ乱数で比べ、
+        //  予測誤差 勝ち0.2315→0.2314・3着内0.4435→0.4429・6番人気以下0.3111→0.3102、注目穴馬の3着内19.8→20.1%・複勝回収64→70%。
+        //  保存済みの過去777レースでも 3着内0.4306→0.4304・6番人気以下0.2978→0.2974（1着はほぼ同じ）
+        const up = list.filter(o => o.win && o.pop && f.pop && +o.pop < +f.pop).length;
+        const pts = +f.pop >= 6 && beat > lost ? (up >= 2 ? 1.5 : up >= 1 ? 0.7 : 0) * (WEIGHTS.対戦 ?? 1) : 0;
+        f.h2h = { beat, lost, list, up }; f.adj.対戦 = pts; f.P += pts; });
+    }
     if (oddsReady(field)) {
       const meanP = field.reduce((a,f)=>a+f.P,0)/N;
       const fo = filledOdds(field);

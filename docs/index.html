@@ -624,7 +624,9 @@ const Engine = (() => {
     // 脚質（1角通過/頭数）
     const earlyArr = flat.filter(r => r.passing.length && r.field > 4).map(r => (r.passing[0] - 1) / Math.max(1, r.field - 1));
     const usualEarly = median(earlyArr);
-    out.earlyPos = earlyArr.length ? mean(earlyArr) : 0.5;
+    // 2026-10-18：ふだんの位置は中央値で（1回だけ後ろになった前走などに引っ張られないように）。保存済みの過去777レースを同じ乱数で比較し、
+    //  3着内の予測誤差 0.4304→0.4300・6番人気以下 0.2974→0.2967・注目穴馬の3着内 24.6→25.0%（直近288レースでも3着内・6番人気以下の誤差は改善）。1着の予測はわずかに悪化
+    out.earlyPos = earlyArr.length ? (earlyArr.length >= 3 ? median(earlyArr) : mean(earlyArr)) : 0.5;
     out.style = out.earlyPos < 0.12 ? "逃げ" : out.earlyPos < 0.35 ? "先行" : out.earlyPos < 0.68 ? "差し" : "追込";
     const gains = flat.filter(r => r.passing.length).map(r => (r.passing[r.passing.length-1] - r.pos) / r.field);
     out.kick = gains.length ? mean(gains) : 0;
@@ -941,6 +943,25 @@ const Engine = (() => {
         if (Math.abs(d) >= 0.12){ f.adj.人気変動 = clamp(d * 1.1, -1.0, 1.5) * (WEIGHTS.人気変動 ?? 1); f.P += f.adj.人気変動; }
       }
     });
+    // 直接対決（2026-10-18）：今回の出走馬どうしが過去1年に同じレースを走っていれば、いちばん最近の対戦でどちらが先着したかを記録する。
+    //  過去5年：6番人気以下で、人気が上の馬に直接対決で2勝以上かつ勝ち越している馬は3着内12.2%（同じ人気の平均9.0%）・複勝回収84%（同68%）、5年とも平均を上回った
+    {
+      const lo = R.date ? new Date(new Date(R.date) - 365 * 864e5).toISOString().slice(0, 10) : null;
+      const RR = field.map(f => { const h = horsesDB[f.horseId] || horsesDB[f.name]; const m = new Map();
+        for (const q of (h?.runs || [])) if (q.raceId && +q.pos > 0 && (!R.date || (q.date < R.date && q.date >= lo))) m.set(q.raceId, q); return m; });
+      field.forEach((f, i) => { let beat = 0, lost = 0; const list = [];
+        field.forEach((o, j) => { if (i === j) return; let last = null;
+          for (const [id, x] of RR[i]){ const y = RR[j].get(id); if (y && (!last || x.date > last.x.date)) last = { x, y }; }
+          if (last){ const win = +last.x.pos < +last.y.pos; if (win) beat++; else lost++;
+            list.push({ num: o.num, name: o.name, pop: o.pop || null, win, date: last.x.date, venue: last.x.venue, surface: last.x.surface, dist: +last.x.dist, race: last.x.race || "", me: +last.x.pos, them: +last.y.pos }); } });
+        // 点数に足すのは6番人気以下だけ（全頭に足すと3着内の予測が悪化：強め0.4449・弱め0.4437・なし0.4435）。
+        //  6番人気以下で、人気が上の馬に先着し勝ち越している馬に +1.5（2頭以上）／+0.7（1頭）。直近323レースを同じ乱数で比べ、
+        //  予測誤差 勝ち0.2315→0.2314・3着内0.4435→0.4429・6番人気以下0.3111→0.3102、注目穴馬の3着内19.8→20.1%・複勝回収64→70%。
+        //  保存済みの過去777レースでも 3着内0.4306→0.4304・6番人気以下0.2978→0.2974（1着はほぼ同じ）
+        const up = list.filter(o => o.win && o.pop && f.pop && +o.pop < +f.pop).length;
+        const pts = +f.pop >= 6 && beat > lost ? (up >= 2 ? 1.5 : up >= 1 ? 0.7 : 0) * (WEIGHTS.対戦 ?? 1) : 0;
+        f.h2h = { beat, lost, list, up }; f.adj.対戦 = pts; f.P += pts; });
+    }
     if (oddsReady(field)) {
       const meanP = field.reduce((a,f)=>a+f.P,0)/N;
       const fo = filledOdds(field);
@@ -4831,7 +4852,10 @@ function pickDarkHorse(ctx, stats, avgStats, M){
   //  以前の期待値重視の選び方は3着内12%・複勝回収68%。シミュの評価・穴パターンなどの材料を足しても的中率は上がらなかった）
   // 7番人気以下で「3か月以上の休み明け＋馬体重+10kg以上」は、同じ人気より3着内が2割少ない（過去2,068頭・前半後半とも）ので注目穴馬から外す
   const longGain = f => { const e = (ctx.race?.entries || []).find(q => +q.num === +f.num), bd = e?.bwDiff ?? f.bwDiff, L = f.prof?.runs?.[0]; const days = L?.date && ctx.race?.date ? (new Date(ctx.race.date) - new Date(L.date)) / 864e5 : null; return (f.pop || 0) >= 7 && bd != null && bd >= 10 && days != null && days >= 90; };
-  const cand0 = ctx.field.map((f, i) => ({ f, i, s: stats[i], a: avgStats[i] })).filter(x => x.f.odds > 1 && (x.f.pop ? x.f.pop >= 5 : x.f.odds >= 10) && !longGain(x.f));
+  // 2026-10-17：調教評価Dは、6番人気以下で同じ人気より3着内が3割少ない（4.1%・同じ人気6.1%、6,085頭）ので候補から外す（全員Dのときは外さない）
+  const trD = f => /^D/.test(f.training?.grade || "");
+  const candA = ctx.field.map((f, i) => ({ f, i, s: stats[i], a: avgStats[i] })).filter(x => x.f.odds > 1 && (x.f.pop ? x.f.pop >= 5 : x.f.odds >= 10) && !longGain(x.f));
+  const cand0 = candA.some(x => !trD(x.f)) ? candA.filter(x => !trD(x.f)) : candA;
   if (!cand0.length || !Engine.oddsReady(ctx.field)) return null;
   cand0.forEach(x => { x.winEV = (M ? M.win[x.i] : x.a.win) * x.f.odds; x.placeEV = null; });
   // 2026-10-12：◎○▲（シミュの上位3頭）に5番人気以下がいれば、その馬が注目穴馬（複数なら人気が上の馬）。過去2,133レース・3着内22%・複勝回収79%
@@ -4945,7 +4969,7 @@ async function runSim(silent, opt = {}){
 }
 
 // ===== 出馬表 =====
-const ADJ_ORDER = ["スピード","レース傾向","当日馬場","血統","季節","調子","距離","芝ダ","馬場","競馬場","回り","枠","斤量","騎手","乗替","調教","ローテ","年齢","穴要素","人気変動","市場","手動"];
+const ADJ_ORDER = ["スピード","レース傾向","当日馬場","血統","季節","調子","距離","芝ダ","馬場","競馬場","回り","枠","斤量","騎手","乗替","対戦","調教","ローテ","年齢","穴要素","人気変動","市場","手動"];
 function renderCard(){
   const r = curRace(), el = $("#p-card");
   if (!r) { el.innerHTML = ""; return; }
@@ -5595,6 +5619,11 @@ function darkStory(ctx, f){
     else if (st === "逃げ" && (pf.frontCount ?? 9) <= 1) chg.push(`単騎逃げが濃厚`); } catch (e) {}
   const cr = R.filter(q => q.venue === race.venue && q.surface === S && q.pos <= 3).length; if (cr >= 2) chg.push(`${race.venue}${S}は3着内${cr}回`);
   // ---- 好走の根拠（実績・時計・上がり・相手関係）
+  // 直接対決：今回人気が上の馬に、いちばん最近の対戦で先着している（2勝以上で勝ち越しは、同じ人気より3着内が約3割多い）
+  const h2h = f.h2h, beatUp = (h2h?.list || []).filter(o => o.win && o.pop && f.pop && +o.pop < +f.pop);
+  if (beatUp.length && h2h.beat > h2h.lost){ const same = beatUp.every(o => o.date === beatUp[0].date && o.race === beatUp[0].race), q = beatUp[0];
+    const where = same ? `${String(q.date).slice(5).replace("-", "/")}の${q.venue}${q.surface}${q.dist}m${/新馬|未勝利/.test(q.race) ? (q.race.includes("新馬") ? "新馬戦" : "未勝利戦") : ""}で` : "直接対決で";
+    ev.unshift(`${where}今回人気上位の${beatUp.slice(0, 3).map(o => o.name).join("・")}${beatUp.length > 3 ? `ら${beatUp.length}頭` : ""}に先着済み`); }
   const proven = R.filter(q => q.pos <= 2 && rg(q) && gv(rg(q)) != null && gv(gT) != null && gv(rg(q)) >= gv(gT)).sort((a, b) => gv(rg(b)) - gv(rg(a)) || a.pos - b.pos)[0];
   const bad2 = R[0]?.pos >= 10 && R[1]?.pos >= 10;
   if (proven){ const g0 = rg(proven), head = /^G|^L/.test(g0) ? `${proven.date.slice(0, 4)}年${nm(proven)}（${g0}）${proven.pos}着` : `${g0 === gT ? "同じ" : "格上の"}${g0}クラスで${proven.pos === 1 ? "勝ち" : "連対"}`;
@@ -5637,8 +5666,10 @@ function darkWhy(sim){
   if (L && L.pos > 0){
     if (L.pop && L.pos && L.pop - L.pos >= 3) out.push(`前走は${L.pop}番人気で${L.pos}着と、人気以上に走った`);
   }
-  const PH = { 距離: "距離適性が高い", 芝ダ: "芝・ダートの適性が合う", 馬場: "今日の馬場状態が合う", 競馬場: "この競馬場で実績がある", 回り: "回りの得意な方向", 枠: "枠順が有利", 騎手: `鞍上${f.jockey ? "（" + f.jockey + "）" : ""}が魅力`, 調教: "調教の動きが良い", 斤量: "斤量に恵まれた", 血統: "血統的に条件が合う" };
+  const PH = { 距離: "距離適性が高い", 芝ダ: "芝・ダートの適性が合う", 馬場: "今日の馬場状態が合う", 競馬場: "この競馬場で実績がある", 回り: "回りの得意な方向", 枠: "枠順が有利", 騎手: `鞍上${f.jockey ? "（" + f.jockey + "）" : ""}が魅力`, 斤量: "斤量に恵まれた", 血統: "血統的に条件が合う" };
   Object.entries(PH).map(([k, t]) => [t, ad[k] || 0]).filter(([, v]) => v > 0.4).sort((a, b) => b[1] - a[1]).slice(0, 2).forEach(([t]) => out.push(t));
+  // 調教：良い評価は3着内にほとんど差が出ない（6番人気以下でA 13.7%・同じ人気14.0%）ので、Aのときだけ事実として短評を添える（強い根拠としては扱わない）
+  const tr = f.training || (DB.horses?.[f.horseId]?.training) || null; if (tr?.grade && /^A/.test(tr.grade)) out.push(`調教評価A${tr.comment ? `（短評：${String(tr.comment).slice(0, 12)}）` : ""}`);
   if (ana.length) out.push(`穴パターン「${ana.slice(0, 3).join("」「")}」に該当`);
   return [...new Set(out)].slice(0, 6);
 }
@@ -5710,12 +5741,25 @@ function moFill(r, x){
 //  1着の確率は「市場7：シミュ3」で混ぜたもの（◎の的中率が一番高かった混ぜ方）。対象レースはJRAの発表どおりに選び直せます（初期値は発走時刻が遅い10R・11Rの5レース）
 const W5 = { pick: {} };
 function win5Default(list){ const c = list.filter(r => r.no >= 9 && r.no <= 11 && r.postTime).sort((a, b) => a.postTime.localeCompare(b.postTime)); return c.slice(-5).map(r => r.id); }
-function win5Probs(r, x){ const L = (x.acc?.length ? x.acc : (x.marks || []).map(m => ({ ...m }))).slice(0, 3); const z = x.acc?.length ? 1 : L.reduce((a, m) => a + (m.win || 0), 0) || 1; return L.map(m => ({ num: m.num, name: m.name, p: (m.win || 0) / (x.acc?.length ? 1 : 1), pop: m.pop, odds: m.odds })); }
+// WIN5（2026-10-18 作り直し）：全部1番人気は当たっても配当が安く予想の意味がないので、シミュの印（◎○▲）と注目穴馬を軸にする。
+//  各馬の「勝つ確率」は市場7：シミュ3の混合（acc）を目安に使い、選ぶ順番はシミュの印。固いレースは1頭、混戦ほど広げる
+function win5Probs(r, x){
+  const pOf = num => { const a = (x.acc || []).find(m => m.num === num); if (a) return a.win || 0; const m = (x.marks || []).find(m => m.num === num); return m ? m.win || 0 : 0; };
+  const L = (x.marks || []).slice(0, 3).map((m, k) => ({ num: m.num, name: m.name, mk: "◎○▲"[k], p: pOf(m.num), pop: m.pop, odds: m.odds }));
+  if (x.dark && !L.some(h => h.num === x.dark.num) && (x.dark.win || 0) >= 0.05) L.push({ num: x.dark.num, name: x.dark.name, mk: "穴", p: x.dark.win || 0, pop: x.dark.pop, odds: x.dark.odds });
+  // 固さ：1番人気が◎で単勝2倍以下なら「固い」
+  const fav = (x.marks || [])[0]; const solid = fav && +fav.pop === 1 && fav.odds && fav.odds <= 2.0;
+  return Object.assign(L, { solid });
+}
 function win5Plans(legs){
-  const plan = maxPts => { const k = legs.map(() => 1); const pts = () => k.reduce((a, b) => a * b, 1), hit = () => legs.reduce((a, L, i) => a * L.h.slice(0, k[i]).reduce((s, h) => s + h.p, 0), 1);
-    for (;;){ let best = null; legs.forEach((L, i) => { if (k[i] >= Math.min(3, L.h.length)) return; const np = pts() / k[i] * (k[i] + 1); if (np > maxPts) return; const cur = L.h.slice(0, k[i]).reduce((s, h) => s + h.p, 0), nxt = cur + L.h[k[i]].p; const gain = Math.log(nxt / cur) / Math.log((k[i] + 1) / k[i]); if (!best || gain > best.g) best = { i, g: gain }; }); if (!best) break; k[best.i]++; }
-    const sel = legs.map((L, i) => L.h.slice(0, k[i])); const mo = legs.reduce((a, L, i) => a * (1 / Math.max(1e-6, sel[i].reduce((s, h) => s + h.p, 0) / k[i])), 1);
-    return { pts: pts(), hit: hit(), sel }; };
+  // 広げる順番：混戦のレース（◎の勝つ確率が低い順）から、○→▲（穴）を足す
+  const order = legs.map((L, i) => ({ i, p0: L.h[0]?.p || 0, solid: L.h.solid })).sort((a, b) => (a.solid - b.solid) || (a.p0 - b.p0));
+  const plan = maxPts => { const k = legs.map(() => 1); const pts = () => k.reduce((a, b) => a * b, 1);
+    for (const lim of [2, 3, 4]) for (const o of order){ if (legs[o.i].h.solid && lim > 1) continue; if (k[o.i] >= lim || k[o.i] >= legs[o.i].h.length) continue; const np = pts() / k[o.i] * (k[o.i] + 1); if (np <= maxPts) k[o.i]++; }
+    const sel = legs.map((L, i) => L.h.slice(0, k[i])); const hit = sel.reduce((a, hs) => a * hs.reduce((s, h) => s + h.p, 0), 1);
+    // 配当の目安：選んだ馬の単勝オッズから、◎（各レースの1頭目）が全部勝った場合
+    const pay = legs.reduce((a, L) => a * ((L.h[0]?.odds || 1) / 0.8), 1) * 100 * 0.7;   // 単勝の控除（約20%）を戻し、WIN5の払戻率約70%を掛けたおおまかな目安
+    return { pts: pts(), hit, sel, pay }; };
   return [plan(1), plan(4), plan(20)];
 }
 function win5Panel(d, list, rowOf){
@@ -5725,12 +5769,12 @@ function win5Panel(d, list, rowOf){
   const sel = ids.map((id, i) => `<select data-w5="${i}" class="small">${opts.map(r => `<option value="${r.id}" ${r.id === id ? "selected" : ""}>${esc(r.venue)}${r.no}R ${esc(r.postTime || "")}</option>`).join("")}</select>`).join(" ");
   if (legs.some(l => !l)) return `<div class="learnbox"><h3>WIN5予想</h3><p class="small">対象レース：${sel}</p><p class="small">5レースすべての計算が終わると表示されます。</p></div>`;
   const P = win5Plans(legs), pc = v => (v * 100).toFixed(v < 0.01 ? 2 : 1);
-  const row = (pl, lab) => `<tr><td><b>${lab}</b><div class="small">${pl.pts}点・${(pl.pts * 100).toLocaleString()}円</div></td>${pl.sel.map(hs => `<td class="small">${hs.map(h => `<b>${h.num}</b> ${esc(h.name || "")}`).join("<br>")}</td>`).join("")}<td class="r num"><b>${pc(pl.hit)}%</b></td></tr>`;
+  const row = (pl, lab) => `<tr><td><b>${lab}</b><div class="small">${pl.pts}点・${(pl.pts * 100).toLocaleString()}円</div></td>${pl.sel.map(hs => `<td class="small">${hs.map(h => `${h.mk} <b>${h.num}</b> ${esc(h.name || "")}<span class="small">（${h.pop || "?"}人気）</span>`).join("<br>")}</td>`).join("")}<td class="r">${pc(pl.hit)}%<div class="small">◎が全部勝てば約${Math.round(pl.pay / 100) * 100 >= 10000 ? Math.round(pl.pay / 10000).toLocaleString() + "万" : Math.round(pl.pay).toLocaleString()}円</div></td></tr>`;
   return `<div class="learnbox"><h3>WIN5予想</h3>
     <p class="small">対象レース（JRAの発表と違うときは選び直してください）：${sel}</p>
-    <div class="tbl-wrap"><table><thead><tr><th>買い方</th>${legs.map(l => `<th>${esc(l.r.venue)}${l.r.no}R</th>`).join("")}<th class="r">的中の確率</th></tr></thead><tbody>
+    <div class="tbl-wrap"><table><thead><tr><th>買い方</th>${legs.map(l => `<th>${esc(l.r.venue)}${l.r.no}R<div class="small">${l.h.solid ? "固い" : "混戦"}</div></th>`).join("")}<th class="r">的中の確率</th></tr></thead><tbody>
       ${row(P[0], "100円（1点）")}${row(P[1], "400円まで")}${row(P[2], "2,000円まで")}</tbody></table></div>
-    <p class="small">各レースの1着の確率（市場7：シミュ3）が高い馬から、点数あたりの的中確率の伸びが大きいレースを優先して広げています。1頭で絞れるレースは1頭のままです。的中確率は目安で、WIN5は高配当の分だけ当たりにくい馬券です。余裕資金の範囲で。</p></div>`;
+    <p class="small">軸はシミュの印（◎）です。1番人気が◎で単勝2倍以下の「固い」レースは1頭、それ以外の「混戦」は◎の勝つ確率が低いレースから○・▲・注目穴馬（勝率5%以上）を足して広げます。全部1番人気の組み合わせは当たっても配当が安いので避けています。的中の確率は市場7：シミュ3の混合で計算した目安、配当の目安は単勝オッズからのおおまかな推定です。的中確率は目安で、WIN5は高配当の分だけ当たりにくい馬券です。余裕資金の範囲で。</p></div>`;
 }
 // ===== 1日最低4レースの買い（2026-10-12）：①★★道悪の言い訳ルール（2,000〜3,000円）②本命ルール（前走良→今回良は除く・1,000円）
 //  ③4レースに足りない分は、◎の勝率（シミュ）が高いレースから馬連◎-○を1,000円。過去約2年：1日4.0レース・回収率156%（前半160%・後半152%・8期間すべて103%以上）
@@ -6872,7 +6916,7 @@ async function serverInit(){
   if (!Object.keys(ST.sims).length) runSim(true);
 }
 // ===== 学習（答え合わせの蓄積から、統合の仕方・要素の効き・馬場の偏りを更新） =====
-const LOGIC_VER = "4094be49";
+const LOGIC_VER = "68bd8b50";
 const LEARN = { model: null, base: null, saved: null };
 // 実戦テスト（ルール固定）：固定した学習モデル。固定中は、全部の記録での学習は続けても予想には固定したモデルを使う
 const LOCK = { info: null, confirmOff: false };
