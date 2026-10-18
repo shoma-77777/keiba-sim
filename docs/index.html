@@ -7295,8 +7295,8 @@ async function loadLearn(){
 }
 async function runLearn(d){
   if (!SERVER.enabled || SERVER.cloud || !SERVER.on) return null;
-  // 取得済みのすべての開催日（土曜・過去の日を含む）で、結果の出ているレースを学習に使う
-  const races = Object.values(DB.races).filter(r => r.result?.rows?.length && r.entries?.length);
+  // 答え合わせした日（今日）の、結果の出ているレースだけを学習に足す（過去の日の作り直しはしない＝速い）
+  const races = Object.values(DB.races).filter(r => r.date === d && r.result?.rows?.length && r.entries?.length);
   if (!races.length) return null;
   // 記録を読み込めなかったときは学習しない（読めないまま進めると、今日の分だけで記録を上書きしてしまうため）
   const full = BF.recs?.length ? { records: BF.recs } : await api("/api/learn?full=1", { timeout: 300000 });
@@ -7305,7 +7305,8 @@ async function runLearn(d){
   // その日より前の記録だけで学習したモデルで作ったと確認できない記録（clean でないもの）も作り直す
   const done = new Set((full.records || []).filter(x => (x.rv || 0) >= Learn.RV && Learn.clean(x)).map(x => x.id));
   const todo = races.filter(r => !done.has(r.id));
-  setUpdProgress(0.5, `結果を学習中…（${todo.length}レースのモデル確率を計算）`);
+  if (!todo.length && !(full.records || []).some(x => x.date === d && !x.bets)){ setUpdProgress(1, "この日の結果は学習済みです"); return null; }
+  setUpdProgress(0.5, `この日の結果を学習中…（${todo.length}レース）`);
   const betsOf = r => betsForLearn(r.date, r.id);
   // 開催日ごとに「その日より前の記録だけ」で学習したモデルを使って記録を作る（検証に未来の情報を混ぜない）
   const byD = {}; todo.forEach(r => (byD[r.date] ||= []).push(r));
@@ -7318,7 +7319,7 @@ async function runLearn(d){
     finally { applyLearn(BF.full || keep); simBusy = false; }
   }
   // 既に記録済みのレースにも、答え合わせの仮想収支を付け足す
-  const touched = []; (full.records || []).forEach(x => { if (!x.bets){ const b = betsOf({ id: x.id, date: x.date }); if (b){ x.bets = b; touched.push(x); } } });
+  const touched = []; (full.records || []).forEach(x => { if (x.date === d && !x.bets){ const b = betsOf({ id: x.id, date: x.date }); if (b){ x.bets = b; touched.push(x); } } });
   const all = Learn.merge(full.records, recs);
   const model = Learn.build(all, all.reduce((m, x) => x.date > m ? x.date : m, d));
   await api("/api/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, append: recs.concat(touched) }), timeout: 300000 });
@@ -7485,12 +7486,12 @@ function perfDashboard(d){
   const rc = PERF.race ? DB.races[PERF.race] : null, pr = PERF.race ? c.per[PERF.race] : null;
   const raceRow = PERF_PLANS.map(([k]) => { const p = pr?.plans?.[k]; return p && p.inv > 0 ? { n: 1, inv: p.inv, ret: p.ret, hit: p.ret > 0 ? 1 : 0 } : null; });
   const dayRow = PERF_PLANS.map(([k]) => { const t = c.tot[k]; return t ? { n: t.races, inv: t.invest, ret: t.ret, hit: t.hitRaces } : null; });
-  const cum = perfCum(); if (!cum && (SERVER.enabled || SERVER.cloud)) perfLoad();
+  const cum = PERF.want ? perfCum() : null; if (PERF.want && !cum && (SERVER.enabled || SERVER.cloud)) perfLoad();
   const sel = `<select id="perfRace">${ids.map(id => { const r = DB.races[id]; return `<option value="${id}" ${id === PERF.race ? "selected" : ""}>${r ? `${esc(r.venue)}${r.no}R ${esc(r.name || "")}` : id}</option>`; }).join("")}</select>`;
   return `<div class="tbl-wrap"><table class="perf"><thead><tr><th class="rowh"></th>${PERF_PLANS.map(([, , a, b]) => `<th>${a}<br><b>${b}</b></th>`).join("")}</tr></thead><tbody>
     <tr><td class="rowh">指定レース<br>${sel}${pr ? `<div class="sub">結果 ${pr.order.join("→")}</div>` : ""}</td>${raceRow.map(perfCell).join("")}</tr>
     <tr><td class="rowh">${esc(d.slice(5).replace("-", "/"))} の合計<div class="sub">${c.n}レース</div></td>${dayRow.map(perfCell).join("")}</tr>
-    <tr><td class="rowh">これまでの累計<div class="sub">${cum ? `学習した${cum.races.toLocaleString()}レース` : PERF.loading ? "読み込み中…" : PERF.err ? "読み込めませんでした" : ""}</div></td>${cum ? PERF_PLANS.map(([, key]) => perfCell(cum.out[key], key === "t5s" || key === "dkA" || key === "dkB" || key === "fr" || /^mo\d?$/.test(key) ? "該当なし・まだ記録なし（10/11から記録）" : null)).join("") : `<td colspan="${PERF_PLANS.length}"><div class="sub">${PERF.loading ? "読み込み中…" : "累計は、学習の記録がある端末（PCのアプリ）で表示されます"}</div></td>`}</tr>
+    <tr><td class="rowh">これまでの累計<div class="sub">${cum ? `学習した${cum.races.toLocaleString()}レース` : PERF.loading ? "読み込み中…" : PERF.err ? "読み込めませんでした" : ""}</div></td>${cum ? PERF_PLANS.map(([, key]) => perfCell(cum.out[key], key === "t5s" || key === "dkA" || key === "dkB" || key === "fr" || /^mo\d?$/.test(key) ? "該当なし・まだ記録なし（10/11から記録）" : null)).join("") : `<td colspan="${PERF_PLANS.length}"><div class="sub">${PERF.loading ? "読み込み中…" : PERF.want ? "累計は、学習の記録がある端末（PCのアプリ）で表示されます" : `<button class="btn" id="perfCumBtn">累計も表示する（全記録を読むので時間がかかります）</button>`}</div></td>`}</tr>
     </tbody></table></div>
     <p class="small">回収率が100%以上のマスは緑の枠。的中率は「当たったレース÷買ったレース」。勝負レースだけ＝「勝負」と判定したレースだけ購入、全レース＝「見送り推奨」のレースも購入。累計は過去データ（その日より前のデータだけで学習したモデルの予想）と、これまでの答え合わせ（発走前の予想）の合計${cum && cum.out.t5s.n < cum.out.t1s.n ? `。<b>全レース5,000円の累計は、記録を始めた後の ${cum.out.t5s.n.toLocaleString()}レース分だけ</b>（「過去データで学習」の「予想し直す」をすると全レース分になります）` : ""}。注目穴馬入り＝注目穴馬を必ず入れた1,000円（BOX型：ワイドBOX［穴・◎・○］3点＋3連複 穴軸－◎○▲△ 6点＋穴の複勝／フォーメ型：ワイド 穴－◎・○ 2点＋3連複 穴－◎○－◎○▲△☆ 7点＋穴の複勝。◎○…はシミュレーションの1着率の順）${cum && cum.out.dkA.n < cum.out.t1s.n ? `。<b>注目穴馬入りの累計は、この版から記録した ${cum.out.dkA.n.toLocaleString()}レース分だけ</b>（過去分は「過去データで学習」の「全開催日を予想し直す」〔高速モードは外す〕で入ります）` : ""}。</p>`;
 }
@@ -7773,6 +7774,7 @@ function renderAllTab(){
   el.querySelectorAll("[data-xgcopy]").forEach(b => b.onclick = async () => { const t = XPOST.g?.[+b.dataset.xgcopy]; if (!t) return; try { await navigator.clipboard.writeText(t); toast("コピーしました"); } catch (e) { toast("コピーできませんでした（文字を選んでコピーしてください）"); } });
   el.querySelectorAll("[data-cm]").forEach(b => b.onclick = () => { CHECK_MODE.v = b.dataset.cm; CHECK_ALL.res = null; computeCheck(d); renderAllTab(); });
   const pr = el.querySelector("#perfRace"); if (pr) pr.onchange = e => { PERF.race = e.target.value; renderAllTab(); };
+  const pcb = el.querySelector("#perfCumBtn"); if (pcb) pcb.onclick = () => { PERF.want = true; renderAllTab(); };
   const ca = el.querySelector("#checkAll"); if (ca) ca.onclick = () => checkAllDates();
   el.querySelectorAll("[data-img]").forEach(b => b.onclick = () => showRaceImage(b.dataset.img));
   el.querySelectorAll("[data-w5]").forEach(sl => sl.onchange = () => { const a = W5.pick[d].slice(); a[+sl.dataset.w5] = sl.value; W5.pick[d] = a; renderAllTab(); });
