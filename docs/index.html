@@ -4863,10 +4863,12 @@ function pickDarkHorse(ctx, stats, avgStats, M){
   const top3 = avgStats.map((a, i) => ({ i, w: a.win })).sort((a, b) => b.w - a.w).slice(0, 3).map(q => q.i);
   // 2026-10-15：狙いは3着内なので、並べ替えを「1着率」から「3着内率」（展開ごとの結果をまとめたもの）に変更。
   //  直近265レースで、今の選び方 3着内18.5% → 印優先・3着内率順 20.8%（違う馬を選んだ60レースでは 9勝 → 16勝）。レース数が少ないので記録で確認を続ける
-  const conf = cand0.filter(x => top3.includes(x.i)).sort((a, b) => (b.a.top3 - a.a.top3) || (a.f.pop - b.f.pop))[0];
+  // 2026-10-18：推奨できる材料（記録から言える事実が2つ以上）がない馬は注目穴馬にしない。いなければ「注目穴馬なし」
+  const okM = x => { try { return !!darkText(ctx, x.f); } catch (e) { return false; } };
+  const conf = cand0.filter(x => top3.includes(x.i)).sort((a, b) => (b.a.top3 - a.a.top3) || (a.f.pop - b.f.pop)).find(okM);
   if (conf){ conf.conf = true; return conf; }
   cand0.sort((a, b) => (b.a.top3 - a.a.top3) || (a.f.odds - b.f.odds));
-  return cand0[0];
+  return cand0.find(okM) || null;
   // 旧：期待値重視
   const cand = cand0;
   cand.forEach(x => {
@@ -5650,13 +5652,48 @@ function darkStory(ctx, f){
   for (const [c, ch, e] of tries){ const t = build(c, ch, e); if (t && len(t) <= 100 && len(t) >= 30) return t; }
   return null;
 }
+// ===== 注目穴馬の推奨文（2026-10-18）：その馬について記録から言える事実を全部集め、強い順に100字前後の文章にする。
+//  事実が2つ未満（推奨できる材料がない）の馬は注目穴馬にしない
+function darkFacts(ctx, f){
+  const race = ctx.race || {}, D = +race.distance, S = race.surface, out = [], p = f.prof || {}, F = ctx.field || [];
+  const add = (w, t, tag) => { if (t && !out.some(o => o.tag === tag)) out.push({ w, t, tag }); };
+  // 推奨の1文（敗因→条件変化→根拠）。あれば2つ分の重みとして数える
+  let story = null; try { story = darkStory(ctx, f); } catch (e) {}
+  try { darkInsight(ctx, f).forEach(t => {
+    const tag = /負かした|勝ち上がり|その後1着/.test(t) ? "level" : /持ち時計/.test(t) ? "time" : /上がり/.test(t) && /メンバー/.test(t) ? "l3" : /ハイペース|スロー/.test(t) ? "pace" : /着でも勝ち馬/.test(t) ? "margin" : /追い上げ/.test(t) ? "gain" : /斤量/.test(t) ? "kg" : /叩き2戦目/.test(t) ? "rest" : /3着内/.test(t) ? "course" : "x";
+    const w = { level: 9, time: 8, l3: 7, pace: 7, margin: 5, gain: 4, kg: 4, rest: 3, course: 4 }[tag] || 3; add(w, t.replace(/。.*$/, ""), tag); }); } catch (e) {}
+  // 直接対決
+  const up = (f.h2h?.list || []).filter(o => o.win && o.pop && f.pop && +o.pop < +f.pop);
+  if (up.length && f.h2h.beat > f.h2h.lost) add(9, `直接対決で今回人気上位の${up.slice(0, 2).map(o => o.name).join("・")}に先着済み`, "h2h");
+  // スピード指数・能力のメンバー順位
+  const rank = (val, key) => { const v = F.map(g => g.prof?.[key]).filter(x => x != null && isFinite(x)).sort((a, b) => b - a); return val != null && v.length >= 5 ? v.indexOf(val) + 1 : null; };
+  const sr = rank(p.speedFig, "speedFig"); if (sr && sr <= 3) add(sr === 1 ? 8 : 6, `近走のスピード指数はメンバー${sr}位`, "fig");
+  const ar = rank(p.ability, "ability"); if (ar && ar <= 3 && (!sr || sr > 3)) add(5, `近走の内容から見た能力はメンバー${ar}位`, "abil");
+  // 得意距離
+  if (p.distCenter && Math.abs(p.distCenter - D) <= 150 && (f.adj?.距離 || 0) > 0.3) add(4, `好走の中心が${p.distCenter}m前後で、今回の${D}mはぴったり`, "dist");
+  // 血統の適性（エンジンの理由をそのまま）
+  (p.blood?.why || []).filter(t => /得意/.test(t)).slice(0, 1).forEach(t => add(3, t, "blood"));
+  // 展開
+  try { const pf = Engine.paceForecast(ctx), st = p.style;
+    if ((st === "逃げ" || st === "先行") && (pf.frontCount ?? 9) <= 2) add(5, `前に行く馬が少なく（${pf.frontCount}頭）、${st}でマイペースに運べそう`, "pace2");
+    else if ((st === "差し" || st === "追込") && pf.best === "high") add(5, `先行争いが激しくなりそうで、${st}の脚が生きる`, "pace2"); } catch (e) {}
+  return { story, facts: out.sort((a, b) => b.w - a.w) };
+}
+function darkText(ctx, f, maxLen = 110){
+  const { story, facts } = darkFacts(ctx, f), len = t => [...t].length;
+  const n = (story ? 2 : 0) + facts.length; if (n < 2) return null;
+  let t = story || ""; const used = new Set();
+  const KW = { time: /持ち時計/, l3: /上がり[\d.]+(秒)?はメンバー/, level: /負かした|勝ち上がり|その後勝利|その後1着/, h2h: /先着済み/, pace: /ハイペース|スロー/, margin: /勝ち馬と/, gain: /追い上げ/, kg: /斤量/, rest: /叩き2戦目|休み明け3戦目/, course: /で3着内\d+回|は3着内\d+回/, dist: /得意距離|ぴったり/ };
+  for (const x of facts){ if (story && KW[x.tag] && KW[x.tag].test(story)) continue; const add = (t ? "" : "") + x.t + "。"; if (len(t + add) > maxLen) continue; t += add; used.add(x.tag); }
+  return t || null;
+}
 // 注目穴馬の推奨理由（記録にある材料から作る文。作り話はしない）
 function darkWhy(sim){
   const d = sim.dark; if (!d) return [];
   const f = d.f, p = f.prof || {}, ad = f.adj || {}, L = p.last, MM = sim.cands?.M, out = [];
   const w = MM ? MM.win[d.i] : d.a.win, t3 = MM ? MM.place[d.i] : d.a.top3, mk = f.odds > 1 ? 0.8 / f.odds : null;
   // 2026-10-17：オッズの動きやAIの数字ではなく、過去の走りから言える具体的な事実を先に出す
-  try { const st = darkStory(sim.ctx, f); if (st) out.push(st); } catch (e) {}
+  try { const tx = darkText(sim.ctx, f); if (tx) out.push(tx); } catch (e) {}
   try { darkInsight(sim.ctx, f).forEach(t => out.push(t)); } catch (e) {}
   const ana = (f.ana || []).filter(a => !ODDS_TAGS.has(a));
   try { const pf = Engine.paceForecast(sim.ctx), st = p.style;
@@ -5855,7 +5892,7 @@ async function raceImage(r, x){
   txt(`${r.surface}${r.distance}m｜${pace}｜${x.field}頭`, 46, 244, 30, "#e8e8e8");
   // 注目穴馬
   const d = x.dark; let y = 270;
-  const DS = (x.darks?.length ? x.darks : (x.marks || []).map((m, k) => ({ ...m, mk: k })).filter(m => (m.pop || 0) >= 5)).slice(0, 2);
+  const DS = (x.darks ? x.darks : (x.marks || []).map((m, k) => ({ ...m, mk: k })).filter(m => (m.pop || 0) >= 5)).slice(0, 2);
   rr(24, y, W - 48, 520, 18, "rgba(0,0,0,0.45)", "rgba(242,201,76,0.35)");
   rr(44, y + 18, 8, 50, 4, "#f2c94c"); txt("注目穴馬", 66, y + 60, 44, "#f2c94c", { f: FD, w: "normal" });
   if (DS.length >= 2 || d?.conf){ const lbl = DS.length >= 2 ? `◎○▲に入った穴馬 ${DS.length}頭` : "◎○▲に入った穴馬"; font(22); const lw = g.measureText(lbl).width + 28; rr(300, y + 28, lw, 38, 19, "rgba(242,201,76,0.15)", "#f2c94c", 1.5); txt(lbl, 300 + lw / 2, y + 55, 22, "#f2c94c", { al: "center" }); }
@@ -5889,7 +5926,7 @@ async function raceImage(r, x){
     tags.forEach((t, k) => { const x0 = 44 + k * 236; rr(x0, ty + 128, 222, 52, 10, "#f7e7a6"); txt(t, x0 + 111, ty + 163, 24, "#1a1a1a", { al: "center", max: 206 }); });
     const w0 = (d.why || [])[0] || "", why = w0.length >= 40 ? w0 : ((d.why || []).slice(0, 2).join("。") || `${d.pop || ""}番人気ながらシミュレーションの1着率${P(d.win)}。`);
     wrap(why, 48, ty + 222, W - 110, 38, 26, "#fff");
-  } else txt("この レースは注目穴馬なし", 60, y + 200, 40, "#fff");
+  } else { txt("このレースは注目穴馬なし", 60, y + 190, 40, "#fff"); txt("推奨できる材料がそろった5番人気以下の馬がいません", 60, y + 240, 26, "#ddd"); }
   // 印の表
   const TRI = (x.field >= 14 ? (x.subs5?.length ? x.subs5 : x.subs || []).slice(0, 5) : (x.subs || []).slice(0, 1));
   y = 810; const rows = [...(x.marks || []).map((m, k) => [MARKS[k], m]), ...(TRI.length === 1 ? [["△", TRI[0]]] : [])].slice(0, 4);
@@ -5944,7 +5981,7 @@ function raceXText(r, x){
   const race = nm(r.name).replace(/[（(].*?[)）]/g, "");
   const head = `【${r.venue}${r.no}R ${race}】`;
   const mk = (x.marks || []).slice(0, 3).map((m, k) => `${"◎○▲"[k]}${m.num}${nm(m.name)}`);
-  const DS = (x.darks?.length ? x.darks : (x.marks || []).map((m, k) => ({ ...m, mk: k })).filter(m => (m.pop || 0) >= 5)).slice(0, 2);
+  const DS = (x.darks ? x.darks : (x.marks || []).map((m, k) => ({ ...m, mk: k })).filter(m => (m.pop || 0) >= 5)).slice(0, 2);
   const ana = DS.length ? `穴馬は${DS.map(h => `${h.num}${nm(h.name)}(${h.pop}人気)`).join("と")}` : x.dark ? `穴馬は${x.dark.num}${nm(x.dark.name)}(${x.dark.pop}人気)` : "";
   const buy = "";   // 買い目（★馬連）はX投稿文には入れない
   const tags = [`#${r.venue}${r.no}R`, race && race.length <= 12 ? `#${race}` : null, `#${r.venue}競馬`, "#競馬予想"].filter(Boolean);
@@ -5993,7 +6030,7 @@ function summarizeSim(r, sim){
     // ◎○▲に入った5番人気以下（2頭以上なら画像は2頭版）
     // 14頭以上は△を5頭まで（画像用）
     subs5: f.length >= 14 ? w.slice(3, 8).map(mk) : null,
-    darks: w.slice(0, 3).map((x, k) => ({ x, k })).filter(q => (f[q.x.i].pop || 0) >= 5).map(q => ({ ...mk(q.x), mk: q.k, ana: (f[q.x.i].ana || []).filter(a => !ODDS_TAGS.has(a)).slice(0, 3), why: (() => { try { const st = darkStory(sim.ctx, f[q.x.i]); return [st, ...darkInsight(sim.ctx, f[q.x.i])].filter(Boolean).slice(0, 2); } catch (e) { return []; } })() })),
+    darks: w.slice(0, 3).map((x, k) => ({ x, k })).filter(q => (f[q.x.i].pop || 0) >= 5).map(q => ({ ...mk(q.x), mk: q.k, ana: (f[q.x.i].ana || []).filter(a => !ODDS_TAGS.has(a)).slice(0, 3), why: (() => { try { const tx = darkText(sim.ctx, f[q.x.i]); return tx ? [tx] : []; } catch (e) { return []; } })() })).filter(d => d.why.length),
     star: (() => { const dn = sim.dark?.f.num; const k = w.findIndex(s => s.num === dn); return dn != null && k >= 3 ? mk(w[k]) : null; })(),
     pace: (() => { const pf = Engine.paceForecast(sim.ctx); return { slow: pf.slow, mid: pf.mid, high: pf.high, best: pf.best, front: pf.frontCount }; })(),
     t1: tks(sim.plans?.[1000]), t5: tks(sim.plans?.[5000]),
@@ -7718,7 +7755,7 @@ function renderAllTab(){
       <p class="small">過去5年（13,456レース）：本体＋埋めの全体で116%（2021-22年104%・2024-26年127%）。10/15の検証：馬連は配当のブレが大きく、5年分でも「偶然ではない」と言い切れる差はまだ出ていません。下の成績の記録で本当に勝てるかを確かめていきます。</p></div>`; })()}
     ${checkPanel(d)}
     ${CHECK[d] ? checkAllPanel() : ""}
-    ${TOPD.length ? `<div class="learnbox topdarks"><h3>🏆 本日の最注目穴馬 TOP${TOPD.length}</h3><ol>${TOPD.map(x => { const rr0 = list.find(q => q.id === x.id) || {}; return `<li><b>${esc(rr0.venue || x.venue || "")}${rr0.no || x.no}R</b>（${esc(rr0.postTime || "")}） <b>${x.dark.num} ${esc(x.dark.name || "")}</b> ${x.dark.pop || "?"}番人気・${x.dark.odds ?? "—"}倍・勝率${pct(x.dark.win)}%・3着内${pct(x.dark.top3)}%${x.dark.why?.length ? `<br><span class="small">${esc(x.dark.why.slice(0, 2).join("。"))}</span>` : ""}</li>`; }).join("")}</ol><p class="small">5番人気以下の注目穴馬のうち、シミュの勝率が高い順の3頭です。各レースのカードにも順位を出しています。</p></div>` : ""}
+    ${TOPD.length ? `<div class="learnbox topdarks"><h3>🏆 本日の最注目穴馬 TOP${TOPD.length}</h3><ol>${TOPD.map(x => { const rr0 = list.find(q => q.id === x.id) || {}; return `<li><b>${esc(rr0.venue || x.venue || "")}${rr0.no || x.no}R</b>（${esc(rr0.postTime || "")}） <b>${x.dark.num} ${esc(x.dark.name || "")}</b> ${x.dark.pop || "?"}番人気・${x.dark.odds ?? "—"}倍・勝率${pct(x.dark.win)}%・3着内${pct(x.dark.top3)}%${x.dark.why?.length ? `<br><span class="small">${esc(x.dark.why[0])}</span>` : ""}</li>`; }).join("")}</ol><p class="small">5番人気以下の注目穴馬のうち、シミュの勝率が高い順の3頭です。各レースのカードにも順位を出しています。</p></div>` : ""}
     ${safePanel("WIN5予想", () => win5Panel(d, list, rowOf))}
     ${safePanel("穴馬の振り返り", () => arvPanel(d))}
     ${xPostPanel(d, list, rowOf, bestDark)}
