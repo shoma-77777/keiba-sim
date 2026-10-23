@@ -1,60 +1,3 @@
-2026-10-15 07:09:31 学習を更新しました（12544レース分）
-2026-10-15 07:10:38 学習を更新しました（12568レース分）
-2026-10-15 07:11:43 学習を更新しました（12592レース分）
-2026-10-15 07:12:50 学習を更新しました（12628レース分）
-2026-10-15 07:13:56 学習を更新しました（12664レース分）
-2026-10-15 07:15:02 学習を更新しました（12700レース分）
-2026-10-15 07:16:09 学習を更新しました（12736レース分）
-2026-10-15 07:17:14 学習を更新しました（12772レース分）
-2026-10-15 20:22:09 学習を更新しました（12772レース分）
-2026-10-15 20:23:00 学習を更新しました（12808レース分）
-2026-10-15 20:23:52 学習を更新しました（12844レース分）
-2026-10-15 20:24:46 学習を更新しました（12880レース分）
-2026-10-15 20:25:39 学習を更新しました（12904レース分）
-2026-10-15 20:26:30 学習を更新しました（12928レース分）
-2026-10-15 20:27:20 学習を更新しました（12952レース分）
-2026-10-15 20:28:11 学習を更新しました（12976レース分）
-2026-10-15 20:29:01 学習を更新しました（13000レース分）
-2026-10-15 20:29:52 学習を更新しました（13024レース分）
-2026-10-15 20:30:44 学習を更新しました（13048レース分）
-2026-10-15 20:31:37 学習を更新しました（13072レース分）
-2026-10-15 20:32:25 学習を更新しました（13096レース分）
-2026-10-15 20:33:15 学習を更新しました（13120レース分）
-2026-10-15 20:34:06 学習を更新しました（13144レース分）
-2026-10-15 20:35:00 学習を更新しました（13168レース分）
-2026-10-15 20:35:58 学習を更新しました（13204レース分）
-2026-10-15 20:36:57 学習を更新しました（13240レース分）
-2026-10-15 20:37:55 学習を更新しました（13276レース分）
-2026-10-15 20:38:53 学習を更新しました（13312レース分）
-2026-10-15 20:39:47 学習を更新しました（13348レース分）
-2026-10-15 20:40:41 学習を更新しました（13384レース分）
-2026-10-15 20:41:34 学習を更新しました（13420レース分）
-2026-10-15 20:42:32 学習を更新しました（13456レース分）
-2026-10-17 20:21:04 36レース見つかりました
-2026-10-17 20:21:13 東京1R 2歳未勝利 12頭・オッズnetkeiba
-2026-10-17 20:21:24 東京2R 2歳未勝利 10頭・オッズYahoo!競馬
-2026-10-17 20:21:34 東京3R 2歳未勝利 12頭・オッズYahoo!競馬
-2026-10-17 20:21:44 東京4R 2歳新馬 16頭・オッズYahoo!競馬
-2026-10-17 20:21:54 東京5R 2歳新馬 8頭・オッズYahoo!競馬
-2026-10-17 20:22:05 東京6R 2歳1勝クラス 8頭・オッズYahoo!競馬
-2026-10-17 20:22:15 東京7R 3歳以上1勝クラス 12頭・オッズYahoo!競馬
-2026-10-17 20:22:25 東京8R 3歳以上1勝クラス 16頭・オッズYahoo!競馬
-2026-10-17 20:22:36 東京9R 東京ハイJ(OP) 9頭・オッズYahoo!競馬
-2026-10-17 20:22:46 東京10R 西湖特別 9頭・オッズYahoo!競馬
-2026-10-17 20:22:56 東京11R ブラジルC(L) 13頭・オッズYahoo!競馬
-2026-10-17 20:23:07 東京12R 甲斐路S 16頭・オッズYahoo!競馬
-2026-10-17 20:23:17 京都1R 2歳未勝利 13頭・オッズYahoo!競馬
-2026-10-17 20:23:28 京都2R 2歳未勝利 7頭・オッズYahoo!競馬
-2026-10-17 20:23:38 京都3R 2歳未勝利 12頭・オッズYahoo!競馬
-2026-10-17 20:23:42 京都4R 3歳以上1勝クラス 15頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))）
-2026-10-17 20:23:53 京都5R 2歳新馬 5頭・オッズYahoo!競馬
-2026-10-17 20:24:03 京都6R 2歳新馬 18頭・オッズYahoo!競馬
-2026-10-17 20:24:13 京都7R 3歳以上1勝クラス 9頭・オッズYahoo!競馬
-2026-10-17 20:24:24 京都8R 3歳以上1勝クラス 12頭・オッズYahoo!競馬
-2026-10-17 20:24:34 京都9R 宝ケ池特別 8頭・オッズYahoo!競馬
-2026-10-17 20:24:45 京都10R 聚楽第特別 10頭・オッズYahoo!競馬
-2026-10-17 20:24:55 京都11R 秋華賞(GI) 17頭・オッズYahoo!競馬
-2026-10-17 20:25:05 京都12R 桂川S 12頭・オッズYahoo!競馬
 2026-10-17 20:25:15 新潟1R 2歳未勝利 13頭・オッズYahoo!競馬
 2026-10-17 20:25:26 新潟2R 2歳未勝利 15頭・オッズYahoo!競馬
 2026-10-17 20:25:36 新潟3R 2歳未勝利 13頭・オッズYahoo!競馬
@@ -298,3 +241,60 @@
 2026-10-23 18:33:25 450/468頭
 2026-10-23 18:33:27 完了：36レース・468頭（重複除き468頭）を登録しました
 2026-10-23 19:48:59 オッズを更新しました（36/36レース・Yahoo!競馬/netkeiba・2026-10-23 19:48時点）
+2026-10-24 00:43:24 36レース見つかりました
+2026-10-24 00:43:31 東京1R 2歳未勝利 16頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/16頭分しか読めず）
+2026-10-24 00:43:38 東京2R 2歳未勝利 7頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/7頭分しか読めず）
+2026-10-24 00:43:44 東京3R 2歳未勝利 13頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/13頭分しか読めず）
+2026-10-24 00:43:51 東京4R 3歳以上障害未勝利 11頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/11頭分しか読めず）
+2026-10-24 00:43:57 東京5R 2歳新馬 13頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/13頭分しか読めず）
+2026-10-24 00:44:05 東京6R 2歳新馬 16頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/16頭分しか読めず）
+2026-10-24 00:44:12 東京7R 3歳以上1勝クラス 15頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/15頭分しか読めず）
+2026-10-24 00:44:18 東京8R 3歳以上1勝クラス 18頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/18頭分しか読めず）
+2026-10-24 00:44:26 東京9R 三鷹特別 11頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/11頭分しか読めず）
+2026-10-24 00:44:33 東京10R 山中湖特別 9頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/9頭分しか読めず）
+2026-10-24 00:44:40 東京11R 神無月S(OP) 16頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/16頭分しか読めず）
+2026-10-24 00:44:46 東京12R 3歳以上1勝クラス 13頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/13頭分しか読めず）
+2026-10-24 00:44:53 京都1R 2歳未勝利 8頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/8頭分しか読めず）
+2026-10-24 00:45:00 京都2R 2歳未勝利 10頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/10頭分しか読めず）
+2026-10-24 00:45:07 京都3R 2歳未勝利 9頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/9頭分しか読めず）
+2026-10-24 00:45:14 京都4R 2歳新馬 16頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/16頭分しか読めず）
+2026-10-24 00:45:21 京都5R 2歳新馬 8頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/8頭分しか読めず）
+2026-10-24 00:45:28 京都6R 3歳以上1勝クラス 12頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/12頭分しか読めず）
+2026-10-24 00:45:35 京都7R 3歳以上1勝クラス 9頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/9頭分しか読めず）
+2026-10-24 00:45:41 京都8R 壬生特別 18頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/18頭分しか読めず）
+2026-10-24 00:45:48 京都9R 萩S(L) 9頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/9頭分しか読めず）
+2026-10-24 00:45:55 京都10R カノープスS(OP) 15頭・オッズなし（netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/15頭分しか読めず）
+2026-10-24 00:46:07 京都11R 菊花賞(GI) 18頭・オッズnetkeiba
+2026-10-24 00:46:15 京都12R 嵯峨野特別 12頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/12頭分しか読めず）
+2026-10-24 00:46:22 新潟1R 2歳未勝利 13頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/13頭分しか読めず）
+2026-10-24 00:46:29 新潟2R 2歳未勝利 10頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/10頭分しか読めず）
+2026-10-24 00:46:35 新潟3R 2歳未勝利 18頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/18頭分しか読めず）
+2026-10-24 00:46:42 新潟4R 3歳以上1勝クラス 13頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/13頭分しか読めず）
+2026-10-24 00:46:49 新潟5R 2歳新馬 18頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/18頭分しか読めず）
+2026-10-24 00:46:56 新潟6R 3歳以上1勝クラス 11頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/11頭分しか読めず）
+2026-10-24 00:47:03 新潟7R 3歳以上1勝クラス 14頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/14頭分しか読めず）
+2026-10-24 00:47:09 新潟8R 3歳以上1勝クラス 14頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/14頭分しか読めず）
+2026-10-24 00:47:16 新潟9R 柏崎特別 14頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/14頭分しか読めず）
+2026-10-24 00:47:23 新潟10R 村上特別 12頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/12頭分しか読めず）
+2026-10-24 00:47:30 新潟11R ルミエールAD(L) 17頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/17頭分しか読めず）
+2026-10-24 00:47:37 新潟12R 3歳以上1勝クラス 12頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/12頭分しか読めず）
+2026-10-24 00:48:53 25/468頭
+2026-10-24 00:50:35 50/468頭
+2026-10-24 00:53:40 75/468頭
+2026-10-24 00:55:05 100/468頭
+2026-10-24 00:56:33 125/468頭
+2026-10-24 00:58:05 150/468頭
+2026-10-24 00:59:30 175/468頭
+2026-10-24 01:01:55 200/468頭
+2026-10-24 01:03:46 225/468頭
+2026-10-24 01:05:28 250/468頭
+2026-10-24 01:06:55 275/468頭
+2026-10-24 01:08:24 300/468頭
+2026-10-24 01:09:35 325/468頭
+2026-10-24 01:11:06 350/468頭
+2026-10-24 01:13:43 375/468頭
+2026-10-24 01:15:12 400/468頭
+2026-10-24 01:16:40 425/468頭
+2026-10-24 01:18:19 450/468頭
+2026-10-24 01:19:33 SQLiteへの保存で警告: NOT NULL constraint failed: entries.num
+2026-10-24 01:19:33 完了：36レース・468頭（重複除き468頭）を登録しました
