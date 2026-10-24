@@ -328,7 +328,7 @@ tr.darkrow{background:color-mix(in srgb,var(--gold) 9%,transparent)}
 .allhead h3{font-size:15px}
 @media (prefers-reduced-motion: reduce){ *{transition:none!important} }
 @media (max-width:520px){ .raceband h2{font-size:18px} .finish{left:10px;right:10px;top:auto;bottom:46px;min-width:0} }
-.fillbuy{background:rgba(128,128,128,.10);border-radius:6px;padding:4px 6px}.mainbuy{background:rgba(255,200,0,.12);border-radius:6px;padding:4px 6px}.learnbox.mainplan{border:2px solid #e0a800}.learnbox.shoubuplan{border:3px solid #d32f2f;background:rgba(211,47,47,.06)}.shoubuplan h3{color:#d32f2f;font-size:18px}.sbt{width:100%;border-collapse:collapse}.sbt td{padding:6px 6px;border-bottom:1px solid var(--line);vertical-align:top}.sbt .nw{white-space:nowrap}.sbl{display:inline-block;padding:2px 8px;border-radius:12px;font-weight:700;font-size:13px;color:#fff}.sbl.chu{background:#e0a800}.sbl.ana{background:#d32f2f}.sbl.tri{background:#7b1fa2}.shoubu{background:#d32f2f;color:#fff;font-weight:700;border-radius:6px;padding:6px 10px;margin:4px 0}.planbox{border-radius:8px;padding:6px 10px;margin:6px 0}.planbox .ph{font-weight:700;margin-bottom:2px}.planbox.hon{background:rgba(255,200,0,.16);border-left:5px solid #e0a800}.planbox.fil{background:rgba(128,128,128,.10);border-left:5px solid #999;opacity:.9}.fillbuy .verdict{background:#888;color:#fff}.fillbuy{opacity:.85}
+.fillbuy{background:rgba(128,128,128,.10);border-radius:6px;padding:4px 6px}.mainbuy{background:rgba(255,200,0,.12);border-radius:6px;padding:4px 6px}.learnbox.mainplan{border:2px solid #e0a800}.learnbox.shoubuplan{border:3px solid #d32f2f;background:rgba(211,47,47,.06)}.shoubuplan h3{color:#d32f2f;font-size:18px}.learnbox.shoubuplan{max-width:100%;box-sizing:border-box;overflow:hidden}.sbl-list{display:flex;flex-direction:column;gap:8px;margin:8px 0}.sbi{border:1px solid var(--line);border-left:6px solid #999;border-radius:8px;padding:8px 10px;background:var(--surface,#fff);min-width:0}.sbi.chu{border-left-color:#e0a800}.sbi.ana{border-left-color:#d32f2f}.sbi.tri{border-left-color:#7b1fa2}.sbh{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}.sbt-t{font-variant-numeric:tabular-nums;color:var(--muted,#666)}.sbt-y{margin-left:auto}.sbb{margin-top:4px;font-size:16px;overflow-wrap:anywhere}.sbb .tf{margin-top:4px}.sbb .tfl{font-weight:700;font-size:15px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.sbb .small{font-size:12px;line-height:1.6;margin-top:2px;color:var(--muted,#666)}.sbl{display:inline-block;padding:2px 8px;border-radius:12px;font-weight:700;font-size:13px;color:#fff}.sbl.chu{background:#e0a800}.sbl.ana{background:#d32f2f}.sbl.tri{background:#7b1fa2}.shoubu{background:#d32f2f;color:#fff;font-weight:700;border-radius:6px;padding:6px 10px;margin:4px 0}.planbox{border-radius:8px;padding:6px 10px;margin:6px 0}.planbox .ph{font-weight:700;margin-bottom:2px}.planbox.hon{background:rgba(255,200,0,.16);border-left:5px solid #e0a800}.planbox.fil{background:rgba(128,128,128,.10);border-left:5px solid #999;opacity:.9}.fillbuy .verdict{background:#888;color:#fff}.fillbuy{opacity:.85}
 .rc .hd .vn{background:#1e5bc6;color:#fff;border-radius:4px;padding:0 6px;margin-right:6px;font-size:.85em}.rc .hd .pt{margin-left:auto;font-size:.85em;opacity:.8}.rc.topdark{border:2px solid #e0a800}.topbadge{background:#fff3c4;color:#5a4300;border-radius:6px;padding:3px 8px;margin:4px 0;font-weight:700;font-size:.9em}.learnbox.topdarks{border:2px solid #e0a800}.biasline{background:rgba(30,91,198,.08);border-radius:6px;padding:3px 6px}
 </style>
 
@@ -6061,11 +6061,10 @@ async function showRaceImage(id){
   toast("画像を作っています…"); const url = await raceImage(r, x);
   let m = $("#imgModal"); if (!m){ m = document.createElement("div"); m.id = "imgModal"; m.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px"; document.body.appendChild(m); m.onclick = e => { if (e.target === m) m.remove(); }; }
   const fn = `${r.date}_${r.venue}${r.no}R.png`;
-  m.innerHTML = `<div style="background:#111;padding:12px;border-radius:12px;max-height:100%;overflow:auto;text-align:center"><img src="${url}" style="max-width:min(480px,90vw);height:auto;display:block;margin:0 auto 10px"><a class="btn primary" href="${url}" download="${fn}">画像を保存</a> <button class="btn" id="imgCopy">画像をコピー</button> <button class="btn" id="imgClose">閉じる</button>
-    <div style="text-align:left;margin-top:10px"><div class="small" style="color:#ccc">X投稿用の文章（<span id="xtLen"></span>/140字）</div><textarea id="xtText" style="width:100%;min-height:150px;font-size:14px;margin-top:4px">${esc(raceXText(r, x))}</textarea><button class="btn" id="xtCopy">文章をコピー</button></div></div>`;
-  const xl = () => { const t = $("#xtText").value; $("#xtLen").textContent = Math.ceil([...t].reduce((a, c) => { const u = c.codePointAt(0); return a + (u <= 0x10FF || (u >= 0x2000 && u <= 0x200D) || (u >= 0x2010 && u <= 0x201F) || (u >= 0x2032 && u <= 0x2037) ? 1 : 2); }, 0) / 2); };
+  m.innerHTML = `<div style="background:#111;padding:12px;border-radius:12px;max-height:100%;overflow:auto;text-align:center"><img src="${url}" style="max-width:min(480px,90vw);height:auto;display:block;margin:0 auto 10px"><a class="btn primary" href="${url}" download="${fn}">画像を保存</a> <button class="btn" id="imgCopy">画像をコピー</button> <button class="btn" id="imgClose">閉じる</button></div>`;
+  if (false){ const xl = () => { const t = $("#xtText").value; $("#xtLen").textContent = Math.ceil([...t].reduce((a, c) => { const u = c.codePointAt(0); return a + (u <= 0x10FF || (u >= 0x2000 && u <= 0x200D) || (u >= 0x2010 && u <= 0x201F) || (u >= 0x2032 && u <= 0x2037) ? 1 : 2); }, 0) / 2); };
   xl(); $("#xtText").oninput = xl;
-  $("#xtCopy").onclick = async () => { try { await navigator.clipboard.writeText($("#xtText").value); toast("文章をコピーしました"); } catch (e) { $("#xtText").select(); toast("文字を選んだので、コピーしてください"); } };
+  $("#xtCopy").onclick = async () => { try { await navigator.clipboard.writeText($("#xtText").value); toast("文章をコピーしました"); } catch (e) { $("#xtText").select(); toast("文字を選んだので、コピーしてください"); } }; }   // 10/24：X投稿用の文章は表示しない
   $("#imgClose").onclick = () => m.remove();
   $("#imgCopy").onclick = async () => { try { const blob = await (await fetch(url)).blob(); await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]); toast("画像をコピーしました（Xなどに貼り付けできます）"); } catch (e) { toast("コピーできませんでした。画像を右クリック（スマホは長押し）してコピーしてください"); } };
 }
@@ -6103,6 +6102,20 @@ function dayPicks(items){
     .forEach(({ r, x }) => out.set(r.id, { tickets: [{ type: "馬連", nums: [x.marks[0].num, x.marks[1].num].sort((a, b) => a - b), stake: 1000 }], why: "埋め：ルールに当たるレースが4つ未満の日に、◎の勝率が高いレースで補充。回収率は90%台" }));
   return out;
 }
+// 2026-10-24：穴軸3連複の買い目を、1点ずつではなくフォーメーションの形（軸−相手−相手）にまとめて書く。例：「11 − 4 − 2,5,7,9」
+function triForm(ts){
+  if (!ts?.length) return [];
+  const ax = ts[0].nums.find(n => ts.every(t => t.nums.includes(n)));
+  let pairs = ts.map(t => t.nums.filter(n => n !== ax)); const out = [];
+  while (pairs.length){
+    const cnt = {}; pairs.forEach(([a, b]) => { cnt[a] = (cnt[a] || 0) + 1; cnt[b] = (cnt[b] || 0) + 1; });
+    const h = +Object.entries(cnt).sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0];
+    const mine = pairs.filter(q => q.includes(h)), oth = mine.map(q => q[0] === h ? q[1] : q[0]).sort((a, b) => a - b);
+    out.push({ ax, a: h, b: oth }); pairs = pairs.filter(q => !q.includes(h));
+  }
+  return out;
+}
+const triFormText = ts => triForm(ts).map(f => `${f.ax} − ${f.a} − ${f.b.join(",")}`);
 // 2026-10-24：5番人気以下の「3着内率」は、シミュの値をそのまま出すと高すぎた（シミュ40〜60%の穴馬が実際は21〜26%）。
 //  過去の約1,600レース（修正後のエンジン・5番人気以下約7,800頭）の「シミュの値→実際」の表で直して表示する。選ぶ順番（大小）は変わらない。
 const T3CAL = [[0, 0.02], [0.034, 0.055], [0.144, 0.15], [0.243, 0.20], [0.341, 0.235], [0.6, 0.27], [1, 0.35]];
@@ -7672,7 +7685,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261024k";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
+const APP_BUILD = "20261024m";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
 const PRE25 = { busy: false, msg: "", res: null,
   hit: { mu: [3.37976, 11.89168, 14.55231], s: [0.68478, 4.63845, 2.34832], w: [-0.42417, -0.23955, -0.06202], b: -1.92086 }, ca: 1.0949232, cb: 0.2081896 };
 const pre25Pev = (f, n) => { if (!f || !f.pl || !f.ph || !(f.odds > 1)) return null; const x = [Math.log(f.odds), Math.log(f.odds) ** 2, n]; let z = PRE25.hit.b; for (let j = 0; j < 3; j++) z += PRE25.hit.w[j] * (x[j] - PRE25.hit.mu[j]) / PRE25.hit.s[j]; return 1 / (1 + Math.exp(-z)) * (PRE25.ca * f.pl + PRE25.cb * (f.ph - f.pl)); };
@@ -8256,7 +8269,7 @@ function renderAllTab(){
       ${D4.get(r.id) ? (x.mo5?.length ? `<div class="line small">（本命ルールの形${x.moBad?.length ? "・◎の前走：" + esc(x.moBad.join("・")) : ""}）</div>` : "") : x.mo5?.length && !x.mo9?.length && String(x.going || "").startsWith("良") ? `<div class="line small">本命ルールの形だが、◎の前走も今回も良馬場なので買わない（メインの買い方から外しています）</div>` : x.mo5?.length ? `<div class="line"><span class="verdict go">★買い：馬連 ◎-○（本命ルール）</span> <b>${x.mo5[0].nums.join("-")}</b> <b class="pos">${x.mo5[0].stake.toLocaleString()}円</b>${x.mo5[0].stake >= 2000 ? `<span class="small">（悪い材料2つ以上＝信頼度 高${x.moGap === false ? "。検証中の候補では1,000円" : ""}）</span>` : ""}${x.moBad?.length ? `<span class="small">（◎の前走：${esc(x.moBad.join("・"))}）</span>` : ""}${x.mo9?.length ? `<br><b class="pos">★★道悪の言い訳ルールにも該当</b><span class="small">（◎の前走は「${esc(x.moWet || "")}」の馬場で凡走。2024-26年は340%だが、2021-22年では81%と年による差が大きい）</span>` : x.moWet === null ? `<br><span class="small">◎の前走は良馬場（言い訳なし。この形は過去の回収率が低め）</span>` : ""}</div>` : x.mo?.length ? `<div class="line"><span class="small">馬連 ◎-○ ${x.mo[0].nums.join("-")}：元のルールには当てはまるが本命ルール外（買わない）${x.moBad?.length ? "" : "・◎の前走に悪い材料なし"}${x.moBad?.length ? "・1番人気が2倍未満" : ""}</span></div>` : ""}
       ${x.pr28?.length ? `<div class="line"><span class="verdict">◇複勝ルール（検証中）</span> 複勝 <b>${x.pr28.map(t => t.nums[0]).join("・")}</b> 各1,000円 <span class="small">（5番人気以下で複勝オッズ下限÷単勝0.28以上・シミュ3着内30%以上。過去約1万3千レース905頭で的中35%・回収104%（確定オッズ）。発走前のオッズでは未確認）</span></div>` : ""}
       ${x.win150?.length ? `<div class="line"><span class="verdict go">◇混戦の穴単勝（検証中）</span> 単勝 <b>${x.win150[0].nums[0]}</b> 1,000円 <span class="small">（混戦〈1番人気3倍以上・◎の勝率20%未満〉か、○が2〜3番人気で◎○が接戦のレースで、◇複勝ルールの馬。過去211レースで回収165%（確定オッズ）。数千通りから探した条件なので偶然の可能性あり）</span></div>` : ""}
-      ${x.tri100?.length ? `<div class="line"><span class="verdict">◇穴軸3連複（検証中）</span> <b>${x.tri100.length}点・${(x.tri100.length * 100).toLocaleString()}円</b> <span class="small">${x.tri100.map(t => `${t.nums.join("-")}（${t.odds}倍${t.est ? "推" : ""}）`).join("・")}</span><div class="small">1400m以下のレースで、◇複勝ルールの馬が軸。3連複100倍以上の組だけを当たりやすい順に最大20点・各100円。過去343レースで回収133%（確定オッズ・推定オッズで計算）。「推」は単勝オッズからの推定オッズ（3連複の実オッズ取得前）。10回に1回ほどしか当たらないので連敗に注意</div></div>` : ""}
+      ${x.tri100?.length ? `<div class="line"><span class="verdict">◇穴軸3連複（検証中）</span> <b>${x.tri100.length}点・${(x.tri100.length * 100).toLocaleString()}円</b> <span class="small">フォーメーション：${triFormText(x.tri100).map(l => `<b style="white-space:nowrap">${l}</b>`).join("　")}</span><div class="small">1400m以下のレースで、◇複勝ルールの馬が軸。3連複100倍以上の組だけを当たりやすい順に最大20点・各100円。過去343レースで回収133%（確定オッズ・推定オッズで計算）。10回に1回ほどしか当たらないので連敗に注意</div></div>` : ""}
       ${x.uma ? `<div class="line">最有力の馬連 <b>${x.uma.nums.join("-")}</b> <span class="small">（シミュの的中確率${pct(x.uma.p)}%${x.uma.odds ? `・${x.uma.odds}倍` : ""}）</span></div>` : ""}
       ${x.tri ? `<div class="line">最有力の3連単 <b>${x.tri.nums.join("→")}</b> <span class="small">（${pct(x.tri.p)}%）</span></div>` : ""}
       ${x.dark ? `<div class="line">注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}${x.dark.win != null ? "勝率" + pct(x.dark.win) + "%・" : ""}3着内${pct(x.dark.top3)}%</span>${x.dark.conf ? ` <b class="pos">◎○▲に入った穴馬</b><span class="small">（過去の3着内22%）</span>` : ` <span class="small">（◎○▲には5番人気以下がいないので、印の外で、シミュの3着内率が一番高い穴）</span>`}${bestDark && bestDark.id === x.id ? ` <span class="chip ana">この日の最注目穴馬</span>` : ""}</div>` : ""}
@@ -8284,11 +8297,11 @@ function renderAllTab(){
       const items = rows.flatMap(({ r, x }) => [
         x.mo10?.length ? { r, cls: "chu", lab: "★中距離馬連", buy: `馬連 <b>${x.mo10[0].nums.join("-")}</b>`, yen: 1000 } : null,
         x.win150?.length ? { r, cls: "ana", lab: "◇穴単勝", buy: `単勝 <b>${x.win150[0].nums[0]}番</b>${(() => { const m = [...(x.marks || []), ...(x.darks || [])].find(q => q.num === x.win150[0].nums[0]) || (x.dark?.num === x.win150[0].nums[0] ? x.dark : null); return m ? ` ${esc(m.name || "")}${m.pop ? `（${m.pop}番人気）` : ""}` : ""; })()}`, yen: 1000 } : null,
-        x.tri100?.length ? { r, cls: "tri", lab: "◇穴軸3連複", buy: `3連複 <b>${x.tri100.length}点</b>（軸 ${x.tri100[0].nums.find(n => x.tri100.every(t => t.nums.includes(n)))}番・100倍以上）<div class="small">${x.tri100.map(t => t.nums.join("-")).join("・")}</div>`, yen: x.tri100.length * 100 } : null].filter(Boolean));
+        x.tri100?.length ? { r, cls: "tri", lab: "◇穴軸3連複", buy: `3連複 <b>${x.tri100.length}点</b>（軸 ${x.tri100[0].nums.find(n => x.tri100.every(t => t.nums.includes(n)))}番・100倍以上）<div class="tf">${triFormText(x.tri100).map(l => `<div class="tfl">${l}</div>`).join("")}</div>`, yen: x.tri100.length * 100 } : null].filter(Boolean));
       const tot = items.reduce((a, b) => a + b.yen, 0);
       return `<div class="learnbox shoubuplan"><h3>🎯 勝負の買い方（${new Set(items.map(i => i.r.id)).size}レース・合計${tot.toLocaleString()}円）</h3>
         <p class="small">過去の回収率が高かった3つの買い方だけ：★中距離馬連（過去279R・140%）・◇穴単勝（211R・165%）・◇1400m以下の穴軸3連複（343R・133%）。合わせて週3〜4回・過去141%（確定オッズでの計算。発走前のオッズでは未確認）。</p>
-        ${items.length ? `<table class="sbt"><tbody>${items.map(i => `<tr class="${i.cls}"><td class="nw">${esc(i.r.postTime || "")}</td><td class="nw"><b>${esc(i.r.venue)}${i.r.no}R</b></td><td class="nw"><span class="sbl ${i.cls}">${i.lab}</span></td><td>${i.buy}</td><td class="r nw"><b>${i.yen.toLocaleString()}円</b></td></tr>`).join("")}</tbody></table>`
+        ${items.length ? `<div class="sbl-list">${items.map(i => `<div class="sbi ${i.cls}"><div class="sbh"><span class="sbt-t">${esc(i.r.postTime || "")}</span><b class="sbt-r">${esc(i.r.venue)}${i.r.no}R</b><span class="sbl ${i.cls}">${i.lab}</span><b class="sbt-y">${i.yen.toLocaleString()}円</b></div><div class="sbb">${i.buy}</div></div>`).join("")}</div>`
           : `<p>今日は当てはまるレースがありません（全レースを計算すると出ます。オッズ更新で増えることがあります）。</p>`}
         <p class="small">◇穴単勝：自信ある穴馬（5番人気以下・複勝÷単勝0.28以上・シミュ3着内30%以上）が、混戦（1番人気3倍以上・◎の勝率20%未満）か ○2〜3番人気で◎○接戦のレース。当たりは6回に1回ほどなので連敗に注意。</p></div>`; })()}
     ${(() => { const L = list.filter(r => D4.get(r.id)), isF = r => D4.get(r.id).why.startsWith("埋め"), M = L.filter(r => !isF(r)), F = L.filter(isF), sum = A => A.reduce((a, r) => a + D4.get(r.id).tickets[0].stake, 0);
@@ -8307,7 +8320,6 @@ function renderAllTab(){
     ${TOPD.length ? `<div class="learnbox topdarks"><h3>🏆 本日の最注目穴馬 TOP${TOPD.length}</h3><ol>${TOPD.map(x => { const rr0 = list.find(q => q.id === x.id) || {}; return `<li><b>${esc(rr0.venue || x.venue || "")}${rr0.no || x.no}R</b>（${esc(rr0.postTime || "")}） <b>${x.dark.num} ${esc(x.dark.name || "")}</b> ${x.dark.pop || "?"}番人気・${x.dark.odds ?? "—"}倍・勝率${pct(x.dark.win)}%・3着内${pct(x.dark.top3)}%${x.dark.why?.length ? `<br><span class="small">${esc(x.dark.why[0])}</span>` : ""}</li>`; }).join("")}</ol><p class="small">5番人気以下の注目穴馬のうち、シミュの勝率が高い順の3頭です。各レースのカードにも順位を出しています。</p></div>` : ""}
     ${safePanel("WIN5予想", () => win5Panel(d, list, rowOf))}
     ${safePanel("穴馬の振り返り", () => arvPanel(d))}
-    ${xPostPanel(d, list, rowOf, bestDark)}
     <div class="allhead"><h3>${esc(d.slice(5).replace("-", "/"))} 全レース予想</h3><span class="small">${doneN}/${list.length}レース計算済み${BATCH.running ? `（計算中 ${BATCH.done}/${BATCH.total}）` : ""}。一括計算は各条件 ${BATCH_RUNS.toLocaleString()}回×馬場4×ペース3。レースを開いて「シミュレーション実行」を押すと1万回で計算し直せます。</span></div>
     <div class="allgrid">${list.map(card).join("")}</div>
     <div class="note">1,000円・5,000円の買い方と◎○▲は、各レースを「馬場4種×ペース3種」の12条件で各${BATCH_RUNS.toLocaleString()}回走らせ、馬場（発表済みなら発表の馬場、発表前は予報）とペース（脚質構成から計算した各ペースの起きやすさ）の確率で混ぜた結果から計算しています。確率は、学習した比率でオッズと統合し、当日の馬場の偏り・クッション値・馬体重の効き（反映条件を満たすときだけ）も入っています。確率は過去データにもとづく推定で、的中を保証するものではありません。馬券は余裕資金の範囲で。</div>`;
