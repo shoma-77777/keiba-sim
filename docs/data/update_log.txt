@@ -1,4 +1,3 @@
-2026-10-17 20:27:10 新潟12R 3歳以上1勝クラス 10頭・オッズYahoo!競馬
 2026-10-17 20:27:57 25/450頭
 2026-10-17 20:29:48 50/450頭
 2026-10-17 20:31:10 75/450頭
@@ -298,3 +297,4 @@
 2026-10-24 10:12:16 オッズ取得できず 新潟3R: netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
 2026-10-24 10:12:16 オッズ取得できず 新潟5R: netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
 2026-10-24 10:12:16 オッズを更新しました（32/36レース・Yahoo!競馬/netkeiba・2026-10-24 10:12時点）・結果確定1レース
+2026-10-24 10:37:05 オッズを更新しました（36/36レース・Yahoo!競馬/netkeiba・2026-10-24 10:36時点）・結果確定4レース
