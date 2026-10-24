@@ -962,6 +962,9 @@ const Engine = (() => {
         const pts = +f.pop >= 6 && beat > lost ? (up >= 2 ? 1.5 : up >= 1 ? 0.7 : 0) * (WEIGHTS.対戦 ?? 1) : 0;
         f.h2h = { beat, lost, list, up }; f.adj.対戦 = pts; f.P += pts; });
     }
+    // 上がりの加点（2026-10-21・不採用）：5番人気以下で上がりメンバー2位以内に +0.6〜1.0 を試したが、
+    //  保存済み2,321レースを同じ乱数で比べると 勝ち誤差2.2253→2.2277・3着内0.4428→0.4430・注目穴馬の3着内22.6→22.5% と少し悪化。
+    //  今のシミュは、この馬たちの3着内をすでに当てていた（予測14.7%・実際14.7%）。ハイペース想定では予測15.7%・実際13.4%とむしろ高く見ているので、足すと二重に数えることになる
     if (oddsReady(field)) {
       const meanP = field.reduce((a,f)=>a+f.P,0)/N;
       const fo = filledOdds(field);
@@ -5533,6 +5536,48 @@ function raceIndex(){ const hs = DB.horses || {}, n = Object.keys(hs).length; if
   RACE_IDX = m; RACE_IDX_N = n; return m; }
 const tsecOf = t => { const m = /^(\d+):(\d+(?:\.\d+)?)$/.exec(String(t || "")); return m ? +m[1] * 60 + +m[2] : (/^\d+(\.\d+)?$/.test(String(t || "")) ? +t : null); };
 const fmtT = v => { const m = Math.floor(v / 60), s2 = (v - m * 60).toFixed(1); return m ? `${m}:${s2.padStart(4, "0")}` : s2; };
+// ===== 上がりの評価（2026-10-21）：生の上がり3Fではなく「そのレースの上がり（後半3F）より何秒速かったか」で比べる。
+//  スローは全体の上がりが速くなるので、生の数字だとスローを走った馬ばかりが「最速」になる。ペースの文字列（前半3F-後半3F）がある走りだけ使う
+const KICK_CACHE = new WeakMap();
+const paceName = (a, b) => a - b <= -1.0 ? "ハイペース" : a - b >= 1.0 ? "スロー" : "平均ペース";
+function kickInfo(ctx){
+  if (KICK_CACHE.has(ctx)) return KICK_CACHE.get(ctx);
+  const race = ctx.race || {}, S = race.surface, D = +race.distance, out = new Map();
+  for (const g of ctx.field || []){
+    const runs = (g.prof?.runs || []).filter(q => q.surface === S && q.pos > 0 && q.last3f > 30 && q.last3f < 45 && Math.abs(q.dist - D) <= 400 && (!race.date || !q.date || q.date < race.date)).slice(0, 8);
+    let best = null, rawBest = null;
+    for (const q of runs){
+      if (!rawBest || q.last3f < rawBest.last3f) rawBest = q;
+      const m = /^(\d+\.\d)-(\d+\.\d)$/.exec(q.pace || ""); if (!m) continue;
+      const a = +m[1], b = +m[2], rel = +(b - q.last3f).toFixed(1);
+      if (!best || rel > best.rel) best = { rel, a, b, l3: q.last3f, q, pace: paceName(a, b) };
+    }
+    out.set(g, { best, rawBest, rawSlow: (() => { const m = /^(\d+\.\d)-(\d+\.\d)$/.exec(rawBest?.pace || ""); return m ? +m[1] - +m[2] >= 1.0 : null; })() });
+  }
+  const ranked = [...out.entries()].filter(([, v]) => v.best).sort((x, y) => y[1].best.rel - x[1].best.rel);
+  ranked.forEach(([g, v], i) => v.rank = ranked.length >= 5 ? i + 1 : null);
+  const res = { map: out, n: ranked.length }; KICK_CACHE.set(ctx, res); return res;
+}
+// その馬の末脚の説明：生の上がり3Fのベストがメンバー2位以内のとき（2026-10-21検証：補正した上がりより生の上がりの方が穴馬の3着内に効いた）。
+//  どんなペースで出した上がりかも書く（スローで出た数字でも効きはほぼ同じ＝1.11倍／それ以外1.14倍）
+function kickFact(ctx, f){
+  const ki = kickInfo(ctx), k = ki.map.get(f); if (!k?.rawBest) return null;
+  const raws = [...ki.map.values()].filter(v => v.rawBest).map(v => v.rawBest.last3f).sort((a, b) => a - b); if (raws.length < 5) return null;
+  const rk = raws.indexOf(k.rawBest.last3f) + 1; if (rk > 2) return null;
+  const m = /^(\d+\.\d)-(\d+\.\d)$/.exec(k.rawBest.pace || ""), pc = m ? `（${paceName(+m[1], +m[2])}・前半${m[1]}-後半${m[2]}で記録）` : "";
+  return { w: 8 - rk, t: `この距離帯で使った上がり${k.rawBest.last3f.toFixed(1)}秒${pc}はメンバー${rk === 1 ? "最速" : "2位"}`, rank: rk };
+}
+// 今回の展開予想と、その馬の末脚の組み合わせ（2026-10-21検証・今のモデルと人気をそろえて比べた5番人気以下の3着内）
+//  上がりメンバー2位以内 × 今回ハイペース想定：1.21倍（3年とも1.15倍以上）→ 推奨理由に入れる
+//  スロー想定の先行馬：0.88倍（「スローで先行有利」は人気に織り込み済みでむしろ下回る）→ 推奨理由に使わない
+//  スロー想定で末脚が目立たない差し馬：0.93倍（偶然の範囲）→ 注意書きだけ
+function paceFit(ctx, f){
+  let pf; try { pf = Engine.paceForecast(ctx); } catch (e) { return null; }
+  const st = f.prof?.style || f.style, kf = kickFact(ctx, f), closer = st === "差し" || st === "追込";
+  if (kf && pf.best === "high") return { w: 7, t: `今回は前に行く馬が${pf.frontCount}頭でハイペース想定（${Math.round(pf.high * 100)}%）。上がりメンバー${kf.rank === 1 ? "最速" : "2位"}の脚が生きる流れ`, ok: true };
+  if (closer && pf.best === "slow" && !kf) return { w: 0, t: null, ok: false, why: "スロー想定で、上がりも上位ではない差し馬" };
+  return null;
+}
 function darkInsight(ctx, f){
   const race = ctx.race || {}, D = race.distance, S = race.surface, out = [];
   const runsOf = g => (g.prof?.runs || []).filter(q => q.surface !== "障" && q.pos > 0 && (!race.date || !q.date || q.date < race.date));
@@ -5552,7 +5597,8 @@ function darkInsight(ctx, f){
   // ③上がりの脚：同じ芝ダ・距離±200mの上がり3Fのベスト
   const l3 = g => { const v = runsOf(g).filter(q => q.surface === S && Math.abs(q.dist - D) <= 200).map(q => q.last3f).filter(x => x > 30 && x < 45); return v.length ? Math.min(...v) : null; };
   const lt = ctx.field.map(g => ({ g, t: l3(g) })).filter(x => x.t != null).sort((a, b) => a.t - b.t), ml = lt.findIndex(x => x.g === f);
-  if (lt.length >= 5 && ml >= 0 && ml <= 1) out.push({ w: 7 - ml, t: ml === 0 ? `この距離帯で使った上がり${lt[0].t.toFixed(1)}秒はメンバー最速` : `この距離帯の上がり${lt[ml].t.toFixed(1)}秒はメンバー2位（最速と${(lt[ml].t - lt[0].t).toFixed(1)}秒差）` });
+  // 生の上がりは使わない（スローの数字が混ざるため）。ペースで補正した末脚が2位以内のときだけ出す
+  void lt; void ml; { const kf = kickFact(ctx, f); if (kf) out.push(kf); }
   if (L){
     // ④前走の展開：ペース（前半3F-後半3F）と位置取り
     const pm = /^(\d+\.\d)-(\d+\.\d)$/.exec(L.pace || ""), c1 = L.passing?.[0], fld = L.field || 0;
@@ -5615,10 +5661,9 @@ function darkStory(ctx, f){
   if (L.pos >= 4 && wetL && goodOnlyDry && /良/.test(G)) chg.push(`良馬場替わり`);
   const kg = +(f.weight ?? f.kg); if (kg > 0 && L.weight > 0 && L.weight - kg >= 2) chg.push(`斤量${L.weight - kg}kg減`);
   if (since === 2) chg.push(`休み明け3戦目`); else if (since === 1) chg.push(`叩き2戦目`);
-  try { const pf = Engine.paceForecast(ctx), st = f.prof?.style;
-    if ((st === "逃げ" || st === "先行") && pf.best === "slow") chg.push(`スロー想定で${st}有利`);
-    else if ((st === "差し" || st === "追込") && pf.best === "high") chg.push(`先行争いが激しく${st}有利`);
-    else if (st === "逃げ" && (pf.frontCount ?? 9) <= 1) chg.push(`単騎逃げが濃厚`); } catch (e) {}
+  try { const pf = Engine.paceForecast(ctx), st = f.prof?.style, fit = paceFit(ctx, f);
+    // 「スロー想定で先行有利」「単騎逃げ」は、人気とモデルをそろえると3着内がむしろ下回った（0.88倍）ので使わない
+    void st; if (fit?.ok && pf.best === "high") chg.push(`ハイペース想定`); } catch (e) {}
   const cr = R.filter(q => q.venue === race.venue && q.surface === S && q.pos <= 3).length; if (cr >= 2) chg.push(`${race.venue}${S}は3着内${cr}回`);
   // ---- 好走の根拠（実績・時計・上がり・相手関係）
   // 直接対決：今回人気が上の馬に、いちばん最近の対戦で先着している（2勝以上で勝ち越しは、同じ人気より3着内が約3割多い）
@@ -5638,7 +5683,7 @@ function darkStory(ctx, f){
   if (bt.length >= 5 && me >= 0 && me <= 1) ev.push(me === 0 ? `同距離の持ち時計${fmtT(bt[0].t)}はメンバー最速` : `同距離の持ち時計はメンバー2位（最速と${(bt[1].t - bt[0].t).toFixed(1)}秒差）`);
   const l3 = g => { const v = runsOf(g).filter(q => q.surface === S && Math.abs(q.dist - D) <= 200).map(q => q.last3f).filter(x => x > 30 && x < 45); return v.length ? Math.min(...v) : null; };
   const lt = ctx.field.map(g => ({ g, t: l3(g) })).filter(x => x.t != null).sort((a, b) => a.t - b.t);
-  if (lt.length >= 5 && lt[0].g === f) ev.push(`この距離帯の上がり${lt[0].t.toFixed(1)}はメンバー最速`);
+  { void lt; const kf = kickFact(ctx, f); if (kf && kf.rank === 1) ev.push(`この距離帯の上がり${kickInfo(ctx).map.get(f).rawBest.last3f.toFixed(1)}はメンバー最速`); }
   // ---- 1文にまとめる（100字以内）：敗因 → 条件変化 → 根拠
   const len = t => [...t].length, C = cause[0] || null, C2 = cause.find(c => c !== C && !c.startsWith("前走" + L.pos + "着も")) || null;
   const build = (c, ch, e) => {
@@ -5674,16 +5719,17 @@ function darkFacts(ctx, f){
   // 血統の適性（エンジンの理由をそのまま）
   (p.blood?.why || []).filter(t => /得意/.test(t)).slice(0, 1).forEach(t => add(3, t, "blood"));
   // 展開
-  try { const pf = Engine.paceForecast(ctx), st = p.style;
-    if ((st === "逃げ" || st === "先行") && (pf.frontCount ?? 9) <= 2) add(5, `前に行く馬が少なく（${pf.frontCount}頭）、${st}でマイペースに運べそう`, "pace2");
-    else if ((st === "差し" || st === "追込") && pf.best === "high") add(5, `先行争いが激しくなりそうで、${st}の脚が生きる`, "pace2"); } catch (e) {}
-  return { story, facts: out.sort((a, b) => b.w - a.w) };
+  // 展開：今回の想定ペース × その馬の位置取り × ペース補正した末脚。合わない組み合わせなら、末脚・展開の材料を推奨理由に使わない
+  let fit = null; try { fit = paceFit(ctx, f); } catch (e) {}
+  if (fit?.ok && fit.t) add(fit.w, fit.t, "pace2");
+  if (fit && fit.ok === false){ for (let i = out.length - 1; i >= 0; i--) if (out[i].tag === "pace2") out.splice(i, 1); }
+  return { story, facts: out.sort((a, b) => b.w - a.w), misfit: fit && fit.ok === false ? fit.why : null };
 }
 function darkText(ctx, f, maxLen = 110){
   const { story, facts } = darkFacts(ctx, f), len = t => [...t].length;
   const n = (story ? 2 : 0) + facts.length; if (n < 2) return null;
   let t = story || ""; const used = new Set();
-  const KW = { time: /持ち時計/, l3: /上がり[\d.]+(秒)?はメンバー/, level: /負かした|勝ち上がり|その後勝利|その後1着/, h2h: /先着済み/, pace: /ハイペース|スロー/, margin: /勝ち馬と/, gain: /追い上げ/, kg: /斤量/, rest: /叩き2戦目|休み明け3戦目/, course: /で3着内\d+回|は3着内\d+回/, dist: /得意距離|ぴったり/ };
+  const KW = { time: /持ち時計/, l3: /末脚はメンバー|上がり[\d.]+(秒)?はメンバー/, level: /負かした|勝ち上がり|その後勝利|その後1着/, h2h: /先着済み/, pace: /ハイペース|スロー/, margin: /勝ち馬と/, gain: /追い上げ/, kg: /斤量/, rest: /叩き2戦目|休み明け3戦目/, course: /で3着内\d+回|は3着内\d+回/, dist: /得意距離|ぴったり/ };
   for (const x of facts){ if (story && KW[x.tag] && KW[x.tag].test(story)) continue; const add = (t ? "" : "") + x.t + "。"; if (len(t + add) > maxLen) continue; t += add; used.add(x.tag); }
   return t || null;
 }
@@ -5696,10 +5742,7 @@ function darkWhy(sim){
   try { const tx = darkText(sim.ctx, f); if (tx) out.push(tx); } catch (e) {}
   try { darkInsight(sim.ctx, f).forEach(t => out.push(t)); } catch (e) {}
   const ana = (f.ana || []).filter(a => !ODDS_TAGS.has(a));
-  try { const pf = Engine.paceForecast(sim.ctx), st = p.style;
-    if ((st === "逃げ" || st === "先行") && pf.best === "slow") out.push(`${st}脚質で、スロー想定（${Math.round(pf.slow * 100)}%）なら前で粘り込める`);
-    else if ((st === "差し" || st === "追込") && pf.best === "high") out.push(`${st}脚質で、ハイペース想定（${Math.round(pf.high * 100)}%）なら末脚が生きる`);
-    else if (st === "逃げ" && (pf.frontCount ?? 9) <= 2) out.push(`前に行く馬が少なく（${pf.frontCount}頭）、楽にハナを取れそう`); } catch (e) {}
+  try { const fit = paceFit(sim.ctx, f); if (fit?.ok && fit.t) out.push(fit.t); else if (fit && fit.ok === false) out.push(`注意：${fit.why}`); } catch (e) {}
   if (L && L.pos > 0){
     if (L.pop && L.pos && L.pop - L.pos >= 3) out.push(`前走は${L.pop}番人気で${L.pos}着と、人気以上に走った`);
   }
@@ -6139,20 +6182,21 @@ function raceStart(r){
   const m = /(\d{1,2}):(\d{2})/.exec(r.postTime || "");
   return new Date(`${r.date}T${m ? m[1].padStart(2, "0") + ":" + m[2] : "23:59"}:00+09:00`);
 }
-async function runBatch(force){
+async function runBatch(force, ids){
   if (BATCH.running) return;
   const all = racesOfDay(ST.date);
+  // ids：1レースだけオッズを更新したときは、そのレースだけ計算し直す（2026-10-24）
   // 自動実行のときは、発走済みで発走前の予想が残っているレースはそのまま（答え合わせは発走前の買い目で行う）
   const saved0 = Object.fromEntries((BATCH.saved[ST.date]?.rows || []).map(x => [x.id, x]));
   const now = new Date();
-  const list = force === true ? all : all.filter(r => !(raceStart(r) <= now && saved0[r.id] && new Date(saved0[r.id].at) <= raceStart(r)));
+  const list = ids?.length ? all.filter(r => ids.includes(r.id)) : force === true ? all : all.filter(r => !(raceStart(r) <= now && saved0[r.id] && new Date(saved0[r.id].at) <= raceStart(r)));
   if (!list.length){ toast("この日は出馬表のあるレースがありません。先に全レースを取得してください"); return; }
   while (simBusy) await new Promise(r => setTimeout(r, 100));
   BATCH.running = true; BATCH.date = ST.date; BATCH.done = 0; BATCH.total = list.length;
   list.forEach(r => delete BATCH.rows[r.id]);
-  all.filter(r => !list.includes(r)).forEach(r => { BATCH.rows[r.id] = saved0[r.id]; });
+  all.filter(r => !list.includes(r)).forEach(r => { BATCH.rows[r.id] = ids?.length ? (BATCH.rows[r.id] || saved0[r.id]) : saved0[r.id]; });
   if (!list.length){ BATCH.running = false; renderAllTab(); renderUpd(); return; }
-  setTab("all"); renderUpd();
+  if (!ids?.length) setTab("all"); renderUpd();
   const t0 = performance.now();
   for (const r of list){
     await runSim(true, { id: r.id, runs: BATCH_RUNS, onProgress: p => setUpdProgress((BATCH.done + p) / BATCH.total, `一括シミュレーション中 ${BATCH.done + 1}/${BATCH.total}：${r.venue}${r.no}R ${r.name}`) });
@@ -6160,7 +6204,7 @@ async function runBatch(force){
   }
   BATCH.running = false;
   const sec = Math.round((performance.now() - t0) / 1000);
-  SERVER.lastMsg = `一括シミュレーション完了：${list.length}レース（各条件${BATCH_RUNS.toLocaleString()}回×13条件・${sec}秒）。「全レース予想」タブで一覧できます`;
+  SERVER.lastMsg = ids?.length ? `${list.map(r => r.venue + r.no + "R").join("・")} のオッズを更新して計算し直しました（${sec}秒）` : `一括シミュレーション完了：${list.length}レース（各条件${BATCH_RUNS.toLocaleString()}回×13条件・${sec}秒）。「全レース予想」タブで一覧できます`;
   renderUpd(); setUpdProgress(1); renderAllTab(); renderVenues();
   if (SERVER.on){
     // 発走後に計算し直したレースは、発走前の予想（買い目）を preRace として残す
@@ -6170,7 +6214,7 @@ async function runBatch(force){
     api("/api/summary?date=" + ymdOf(ST.date), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date: ST.date, at: new Date().toISOString(), rows }) })
       .then(() => { BATCH.saved[ST.date] = { rows }; }).catch(() => {});
   }
-  toast(`全${list.length}レースのシミュレーションが完了しました`);
+  toast(ids?.length ? `${list.map(r => r.venue + r.no + "R").join("・")} を最新オッズで計算し直しました` : `全${list.length}レースのシミュレーションが完了しました`);
 }
 function setUpdProgress(x, msg){
   const b = $("#updProg"); if (b) b.style.width = Math.round(x * 100) + "%";
@@ -6208,12 +6252,24 @@ function renderUpd(){
   const ck = $("#checkBtn"); if (ck) ck.onclick = () => startCheck();
   const tc = $("#toCloud"); if (tc) tc.onclick = e => { e.preventDefault(); setTab("data"); };
 }
+// 1レースだけオッズを更新（2026-10-24）：PCのサーバーで動いているときだけ。終わったらそのレースだけ計算し直す
+async function startOddsRace(id){
+  const r = DB.races[id]; if (!r) return;
+  if (SERVER.status?.running || BATCH.running){ toast("ほかの処理中です。終わってからもう一度押してください"); return; }
+  try {
+    const j = await api(`/api/odds?date=${ymdOf(r.date)}&race=${id}`, { method: "POST" });
+    if (!j.ok) throw new Error(j.message || "開始できませんでした");
+    SERVER.pendingDate = r.date; SERVER.autoBatch = true; SERVER.oneRace = id;
+    toast(`${r.venue}${r.no}R のオッズを更新しています`);
+    pollJob(true);
+  } catch (err) { toast("開始できませんでした：" + err.message); }
+}
 async function startJob(kind){
   const d = SERVER.updDate || (SERVER.status?.nextSunday ? isoOf(SERVER.status.nextSunday) : ST.date);
   try {
     const j = await api(`/api/${kind}?date=${ymdOf(d)}`, { method: "POST" });
     if (!j.ok) throw new Error(j.message || "開始できませんでした");
-    SERVER.pendingDate = d; SERVER.autoBatch = true;
+    SERVER.pendingDate = d; SERVER.autoBatch = true; SERVER.oneRace = null;
     toast(kind === "odds" ? "オッズの更新を始めました" : "全レースの取得を始めました。終わると自動で一括シミュレーションします");
     pollJob(true);
   } catch (err) {
@@ -6254,10 +6310,10 @@ function pollJob(now){
       SERVER.lastMsg = s.error ? "取得エラー：" + s.error : `取得完了（${s.finished_at || ""}）`;
       await loadServerDB();
       const d = s.date ? isoOf(s.date) : SERVER.pendingDate;
-      SERVER.pendingDate = null;
+      SERVER.pendingDate = null; const one = SERVER.oneRace; SERVER.oneRace = null;
       if (!s.error && d){ ST.date = d; renderDays(); renderVenues(); renderUpd();
         if (SERVER.afterCheck){ SERVER.afterCheck = false; SERVER.autoBatch = false; showCheck(d); }
-        else if (SERVER.autoBatch){ SERVER.autoBatch = false; runBatch(); } }
+        else if (SERVER.autoBatch){ SERVER.autoBatch = false; one ? runBatch(true, [one]) : runBatch(); } }
     }
   };
   SERVER.timer = setTimeout(tick, now ? 800 : 0);
@@ -6958,7 +7014,7 @@ async function serverInit(){
   if (!Object.keys(ST.sims).length) runSim(true);
 }
 // ===== 学習（答え合わせの蓄積から、統合の仕方・要素の効き・馬場の偏りを更新） =====
-const LOGIC_VER = "68bd8b50";
+const LOGIC_VER = "9bc8d0c9";
 const LEARN = { model: null, base: null, saved: null };
 // 実戦テスト（ルール固定）：固定した学習モデル。固定中は、全部の記録での学習は続けても予想には固定したモデルを使う
 const LOCK = { info: null, confirmOff: false };
@@ -7232,13 +7288,399 @@ function asBind(){
 // 学習・成績タブの描画。どこかの表でエラーが出ても、画面とボタンが止まらないようにする（エラーの内容は画面と data/client_log.txt に残す）
 function safePanel(name, fn){ try { return fn(); } catch (e) { console.error(e); diagSend?.("panel", { name, msg: String(e?.message || e).slice(0, 300), stack: String(e?.stack || "").split("\n").slice(0, 3).join(" | ") });
   return `<div class="learnbox"><h3>${esc(name)}</h3><p class="small neg">この欄を表示できませんでした：${esc(String(e?.message || e))}（この文をそのまま送ってください）</p>${name === "検証レポート" ? `<div class="ctrls"><button class="btn primary" id="mkReport">作り直す（軽い版）</button><button class="btn" id="mkReportDeep">詳しい検証も作る</button></div>` : ""}</div>`; } }
+// ===== 穴馬研究（2026-10-21）：条件の組み合わせを発掘 → 別期間で検証 → 最終評価は1回だけ =====
+//  ・使うのはレース前に分かる情報だけ（前走までの成績・ペース・通過順・上がり、今回の出馬表・枠・距離・馬場、エンジンの予測）
+//  ・制約：過去データのオッズ・人気は確定オッズ（発走前のオッズは残っていない）。払戻は100円単位の実額
+//  ・前走のペースは「芝ダ×距離帯」ごとの普通のペース（前半3F−後半3Fの中央値）との差で、スロー（+1.0秒以上）／ハイ（−1.0秒以下）に分ける
+//  ・期間は年で分ける：最初の年＝探索、次の年＝検証、最後の年＝最終評価（1回だけ・使ったら記録に残り再利用しない）
+//  ・本番の予想には自動では入れない（エンジンへの反映は、最終評価まで通った条件を人が確認してから）
+const RS_FN = ["前走ペース:スロー","前走ペース:ハイ","前走1角:前","前走1角:後","前走4角:前","前走4角:後","前走上がり:速い","前走上がり:遅い","前走:3着内","前走:4-5着","前走:6-9着","前走:10着以下","前走着差:0.3秒以内","前走着差:1秒超","前走馬場:道悪","今回馬場:道悪","距離短縮","距離延長","芝ダ替わり","場替わり","直線長い","直線短い","内枠","外枠","16頭以上","10頭以下","想定スロー","想定ハイ","脚質:先行","脚質:差し","休み明け","中2週以内","斤量減","斤量増","前走:人気より好走","前走:人気より凡走","前走1-3番人気","前走4角から追い上げ","前走4角から失速","近3走の上がりが速い","同距離帯で3着内実績","エンジン評価>人気","エンジン評価<人気","オッズ10-20倍","オッズ20-50倍","オッズ50倍超"];
+const RS = { busy: false, msg: "", st: null, feat: null, last: null, stop: false };
+async function rsLoad(){ try { RS.st = await api("/api/research"); } catch (e) { RS.st = null; } }
+const rsBk = (s, d) => s + (d <= 1400 ? "S" : d <= 1800 ? "M" : d <= 2200 ? "L" : "X");
+const rsPm = q => { const m = /^(\d+\.\d)-(\d+\.\d)$/.exec(q.pace || ""); return m ? [+m[1], +m[2]] : null; };
+// 特徴量を作る（開催日ごとに保存するので、途中で止めても続きから）
+async function rsBuildFeatures(reset){
+  if (RS.busy) return; RS.busy = true; RS.stop = false; RS.msg = "準備中"; renderLearnTab();
+  try {
+    const st = await bfRefresh(); const days = Object.keys(st?.processed || {}).sort();
+    if (!days.length) throw new Error("過去データ（過去データで学習）がまだありません");
+    let cur = reset ? { days: [], meta: {} } : await api("/api/research/features", { timeout: 300000 });
+    if (reset) await api("/api/research/features", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reset: true, rows: [], days: [] }) });
+    let MED = cur.meta?.MED;
+    if (!MED){ // ペースの基準：最初の年の過去走だけで計算（後の年の情報を使わない）
+      const y0 = days[0].slice(0, 4), acc = {};
+      for (const d of days.filter(x => x.startsWith(y0)).filter((x, i) => i % 5 === 0)){ const j = await api("/api/backfill/day?date=" + d, { timeout: 180000 });
+        for (const h of Object.values(j.horses || {})) for (const q of (h.runs || [])){ const p = rsPm(q); if (p && (q.surface === "芝" || q.surface === "ダ")) (acc[rsBk(q.surface, +q.dist)] ||= []).push(p[0] - p[1]); } }
+      MED = {}; for (const k in acc){ const v = acc[k].sort((a, b) => a - b); MED[k] = v[v.length >> 1]; }
+    }
+    const done = new Set(cur.days || []), todo = days.filter(d => !done.has(d));
+    const dev = q => { const p = rsPm(q), m = MED[rsBk(q.surface, +q.dist)]; return p && m != null ? (p[0] - p[1]) - m : null; };
+    const er = q => q.passing?.[0] > 0 && q.field > 1 ? (q.passing[0] - 1) / (q.field - 1) : null;
+    const lr = q => q.passing?.length && q.field > 1 ? (q.passing[q.passing.length - 1] - 1) / (q.field - 1) : null;
+    const rel = q => { const p = rsPm(q); return p && q.last3f > 30 && q.last3f < 45 ? p[1] - q.last3f : null; };
+    let rows = [], batch = [];
+    for (let di = 0; di < todo.length; di++){
+      if (RS.stop) break;
+      const d = todo[di]; RS.msg = `特徴量を作成中 ${done.size + di + 1}/${days.length}開催日`; if (ST.tab === "learn" && di % 3 === 0) renderLearnTab();
+      const j = await api("/api/backfill/day?date=" + d, { timeout: 180000 }).catch(() => null); if (!j?.races) continue; const H = j.horses || {};
+      for (const r of j.races){ const res = r.result; if (!res?.rows?.length || !r.entries?.length || (r.surface !== "芝" && r.surface !== "ダ")) continue;
+        const pos = Object.fromEntries(res.rows.map(x => [x.num, x]));
+        const ctx = Engine.buildContext({ ...r, date: r.date || j.date }, H, { going: r.going }); const mc = await Engine.monteCarlo(ctx, 2000, 20261021);
+        const pf = Engine.paceForecast(ctx), N = ctx.N, D = +r.distance, S = r.surface, str = ctx.course?.str || 400, wet = /重|不/.test(r.going || "");
+        ctx.field.forEach((f, i) => { const x = pos[f.num]; if (!x || !(x.pos > 0) || !(x.pop >= 5) || !(x.odds > 1)) return;
+          const h = H[f.horseId] || {}; const rs = (h.runs || []).map(Engine.parseRun).filter(q => q.pos > 0 && q.surface !== "障" && (!q.date || q.date < r.date)); const L = rs[0]; if (!L) return;
+          const ue = rs.slice(0, 5).map(er).filter(v => v != null), uE = ue.length ? ue.reduce((a, b) => a + b, 0) / ue.length : null;
+          const dL = dev(L), eL = er(L), cL = lr(L), rL = rel(L), lc = L.passing?.length ? L.passing[L.passing.length - 1] : null;
+          const e = r.entries.find(q => +q.num === +f.num) || {}, kg = +e.weight || 0, g = (f.num - 1) / Math.max(1, N - 1);
+          const days0 = L.date ? (new Date(r.date) - new Date(L.date)) / 864e5 : null, r3 = rs.slice(0, 3).map(rel).filter(v => v != null);
+          const b = [dL != null && dL >= 1.0, dL != null && dL <= -1.0, eL != null && eL < 0.3, eL != null && eL >= 0.6, cL != null && cL < 0.3, cL != null && cL >= 0.6, rL != null && rL >= 0.8, rL != null && rL <= -0.5,
+            L.pos <= 3, L.pos >= 4 && L.pos <= 5, L.pos >= 6 && L.pos <= 9, L.pos >= 10, L.margin != null && L.margin <= 0.3 && L.pos > 1, L.margin != null && L.margin > 1.0, /重|不/.test(L.going || ""), wet,
+            L.dist && D <= L.dist - 200, L.dist && D >= L.dist + 200, L.surface !== S, L.venue !== r.venue, str >= 470, str < 340, g <= 0.25, g >= 0.75, N >= 16, N <= 10, pf.best === "slow", pf.best === "high",
+            uE != null && uE < 0.3, uE != null && uE >= 0.55, days0 != null && days0 >= 90, days0 != null && days0 <= 14, kg && L.weight && L.weight - kg >= 1, kg && L.weight && kg - L.weight >= 1,
+            L.pop && L.pop - L.pos >= 3, L.pop && L.pos - L.pop >= 5, L.pop && L.pop <= 3, lc && lc - L.pos >= 4, lc && L.pos - lc >= 4, r3.length >= 2 && r3.reduce((a, c) => a + c, 0) / r3.length >= 0.5,
+            rs.some(q => q.surface === S && Math.abs(q.dist - D) <= 200 && q.pos <= 3), false, false, x.odds >= 10 && x.odds < 20, x.odds >= 20 && x.odds < 50, x.odds >= 50];
+          const bits = []; b.forEach((v, k) => { if (v) bits.push(k); });
+          batch.push({ yr: r.date.slice(0, 4), date: r.date, rid: r.id, num: f.num, pop: x.pop, odds: x.odds, y3: x.pos <= 3 ? 1 : 0, pP: res.pay?.複勝?.[String(f.num)] || 0, pW: res.pay?.単勝?.[String(f.num)] || 0, p: +mc.stats[i].top3.toFixed(4), bits }); });
+      }
+      rows.push(d);
+      if (rows.length >= 10 || di === todo.length - 1){ // 10開催日ごとに保存（チェックポイント）
+        await api("/api/research/features", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rows: batch, days: rows, meta: { MED, ver: 1, fn: RS_FN } }), timeout: 300000 });
+        rows.forEach(x => done.add(x)); rows = []; batch = []; }
+    }
+    RS.feat = null; RS.msg = RS.stop ? "途中で止めました（次回は続きから作ります）" : `特徴量の作成が終わりました（${done.size}開催日）`;
+  } catch (e) { RS.msg = "止まりました：" + e.message; }
+  RS.busy = false; renderLearnTab();
+}
+// 1〜3条件の総当たり（ビット演算で高速化）。回収率は複勝・単勝を別々に出す
+function rsSearch(rows, minN = 150){
+  const n = rows.length, W = Math.ceil(n / 32), K = RS_FN.length, BS = Array.from({ length: K }, () => new Uint32Array(W));
+  rows.forEach((r, i) => r.bits.forEach(k => BS[k][i >> 5] |= 1 << (i & 31)));
+  const pP = Float64Array.from(rows, r => r.pP), pW = Float64Array.from(rows, r => r.pW), y3 = Uint8Array.from(rows, r => r.y3), tmp = new Uint32Array(W), out = [];
+  const cntB = a => { let c = 0; for (let w = 0; w < W; w++){ let v = a[w]; v = v - ((v >>> 1) & 0x55555555); v = (v & 0x33333333) + ((v >>> 2) & 0x33333333); c += (((v + (v >>> 4)) & 0x0F0F0F0F) * 0x01010101) >>> 24; } return c; };
+  const evalSet = (arr, key) => { let c = 0, sp = 0, sp2 = 0, sw = 0, sw2 = 0, h = 0; for (let w = 0; w < W; w++){ let v = arr[w]; while (v){ const t = v & -v, i = (w << 5) + (31 - Math.clz32(t)); v ^= t; c++; const a = pP[i] - 100, b = pW[i] - 100; sp += a; sp2 += a * a; sw += b; sw2 += b * b; h += y3[i]; } }
+    if (c < minN) return; const mp = sp / c, vp = sp2 / c - mp * mp, mw = sw / c, vw = sw2 / c - mw * mw; out.push({ key, n: c, hit: h / c, roiP: 100 + mp, roiW: 100 + mw, tP: mp / Math.sqrt(vp / c || 1), tW: mw / Math.sqrt(vw / c || 1) }); };
+  const pc = BS.map(cntB);
+  for (let a = 0; a < K; a++){ if (pc[a] < minN) continue; evalSet(BS[a], [a]);
+    for (let b = a + 1; b < K; b++){ if (pc[b] < minN) continue; for (let w = 0; w < W; w++) tmp[w] = BS[a][w] & BS[b][w]; if (cntB(tmp) < minN) continue; evalSet(tmp, [a, b]); const t2 = Uint32Array.from(tmp);
+      for (let c = b + 1; c < K; c++){ if (pc[c] < minN) continue; for (let w = 0; w < W; w++) tmp[w] = t2[w] & BS[c][w]; evalSet(tmp, [a, b, c]); } } }
+  return out;
+}
+const rsShuffle = rows => { const band = r => r.odds < 20 ? 0 : r.odds < 50 ? 1 : 2, by = [[], [], []]; rows.forEach(r => by[band(r)].push({ y3: r.y3, pP: r.pP, pW: r.pW }));
+  by.forEach(a => { for (let i = a.length - 1; i > 0; i--){ const j = Math.random() * (i + 1) | 0; [a[i], a[j]] = [a[j], a[i]]; } }); const ix = [0, 0, 0]; return rows.map(r => { const b = band(r); return { ...r, ...by[b][ix[b]++] }; }); };
+const rsEval = (rows, key) => { const s = rows.filter(r => key.every(k => r.bits.includes(k))), n = s.length; return { n, hit: n ? s.reduce((a, r) => a + r.y3, 0) / n : 0, roiP: n ? s.reduce((a, r) => a + r.pP, 0) / n : 0, roiW: n ? s.reduce((a, r) => a + r.pW, 0) / n : 0 }; };
+const rsBase = rows => rsEval(rows, []);
+async function rsLoadFeat(){
+  if (RS.feat) return RS.feat; const j = await api("/api/research/features", { timeout: 300000 }); const rows = j.rows || [];
+  // 「エンジン評価>人気」「<人気」は、探索の年の人気別3着内率を基準に付ける（後の年の結果を使わない）
+  const years = [...new Set(rows.map(r => r.yr))].sort(), b = {}; rows.filter(r => r.yr === years[0]).forEach(r => { const k = Math.min(r.pop, 16); (b[k] ||= [0, 0]); b[k][0]++; b[k][1] += r.y3; });
+  rows.forEach(r => { r.bits = r.bits.filter(k => k !== 41 && k !== 42); const bb = b[Math.min(r.pop, 16)]; if (bb){ const q = r.p / (bb[1] / bb[0]); if (q >= 1.3) r.bits.push(41); if (q <= 0.7) r.bits.push(42); } });
+  RS.feat = { rows, years }; return RS.feat;
+}
+// 探索（最初の年）→ 偶然との比較 → 上位を検証（次の年）。最終評価の年は使わない
+async function rsExperiment(){
+  if (RS.busy) return; RS.busy = true; RS.msg = "探索中"; renderLearnTab();
+  try {
+    await rsLoad(); const { rows, years } = await rsLoadFeat(); if (years.length < 2) throw new Error("年が2つ以上必要です（特徴量を作ってください）");
+    const cfg = RS.st?.config || {}, ex = cfg.explore || [years[0]], va = cfg.validate || [years[1]], ho = cfg.holdout || years.slice(2);
+    const E = rows.filter(r => ex.includes(r.yr)), V = rows.filter(r => va.includes(r.yr));
+    await new Promise(r => setTimeout(r, 20));
+    const res = rsSearch(E), nullMax = [];
+    for (let s = 0; s < 5; s++){ RS.msg = `偶然との比較 ${s + 1}/5`; renderLearnTab(); await new Promise(r => setTimeout(r, 20)); nullMax.push(Math.max(...rsSearch(rsShuffle(E)).map(x => x.tP))); }
+    const thr = Math.max(...nullMax), bE = rsBase(E), bV = rsBase(V);
+    const top = res.slice().sort((a, b) => b.tP - a.tP).slice(0, 30).map(x => { const v = rsEval(V, x.key);
+      const status = x.tP > thr && v.n >= 100 && v.roiP >= 100 ? "検証中（最終評価待ち）" : v.n >= 100 && v.roiP >= bV.roiP + 5 ? "参考（全体より良いが100%未満）" : "棄却";
+      return { cond: x.key.map(k => RS_FN[k]).join("×"), key: x.key, explore: { n: x.n, hit: +(x.hit * 100).toFixed(1), roiP: +x.roiP.toFixed(1), roiW: +x.roiW.toFixed(1), t: +x.tP.toFixed(2) }, validate: { n: v.n, hit: +(v.hit * 100).toFixed(1), roiP: +v.roiP.toFixed(1), roiW: +v.roiW.toFixed(1) }, status }; });
+    const exp = { id: Date.now(), at: new Date().toISOString(), logic: typeof LOGIC_VER !== "undefined" ? LOGIC_VER : null, explore: ex, validate: va, holdout: ho, tested: res.length, minN: 150,
+      nullMaxT: nullMax.map(v => +v.toFixed(2)), realMaxT: +Math.max(...res.map(x => x.tP)).toFixed(2), base: { explore: { n: E.length, roiP: +bE.roiP.toFixed(1), roiW: +bE.roiW.toFixed(1) }, validate: { n: V.length, roiP: +bV.roiP.toFixed(1), roiW: +bV.roiW.toFixed(1) } },
+      validateAvgRoiP: +(top.reduce((a, c) => a + c.validate.roiP * c.validate.n, 0) / Math.max(1, top.reduce((a, c) => a + c.validate.n, 0))).toFixed(1), top };
+    await api("/api/research", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ experiment: exp }) });
+    RS.last = exp; await rsLoad(); RS.msg = `探索 ${res.length.toLocaleString()}条件・記録しました`;
+  } catch (e) { RS.msg = "止まりました：" + e.message; }
+  RS.busy = false; renderLearnTab();
+}
+// 最終評価：検証中の条件だけを、最終評価の年で1回だけ試す（使った年は記録され、以後の探索・最終評価に再利用しない）
+async function rsHoldout(){
+  if (RS.busy) return; const exp = RS.last || RS.st?.experiments?.at(-1); if (!exp) return;
+  const cand = exp.top.filter(c => c.status.startsWith("検証中")); if (!cand.length){ toast("最終評価に進める条件がありません"); return; }
+  const used = RS.st?.holdoutUsed || []; if (exp.holdout.some(y => used.includes(y))){ toast(`最終評価の期間（${exp.holdout.join("・")}）はすでに使っています。新しい期間のデータが必要です`); return; }
+  RS.busy = true; try { const { rows } = await rsLoadFeat(); const H = rows.filter(r => exp.holdout.includes(r.yr)), bH = rsBase(H);
+    const result = cand.map(c => ({ cond: c.cond, ...rsEval(H, c.key) }));
+    await api("/api/research", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ holdoutUsed: exp.holdout, experiment: { id: Date.now(), at: new Date().toISOString(), kind: "holdout", of: exp.id, years: exp.holdout, base: { n: H.length, roiP: bH.roiP, roiW: bH.roiW }, result } }) });
+    await rsLoad(); RS.msg = "最終評価を記録しました（この期間は以後使いません）"; } catch (e) { RS.msg = "止まりました：" + e.message; }
+  RS.busy = false; renderLearnTab();
+}
+function researchPanel(){
+  if (!SERVER.enabled || SERVER.cloud) return "";
+  if (!RS.st && !RS.loading){ RS.loading = true; rsLoad().then(() => { RS.loading = false; if (ST.tab === "learn") renderLearnTab(); }); }
+  const exps = (RS.st?.experiments || []).filter(x => x.kind !== "holdout"), last = RS.last || exps.at(-1), hos = (RS.st?.experiments || []).filter(x => x.kind === "holdout");
+  const pct = v => v == null ? "—" : (+v).toFixed(0) + "%";
+  return `<div class="learnbox"><h3>穴馬研究（条件の組み合わせの発掘と検証）</h3>
+    <p class="small">5番人気以下の馬について、レース前に分かる46の条件（前走のペース×位置取り×上がり、馬場の変化、距離・コース・枠、想定ペース、エンジンと人気のずれなど）の1〜3個の組み合わせを総当たりで調べます。<b>最初の年で探索 → 次の年で検証 → 最後の年で1回だけ最終評価</b>。偶然でも出る強さ（結果をシャッフルして同じ探索をした最大値）と比べて判定します。<b>本番の予想には自動で入れません。</b>制約：過去データのオッズは確定オッズ（発走前のオッズは残っていない）。</p>
+    <div class="ctrls"><button class="btn" id="rsFeat" ${RS.busy ? "disabled" : ""}>特徴量を作る（続きから）</button><button class="btn" id="rsExp" ${RS.busy ? "disabled" : ""}>探索と検証を実行</button><button class="btn" id="rsHold" ${RS.busy ? "disabled" : ""}>最終評価（1回だけ）</button>${RS.busy ? `<button class="btn" id="rsStop">止める</button>` : ""}</div>
+    ${RS.msg ? `<p class="small">${esc(RS.msg)}</p>` : ""}
+    ${last ? `<p class="small">直近の実験（${esc(String(last.at).slice(0, 16).replace("T", " "))}）：探索 ${esc(last.explore.join("・"))}年・${last.tested.toLocaleString()}条件 ／ 検証 ${esc(last.validate.join("・"))}年。全体の複勝回収 探索${pct(last.base.explore.roiP)}・検証${pct(last.base.validate.roiP)}。
+      偶然でも出る強さ t=${last.nullMaxT.join("・")}、実データの最大 t=${last.realMaxT}。上位30条件の検証期間の複勝回収（平均）${pct(last.validateAvgRoiP)}。</p>
+      <div class="tbl-wrap"><table><thead><tr><th>条件</th><th class="r">探索 頭数</th><th class="r">複勝</th><th class="r">単勝</th><th class="r">検証 頭数</th><th class="r">3着内</th><th class="r">複勝</th><th class="r">単勝</th><th>判定</th></tr></thead><tbody>
+      ${last.top.slice(0, 15).map(c => `<tr><td>${esc(c.cond)}</td><td class="r num">${c.explore.n}</td><td class="r num">${pct(c.explore.roiP)}</td><td class="r num">${pct(c.explore.roiW)}</td><td class="r num">${c.validate.n}</td><td class="r num">${c.validate.hit}%</td><td class="r num ${c.validate.roiP >= 100 ? "pos" : ""}">${pct(c.validate.roiP)}</td><td class="r num">${pct(c.validate.roiW)}</td><td class="small">${esc(c.status)}</td></tr>`).join("")}</tbody></table></div>` : `<p class="small">まだ実験はありません。「特徴量を作る」（全開催日で約5分）→「探索と検証を実行」の順に押してください。</p>`}
+    ${hos.length ? `<p class="small">最終評価の記録：${hos.map(h => `${esc(h.years.join("・"))}年 ${h.result.map(r => `${esc(r.cond)} ${r.n}頭 複勝${pct(r.roiP)}`).join("／")}`).join("<br>")}</p>` : ""}
+    <p class="small">これまでの実験 ${exps.length}回・最終評価に使った年：${esc((RS.st?.holdoutUsed || []).join("・") || "なし")}</p></div>`;
+}
+function bindResearch(){
+  const a = $("#rsFeat"); if (a) a.onclick = () => rsBuildFeatures(false);
+  const b = $("#rsExp"); if (b) b.onclick = () => rsExperiment();
+  const c = $("#rsHold"); if (c) c.onclick = () => { if (!RS.armed){ RS.armed = true; toast("最終評価は1回だけです。もう一度押すと実行します"); setTimeout(() => RS.armed = false, 8000); return; } RS.armed = false; rsHoldout(); };
+  const s = $("#rsStop"); if (s) s.onclick = () => { RS.stop = true; };
+}
+
+// ===== 2025年の独立評価専用：10/18版（事前固定の時点の版）の推奨理由の関数をそのまま写したもの。本番の予想では使わない =====
+//  元の区間（function darkInsight 〜 darkText）のSHA-256：96b04c7bfe8b175196f81f0c9fc841ebeb23633d259fcff1861d1a397ee53a6a（PCの10/18版と一致を確認）
+function darkInsight1018(ctx, f){
+  const race = ctx.race || {}, D = race.distance, S = race.surface, out = [];
+  const runsOf = g => (g.prof?.runs || []).filter(q => q.surface !== "障" && q.pos > 0 && (!race.date || !q.date || q.date < race.date));
+  const R = runsOf(f), L = R[0];
+  // ①前走のレースレベル：同じレースに出ていた馬が、その後に勝ち上がっているか
+  try { if (L?.raceId){ const idx = raceIndex(), mates = (idx[L.raceId] || []).filter(m => m.name !== f.name);
+      const later = mates.map(m => ({ ...m, win: (m.runs || []).find(q => q.date > L.date && (!race.date || q.date < race.date) && +q.pos === 1) })).filter(m => m.win);
+      const beat = later.filter(m => +m.run.pos > L.pos).sort((a, b) => a.run.pos - b.run.pos)[0];
+      if (beat) out.push({ w: 10, t: L.pos === 1 ? `前走で負かした${beat.name}（${beat.run.pos}着）は、その後のレースで1着。勝った相手が次に勝ち上がっており、前走の勝ちは価値が高い` : `前走${L.pos}着で、後ろに負かした${beat.name}（${beat.run.pos}着）はその後1着。着順以上にメンバーは強かった` });
+      else if (later.length >= 2) out.push({ w: 5, t: `前走（${L.pos}着）の同じレースから、その後${later.length}頭が勝ち上がり（${later.slice(0, 2).map(m => m.name).join("・")}）` });
+      else if (later.length === 1 && L.pos <= 6) out.push({ w: 6, t: `前走で先着された${later[0].name}はその後1着。強い相手に${L.pos}着と食い下がった` }); } } catch (e) {}
+  // ②持ち時計：同じ芝ダ・同じ距離のベストタイムをメンバーと比べる
+  const best = g => { const v = runsOf(g).filter(q => q.surface === S && +q.dist === +D).map(q => tsecOf(q.time)).filter(x => x > 20); return v.length ? Math.min(...v) : null; };
+  const bt = ctx.field.map(g => ({ g, t: best(g) })).filter(x => x.t != null).sort((a, b) => a.t - b.t);
+  const me = bt.findIndex(x => x.g === f);
+  if (bt.length >= 5 && me >= 0 && me <= 2){ const top = bt[0]; out.push({ w: 8 - me, t: me === 0 ? `${S}${D}mの持ち時計${fmtT(bt[me].t)}はメンバー最速（2位と${(bt[1].t - bt[0].t).toFixed(1)}秒差）` : `${S}${D}mの持ち時計${fmtT(bt[me].t)}はメンバー${me + 1}位（最速の${top.g.name}と${(bt[me].t - top.t).toFixed(1)}秒差）` }); }
+  // ③上がりの脚：同じ芝ダ・距離±200mの上がり3Fのベスト
+  const l3 = g => { const v = runsOf(g).filter(q => q.surface === S && Math.abs(q.dist - D) <= 200).map(q => q.last3f).filter(x => x > 30 && x < 45); return v.length ? Math.min(...v) : null; };
+  const lt = ctx.field.map(g => ({ g, t: l3(g) })).filter(x => x.t != null).sort((a, b) => a.t - b.t), ml = lt.findIndex(x => x.g === f);
+  if (lt.length >= 5 && ml >= 0 && ml <= 1) out.push({ w: 7 - ml, t: ml === 0 ? `この距離帯で使った上がり${lt[0].t.toFixed(1)}秒はメンバー最速` : `この距離帯の上がり${lt[ml].t.toFixed(1)}秒はメンバー2位（最速と${(lt[ml].t - lt[0].t).toFixed(1)}秒差）` });
+  if (L){
+    // ④前走の展開：ペース（前半3F-後半3F）と位置取り
+    const pm = /^(\d+\.\d)-(\d+\.\d)$/.exec(L.pace || ""), c1 = L.passing?.[0], fld = L.field || 0;
+    if (pm && c1 && fld){ const a = +pm[1], b = +pm[2], e = (c1 - 1) / Math.max(1, fld - 1);
+      if (a - b <= -1.5 && e <= 0.3 && L.pos >= 4) out.push({ w: 7, t: `前走はハイペース（前半${a}-後半${b}）を${c1}番手で追いかけて${L.pos}着。前が苦しい流れで、着順ほど内容は悪くない` });
+      else if (a - b >= 1.5 && e >= 0.6 && L.pos >= 4 && L.last3f) out.push({ w: 7, t: `前走はスロー（前半${a}-後半${b}）で${c1}番手の後方から上がり${L.last3f}秒で${L.pos}着。展開が向かなかっただけ` }); }
+    // ⑤着差
+    if (L.pos >= 4 && L.margin != null && L.margin <= 0.6) out.push({ w: 5, t: `前走${L.pos}着でも勝ち馬とは${L.margin < 0.05 ? "タイム差なし" : L.margin.toFixed(1) + "秒差"}` });
+    // ⑥4角からの追い上げ
+    if (L.passing?.length >= 2 && fld && (L.passing[L.passing.length - 1] - L.pos) / fld >= 0.25) out.push({ w: 4, t: `前走は4角${L.passing[L.passing.length - 1]}番手から${L.pos}着まで追い上げた` });
+    // ⑦斤量
+    const kg = +(f.weight ?? f.kg); if (kg > 0 && L.weight > 0 && L.weight - kg >= 2) out.push({ w: 4, t: `斤量${L.weight}kg→${kg}kgと${(L.weight - kg).toFixed(L.weight - kg >= 1 && Number.isInteger(L.weight - kg) ? 0 : 1)}kg軽くなる` });
+    // ⑧叩き2戦目
+    const P2 = R[1]; if (P2 && race.date){ const g1 = (new Date(L.date) - new Date(P2.date)) / 864e5, g0 = (new Date(race.date) - new Date(L.date)) / 864e5; if (g1 >= 90 && g0 <= 60) out.push({ w: 3, t: `約${Math.round(g1 / 30)}か月の休み明けを1度使われての叩き2戦目` }); }
+  }
+  // ⑨コース実績
+  const cr = R.filter(q => q.venue === race.venue && q.surface === S && Math.abs(q.dist - D) <= 200 && q.pos <= 3);
+  if (cr.length) out.push({ w: 4, t: `${race.venue}${S}${D}m前後で3着内${cr.length}回（${cr.slice(0, 2).map(q => `${q.pos}着`).join("・")}）` });
+  return out.sort((a, b) => b.w - a.w).map(x => x.t);
+}
+// ===== 推奨理由（100字以内の1文）：前走の敗因 → 今回の条件変化 → 好走の根拠 をつなげる。使うのは記録にある事実だけ =====
+//  10/17検証：近2走とも10着以下の7番人気以下でも、過去に同じ格以上で連対した「実績馬」は3着内6.8%（実績なし3.6%・同じ人気の平均6.0%）
+function darkStory1018(ctx, f){
+  const race = ctx.race || {}, D = +race.distance, S = race.surface, G = String(race.going || ""), GB = Engine.GRADE_BASE || {};
+  const gT = Engine.gradeOf ? Engine.gradeOf(race.name || "") : null, gv = g => GB[g] ?? null;
+  const JRA = /札幌|函館|福島|新潟|東京|中山|中京|京都|阪神|小倉/;
+  const runsOf = g => (g.prof?.runs || []).filter(q => q.surface !== "障" && q.pos > 0 && q.field > 0 && (!race.date || !q.date || q.date < race.date));
+  const R = runsOf(f), L = R[0]; if (!L) return null;
+  // クラスは「重賞・リステッド」か「○勝クラス・未勝利」と名前で分かるJRAのレースだけ使う（地方や特別戦の名前からの推定は使わない）
+  const rg = q => !q || !JRA.test(q.venue || "") ? null : /^(G1|G2|G3|L)$/.test(q.grade || "") ? q.grade : /1勝/.test(q.race || "") ? "1勝" : /2勝/.test(q.race || "") ? "2勝" : /3勝/.test(q.race || "") ? "3勝" : /未勝利/.test(q.race || "") ? "未勝利" : null;
+  const nm = q => String(q.race || "").replace(/[（(].*?[)）]/g, "").replace(/\s/g, "").slice(0, 10);
+  const dd = (a, b) => (new Date(a) - new Date(b)) / 864e5;
+  let since = null; for (let i = 0; i < R.length - 1; i++){ if (dd(R[i].date, R[i + 1].date) >= 180){ since = i + 1; break; } }
+  const top = R.filter(q => q.pos <= 3), bestD = top.length ? top.reduce((a, q) => a + q.dist, 0) / top.length : null;
+  const recDtop = R.filter(q => q.surface === S && Math.abs(q.dist - D) <= 200 && q.pos <= 3).length;
+  const goodOnlyDry = top.length >= 2 && top.every(q => !/重|不/.test(q.going || ""));
+  const wetL = /重|不/.test(L.going || "") && !/稍/.test(L.going || "");
+  const cause = [], chg = [], ev = [];
+  // ---- 前走の敗因（着順だけでは見えない負けの理由）
+  const pm = /^(\d+\.\d)-(\d+\.\d)$/.exec(L.pace || ""), c1 = L.passing?.[0], e1 = c1 && L.field ? (c1 - 1) / Math.max(1, L.field - 1) : null;
+  const usual = R.slice(1, 6).map(q => q.passing?.[0] && q.field ? (q.passing[0] - 1) / Math.max(1, q.field - 1) : null).filter(v => v != null);
+  const uE = usual.length >= 2 ? usual.reduce((a, b) => a + b, 0) / usual.length : null;
+  const classUp = gT && rg(L) && gv(rg(L)) != null && gv(gT) != null && gv(rg(L)) - gv(gT) >= 4;
+  if (L.pos >= 4){
+    if (since === 2) cause.push(`近2走は長期休養明けからの2戦`);
+    else if (since === 1) cause.push(`前走は約${Math.round(dd(L.date, R[1].date) / 30)}か月ぶりの実戦`);
+    if (pm && e1 != null && +pm[1] - +pm[2] <= -1.5 && e1 <= 0.3) cause.push(`前走${L.pos}着はハイペース（前半${pm[1]}）を${c1}番手で追った展開負け`);
+    else if (pm && e1 != null && +pm[1] - +pm[2] >= 1.5 && e1 >= 0.6) cause.push(`前走${L.pos}着はスローを後方${c1}番手から上がり${L.last3f}で追って届かなかったもの`);
+    else if (uE != null && e1 != null && e1 - uE >= 0.3) cause.push(`前走${L.pos}着は出遅れて普段より後ろの${c1}番手からの競馬`);
+    if (classUp) cause.push(`前走${L.pos}着は${/^G|^L/.test(rg(L)) ? nm(L) + "（" + rg(L) + "）" : rg(L) + "クラス"}で相手が一段上`);
+    if (bestD && Math.abs(L.dist - bestD) >= 400 && Math.abs(D - bestD) < Math.abs(L.dist - bestD)) cause.push(`前走${L.pos}着は得意距離から外れた${L.dist}m`);
+    if (wetL && goodOnlyDry) cause.push(`前走${L.pos}着は${({ 不: "不良", 重: "重" })[String(L.going).slice(0, 1)] || L.going}馬場（好走は良馬場ばかり）`);
+    if (L.margin != null && L.margin <= 0.6) cause.push(`前走${L.pos}着も勝ち馬と${L.margin < 0.05 ? "タイム差なし" : L.margin.toFixed(1) + "秒差"}`);
+  }
+  // ---- 今回の条件変化
+  if (L.dist && Math.abs(D - L.dist) >= 200 && recDtop >= 1) chg.push(`${D > L.dist ? "距離延長" : "距離短縮"}で3着内${recDtop}回の${S}${D}m`);
+  else if (L.dist && D <= L.dist - 400) chg.push(`${L.dist}m→${D}mの大幅短縮`);
+  if (classUp && !cause.some(c => c.includes("相手が一段上"))) chg.push(`${rg(L)}から${gT}への格下げ`);
+  if (L.surface && L.surface !== S && R.some(q => q.surface === S && q.pos <= 3)) chg.push(`得意の${S}替わり`);
+  if (L.pos >= 4 && wetL && goodOnlyDry && /良/.test(G)) chg.push(`良馬場替わり`);
+  const kg = +(f.weight ?? f.kg); if (kg > 0 && L.weight > 0 && L.weight - kg >= 2) chg.push(`斤量${L.weight - kg}kg減`);
+  if (since === 2) chg.push(`休み明け3戦目`); else if (since === 1) chg.push(`叩き2戦目`);
+  try { const pf = Engine.paceForecast(ctx), st = f.prof?.style;
+    if ((st === "逃げ" || st === "先行") && pf.best === "slow") chg.push(`スロー想定で${st}有利`);
+    else if ((st === "差し" || st === "追込") && pf.best === "high") chg.push(`先行争いが激しく${st}有利`);
+    else if (st === "逃げ" && (pf.frontCount ?? 9) <= 1) chg.push(`単騎逃げが濃厚`); } catch (e) {}
+  const cr = R.filter(q => q.venue === race.venue && q.surface === S && q.pos <= 3).length; if (cr >= 2) chg.push(`${race.venue}${S}は3着内${cr}回`);
+  // ---- 好走の根拠（実績・時計・上がり・相手関係）
+  // 直接対決：今回人気が上の馬に、いちばん最近の対戦で先着している（2勝以上で勝ち越しは、同じ人気より3着内が約3割多い）
+  const h2h = f.h2h, beatUp = (h2h?.list || []).filter(o => o.win && o.pop && f.pop && +o.pop < +f.pop);
+  if (beatUp.length && h2h.beat > h2h.lost){ const same = beatUp.every(o => o.date === beatUp[0].date && o.race === beatUp[0].race), q = beatUp[0];
+    const where = same ? `${String(q.date).slice(5).replace("-", "/")}の${q.venue}${q.surface}${q.dist}m${/新馬|未勝利/.test(q.race) ? (q.race.includes("新馬") ? "新馬戦" : "未勝利戦") : ""}で` : "直接対決で";
+    ev.unshift(`${where}今回人気上位の${beatUp.slice(0, 3).map(o => o.name).join("・")}${beatUp.length > 3 ? `ら${beatUp.length}頭` : ""}に先着済み`); }
+  const proven = R.filter(q => q.pos <= 2 && rg(q) && gv(rg(q)) != null && gv(gT) != null && gv(rg(q)) >= gv(gT)).sort((a, b) => gv(rg(b)) - gv(rg(a)) || a.pos - b.pos)[0];
+  const bad2 = R[0]?.pos >= 10 && R[1]?.pos >= 10;
+  if (proven){ const g0 = rg(proven), head = /^G|^L/.test(g0) ? `${proven.date.slice(0, 4)}年${nm(proven)}（${g0}）${proven.pos}着` : `${g0 === gT ? "同じ" : "格上の"}${g0}クラスで${proven.pos === 1 ? "勝ち" : "連対"}`;
+    ev.push(bad2 ? `${head}の実績馬が大敗続きで人気を落とした形` : `${head}の実績がある`); }
+  try { if (L.raceId){ const idx = raceIndex(), mates = (idx[L.raceId] || []).filter(m => m.name !== f.name);
+      const beat = mates.filter(m => +m.run.pos > L.pos && (m.runs || []).some(q => q.date > L.date && (!race.date || q.date < race.date) && +q.pos === 1)).sort((a, b) => a.run.pos - b.run.pos)[0];
+      if (beat) ev.push(`前走で負かした${beat.name}がその後勝利`); } } catch (e) {}
+  const best = g => { const v = runsOf(g).filter(q => q.surface === S && +q.dist === D).map(q => tsecOf(q.time)).filter(x => x > 20); return v.length ? Math.min(...v) : null; };
+  const bt = ctx.field.map(g => ({ g, t: best(g) })).filter(x => x.t != null).sort((a, b) => a.t - b.t), me = bt.findIndex(x => x.g === f);
+  if (bt.length >= 5 && me >= 0 && me <= 1) ev.push(me === 0 ? `同距離の持ち時計${fmtT(bt[0].t)}はメンバー最速` : `同距離の持ち時計はメンバー2位（最速と${(bt[1].t - bt[0].t).toFixed(1)}秒差）`);
+  const l3 = g => { const v = runsOf(g).filter(q => q.surface === S && Math.abs(q.dist - D) <= 200).map(q => q.last3f).filter(x => x > 30 && x < 45); return v.length ? Math.min(...v) : null; };
+  const lt = ctx.field.map(g => ({ g, t: l3(g) })).filter(x => x.t != null).sort((a, b) => a.t - b.t);
+  if (lt.length >= 5 && lt[0].g === f) ev.push(`この距離帯の上がり${lt[0].t.toFixed(1)}はメンバー最速`);
+  // ---- 1文にまとめる（100字以内）：敗因 → 条件変化 → 根拠
+  const len = t => [...t].length, C = cause[0] || null, C2 = cause.find(c => c !== C && !c.startsWith("前走" + L.pos + "着も")) || null;
+  const build = (c, ch, e) => {
+    if (c && ch.length && e) return `${c}。${ch.join("、")}の今回は、${e}。`;
+    if (c && ch.length) return `${c}。今回は${ch.join("、")}で見直せる。`;
+    if (c && e) return `${c}。${e}。着順ほど力差はない。`;
+    if (ch.length && e) return `${ch.join("、")}と条件がそろう今回は、${e}。`;
+    return null; };
+  const CH = chg.slice(0, 2), E = ev[0] || null, E2 = ev[1] || null;
+  const tries = [[C, CH, E], [C, CH.slice(0, 1), E], [C2, CH, E], [C2, CH.slice(0, 1), E], [C, CH.slice(0, 1), E2], [null, CH, E], [null, CH.slice(0, 1), E], [C, CH, null], [C, [], E], [C, CH.slice(0, 1), null]];
+  for (const [c, ch, e] of tries){ const t = build(c, ch, e); if (t && len(t) <= 100 && len(t) >= 30) return t; }
+  return null;
+}
+// ===== 注目穴馬の推奨文（2026-10-18）：その馬について記録から言える事実を全部集め、強い順に100字前後の文章にする。
+//  事実が2つ未満（推奨できる材料がない）の馬は注目穴馬にしない
+function darkFacts1018(ctx, f){
+  const race = ctx.race || {}, D = +race.distance, S = race.surface, out = [], p = f.prof || {}, F = ctx.field || [];
+  const add = (w, t, tag) => { if (t && !out.some(o => o.tag === tag)) out.push({ w, t, tag }); };
+  // 推奨の1文（敗因→条件変化→根拠）。あれば2つ分の重みとして数える
+  let story = null; try { story = darkStory1018(ctx, f); } catch (e) {}
+  try { darkInsight1018(ctx, f).forEach(t => {
+    const tag = /負かした|勝ち上がり|その後1着/.test(t) ? "level" : /持ち時計/.test(t) ? "time" : /上がり/.test(t) && /メンバー/.test(t) ? "l3" : /ハイペース|スロー/.test(t) ? "pace" : /着でも勝ち馬/.test(t) ? "margin" : /追い上げ/.test(t) ? "gain" : /斤量/.test(t) ? "kg" : /叩き2戦目/.test(t) ? "rest" : /3着内/.test(t) ? "course" : "x";
+    const w = { level: 9, time: 8, l3: 7, pace: 7, margin: 5, gain: 4, kg: 4, rest: 3, course: 4 }[tag] || 3; add(w, t.replace(/。.*$/, ""), tag); }); } catch (e) {}
+  // 直接対決
+  const up = (f.h2h?.list || []).filter(o => o.win && o.pop && f.pop && +o.pop < +f.pop);
+  if (up.length && f.h2h.beat > f.h2h.lost) add(9, `直接対決で今回人気上位の${up.slice(0, 2).map(o => o.name).join("・")}に先着済み`, "h2h");
+  // スピード指数・能力のメンバー順位
+  const rank = (val, key) => { const v = F.map(g => g.prof?.[key]).filter(x => x != null && isFinite(x)).sort((a, b) => b - a); return val != null && v.length >= 5 ? v.indexOf(val) + 1 : null; };
+  const sr = rank(p.speedFig, "speedFig"); if (sr && sr <= 3) add(sr === 1 ? 8 : 6, `近走のスピード指数はメンバー${sr}位`, "fig");
+  const ar = rank(p.ability, "ability"); if (ar && ar <= 3 && (!sr || sr > 3)) add(5, `近走の内容から見た能力はメンバー${ar}位`, "abil");
+  // 得意距離
+  if (p.distCenter && Math.abs(p.distCenter - D) <= 150 && (f.adj?.距離 || 0) > 0.3) add(4, `好走の中心が${p.distCenter}m前後で、今回の${D}mはぴったり`, "dist");
+  // 血統の適性（エンジンの理由をそのまま）
+  (p.blood?.why || []).filter(t => /得意/.test(t)).slice(0, 1).forEach(t => add(3, t, "blood"));
+  // 展開
+  try { const pf = Engine.paceForecast(ctx), st = p.style;
+    if ((st === "逃げ" || st === "先行") && (pf.frontCount ?? 9) <= 2) add(5, `前に行く馬が少なく（${pf.frontCount}頭）、${st}でマイペースに運べそう`, "pace2");
+    else if ((st === "差し" || st === "追込") && pf.best === "high") add(5, `先行争いが激しくなりそうで、${st}の脚が生きる`, "pace2"); } catch (e) {}
+  return { story, facts: out.sort((a, b) => b.w - a.w) };
+}
+function darkText1018(ctx, f, maxLen = 110){
+  const { story, facts } = darkFacts1018(ctx, f), len = t => [...t].length;
+  const n = (story ? 2 : 0) + facts.length; if (n < 2) return null;
+  let t = story || ""; const used = new Set();
+  const KW = { time: /持ち時計/, l3: /上がり[\d.]+(秒)?はメンバー/, level: /負かした|勝ち上がり|その後勝利|その後1着/, h2h: /先着済み/, pace: /ハイペース|スロー/, margin: /勝ち馬と/, gain: /追い上げ/, kg: /斤量/, rest: /叩き2戦目|休み明け3戦目/, course: /で3着内\d+回|は3着内\d+回/, dist: /得意距離|ぴったり/ };
+  for (const x of facts){ if (story && KW[x.tag] && KW[x.tag].test(story)) continue; const add = (t ? "" : "") + x.t + "。"; if (len(t + add) > maxLen) continue; t += add; used.add(x.tag); }
+  return t || null;
+}
+// ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
+//  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
+//  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
+const APP_BUILD = "20261021c";   // 画面で確かめる版（予想ロジックは10/18版と同じ）
+const PRE25 = { busy: false, msg: "", res: null,
+  hit: { mu: [3.37976, 11.89168, 14.55231], s: [0.68478, 4.63845, 2.34832], w: [-0.42417, -0.23955, -0.06202], b: -1.92086 }, ca: 1.0949232, cb: 0.2081896 };
+const pre25Pev = (f, n) => { if (!f || !f.pl || !f.ph || !(f.odds > 1)) return null; const x = [Math.log(f.odds), Math.log(f.odds) ** 2, n]; let z = PRE25.hit.b; for (let j = 0; j < 3; j++) z += PRE25.hit.w[j] * (x[j] - PRE25.hit.mu[j]) / PRE25.hit.s[j]; return 1 / (1 + Math.exp(-z)) * (PRE25.ca * f.pl + PRE25.cb * (f.ph - f.pl)); };
+function darkCandidates(ctx, stats, avgStats){
+  const longGain = f => { const e = (ctx.race?.entries || []).find(q => +q.num === +f.num), bd = e?.bwDiff ?? f.bwDiff, L = f.prof?.runs?.[0]; const days = L?.date && ctx.race?.date ? (new Date(ctx.race.date) - new Date(L.date)) / 864e5 : null; return (f.pop || 0) >= 7 && bd != null && bd >= 10 && days != null && days >= 90; };
+  const trD = f => /^D/.test(f.training?.grade || "");
+  const candA = ctx.field.map((f, i) => ({ f, i, a: avgStats[i] })).filter(x => x.f.odds > 1 && (x.f.pop ? x.f.pop >= 5 : x.f.odds >= 10) && !longGain(x.f));
+  const cand0 = candA.some(x => !trD(x.f)) ? candA.filter(x => !trD(x.f)) : candA;
+  const top3 = avgStats.map((a, i) => ({ i, w: a.win })).sort((a, b) => b.w - a.w).slice(0, 3).map(q => q.i);
+  const conf = cand0.filter(x => top3.includes(x.i)).sort((a, b) => (b.a.top3 - a.a.top3) || (a.f.pop - b.f.pop));
+  const rest = cand0.filter(x => !top3.includes(x.i)).sort((a, b) => (b.a.top3 - a.a.top3) || (a.f.odds - b.f.odds));
+  return [...conf, ...rest].map(x => { let ok = false, nf = 0; try { ok = !!darkText1018(ctx, x.f); const d = darkFacts1018(ctx, x.f); nf = (d.story ? 2 : 0) + d.facts.length; } catch (e) {} return { num: x.f.num, ok, nf }; });
+}
+async function prereg2025(){
+  if (PRE25.busy || RS.busy || BATCH.running) return; PRE25.busy = true; PRE25.msg = "確認中"; renderLearnTab();
+  const keepRaces = DB.races, keepHorses = DB.horses, keepModel = LEARN.model;
+  try {
+    const fz = await api("/api/research/frozen", { timeout: 300000 });
+    if (!fz?.model && !fz?.lock?.model) throw new Error("凍結したモデルがありません（先に「今のモデルを凍結して2025年を取っておく」を押してください）");
+    if (!(fz.holdoutYears || []).includes("2025")) throw new Error("2025年が独立評価用に取っておかれていません");
+    if (fz.learnHoldoutRecords > 0) throw new Error(`学習の記録に2025年が${fz.learnHoldoutRecords}件あります。独立評価は成立しません`);
+    await rsLoad(); if ((RS.st?.holdoutUsed || []).includes("2025")) throw new Error("2025年の独立評価はすでに実行済みです");
+    const st = await api("/api/backfill/status"); const days = (st.holdoutDays || []).filter(d => d.startsWith("2025")).sort();
+    if (!days.length) throw new Error("2025年の開催日がまだ取り込まれていません（「過去データで学習」で2025年の期間を取得してください）");
+    while (simBusy) await new Promise(r => setTimeout(r, 200));
+    applyLearn(fz.lock?.model || fz.model);
+    const rows = [];
+    for (let di = 0; di < days.length; di++){
+      PRE25.msg = `評価中 ${di + 1}/${days.length}開催日（画面の操作はしないでください）`; if (di % 3 === 0) renderLearnTab();
+      const j = await api("/api/backfill/day?date=" + days[di], { timeout: 180000 }).catch(() => null); if (!j?.races) continue;
+      DB.races = {}; j.races.forEach(r => DB.races[r.id] = { ...r, date: r.date || j.date }); DB.horses = j.horses || {}; RACE_IDX = null;   // 前の日の索引を使い回さない
+      for (const r of j.races){ const res = r.result; if (!res?.rows?.length || !r.entries?.length || !res.pay || (r.surface !== "芝" && r.surface !== "ダ")) continue;
+        await runSim(true, { id: r.id, runs: 1000 }); const S = ST.sims[r.id]; if (!S) continue;
+        const L = darkCandidates(S.ctx, S.res.stats, S.weighted); const pos = Object.fromEntries(res.rows.map(x => [x.num, x]));
+        const F = S.ctx.field.map(f => { const e = r.entries.find(q => +q.num === +f.num) || {}; return { num: f.num, pop: +(pos[f.num]?.pop || 0), odds: +(pos[f.num]?.odds || 0), pl: e.placeLo || null, ph: e.placeHi || null }; });
+        rows.push({ date: r.date || j.date, id: r.id, n: F.length, dark: S.dark ? S.dark.f.num : null, L, F, pay: res.pay, order: res.order });
+        delete ST.sims[r.id]; delete ST.lastSims?.[r.id]; delete BATCH.rows[r.id]; }
+    }
+    PRE25.res = pre25Score(rows);
+    await api("/api/research", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ holdoutUsed: ["2025"], experiment: { id: Date.now(), at: new Date().toISOString(), kind: "prereg", years: ["2025"], frozen: fz.meta, result: PRE25.res } }) });
+    await rsLoad(); PRE25.msg = "2025年の独立評価を記録しました（以後この年は評価に使いません）";
+  } catch (e) { PRE25.msg = "実行しませんでした：" + e.message; }
+  finally { DB.races = keepRaces; DB.horses = keepHorses; RACE_IDX = null; if (keepModel) applyLearn(keepModel); PRE25.busy = false; renderLearnTab(); }
+}
+function pre25Score(rows){
+  const top3 = r => new Set((r.order || []).slice(0, 3)), pay = (r, n) => r.pay?.複勝?.[String(n)] || 0;
+  const base = {}; rows.forEach(r => { const t = top3(r); r.F.forEach(f => { const k = Math.min(f.pop, 16); const g = (base[k] ||= { n: 0, y: 0 }); g.n++; g.y += t.has(f.num) ? 1 : 0; }); });
+  const H = { H1: [], H2: [], H2base: [], H3: [], H4: [] };
+  rows.forEach(r => { const Fm = Object.fromEntries(r.F.map(f => [f.num, f])); const ok = r.L.filter(x => x.ok); const A = ok[0];
+    if (r.n >= 8){ const c = r.F.filter(f => f.pop >= 5 && f.odds < 100 && f.pl && f.ph).map(f => ({ f, v: pre25Pev(f, r.n) })).filter(x => x.v >= 1.01).sort((a, b) => b.v - a.v); if (c.length) H.H1.push({ r, num: c[0].f.num }); }
+    if (A){ H.H2base.push({ r, num: A.num }); const v = pre25Pev(Fm[A.num], r.n); if (v != null && v >= 1.0) H.H2.push({ r, num: A.num }); if (A.nf >= 4) H.H3.push({ r, num: A.num });
+      const b = ok.slice().sort((x, y) => (pre25Pev(Fm[y.num], r.n) ?? -1) - (pre25Pev(Fm[x.num], r.n) ?? -1))[0]; if (b) H.H4.push({ r, num: b.num }); } });
+  const summ = arr => { const n = arr.length; if (!n) return { n: 0 }; let h = 0, e = 0, ret = 0; const pays = [], byM = {};
+    arr.forEach(({ r, num }) => { const f = r.F.find(z => z.num === num), b = base[Math.min(f.pop, 16)], y = top3(r).has(num) ? 1 : 0, p = pay(r, num); h += y; e += b.y / b.n; ret += p; if (p) pays.push(p); const m = r.date.slice(0, 7); const g = (byM[m] ||= { n: 0, ret: 0 }); g.n++; g.ret += p; });
+    const v = []; for (let k = 0; k < 2000; k++){ let s = 0; for (let i = 0; i < n; i++) s += pay(arr[Math.random() * n | 0].r, arr[Math.random() * n | 0].num); v.push(s / n); }
+    v.sort((a, b) => a - b); pays.sort((a, b) => b - a);
+    return { n, races: new Set(arr.map(x => x.r.id)).size, hit: +(h / n * 100).toFixed(1), lift: +(h / e).toFixed(3), invest: n * 100, ret, roi: +(ret / n).toFixed(1), ci95: [+v[50].toFixed(0), +v[1949].toFixed(0)], roiExTop3: +((ret - pays.slice(0, 3).reduce((a, c) => a + c, 0)) / n).toFixed(1), byMonth: Object.fromEntries(Object.entries(byM).map(([m, g]) => [m, +(g.ret / g.n).toFixed(0)])) }; };
+  return { races: rows.length, H1: summ(H.H1), H2: summ(H.H2), H2base: summ(H.H2base), H3: summ(H.H3), H4: summ(H.H4) };
+}
+async function freeze2025(){
+  try { const j = await api("/api/research", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "freeze", years: ["2025"] }) });
+    PRE25.msg = j?.ok ? `凍結しました（学習の記録 ${j.meta.records.toLocaleString()}件・${j.meta.recordDates.join("〜")}・指紋 ${j.meta.sha256.slice(0, 12)}）。2025年は自動学習に使われません` : (j?.message || "凍結できませんでした");
+  } catch (e) { PRE25.msg = "凍結できませんでした：" + e.message; }
+  PRE25.fz = null; renderLearnTab();
+}
+const ODDSLOG = { st: null, loading: false };
+function preregPanel(){
+  if (!SERVER.enabled || SERVER.cloud) return "";
+  if (!PRE25.fz && !PRE25.fzLoading){ PRE25.fzLoading = true; api("/api/research/frozen").then(j => { PRE25.fz = j || {}; PRE25.fzLoading = false; if (ST.tab === "learn") renderLearnTab(); }).catch(() => { PRE25.fz = {}; PRE25.fzLoading = false; }); }
+  if (!ODDSLOG.st && !ODDSLOG.loading){ ODDSLOG.loading = true; api("/api/oddslog").then(j => { ODDSLOG.st = j || {}; ODDSLOG.loading = false; if (ST.tab === "learn") renderLearnTab(); }).catch(() => { ODDSLOG.st = {}; ODDSLOG.loading = false; }); }
+  const fz = PRE25.fz || {}, used = (RS.st?.holdoutUsed || []).includes("2025"), R = PRE25.res || (RS.st?.experiments || []).filter(x => x.kind === "prereg").at(-1)?.result;
+  const ol = ODDSLOG.st?.dates || [], f = x => x?.n ? `${x.n}頭・3着内${x.hit}%（同じ人気の${x.lift}倍）・投資${x.invest.toLocaleString()}円・払戻${x.ret.toLocaleString()}円・回収${x.roi}%（95%: ${x.ci95.join("〜")}%・上位3除く${x.roiExTop3}%）` : "対象なし";
+  return `<div class="learnbox"><h3>2025年の独立評価と、発走前オッズの記録 <span class="small">アプリの版 ${APP_BUILD}</span></h3>
+    <p class="small">凍結：${fz.meta ? `${esc(fz.meta.at)}・学習の記録 ${fz.meta.records.toLocaleString()}件（${esc(fz.meta.recordDates.join("〜"))}）・指紋 ${esc(fz.meta.sha256.slice(0, 12))}` : "まだ"}／取っておく年：${esc((fz.holdoutYears || []).join("・") || "なし")}／学習の記録にある2025年：${fz.learnHoldoutRecords ?? "—"}件／評価：${used ? "実行済み" : "未実行"}</p>
+    <div class="ctrls">${fz.meta ? "" : `<button class="btn" id="pre25Freeze">今のモデルを凍結して2025年を取っておく</button>`}<button class="btn" id="pre25Run" ${!fz.meta || used || PRE25.busy ? "disabled" : ""}>2025年の独立評価（1回だけ）</button></div>
+    ${PRE25.msg ? `<p class="small">${esc(PRE25.msg)}</p>` : ""}
+    ${R ? `<ul class="small"><li>H1 複勝妙味ルール：${f(R.H1)}</li><li>H2 注目穴馬で見込み1.0以上：${f(R.H2)}（比較：注目穴馬すべて ${f(R.H2base)}）</li><li>H3 推奨材料4つ以上：${f(R.H3)}</li><li>H4 候補内で見込み最大の1頭：${f(R.H4)}</li></ul>` : ""}
+    <p class="small"><b>発走前オッズの記録</b>（取得プログラム ${esc(ODDSLOG.st?.collector || "—")}）：${ol.length ? ol.slice(-6).reverse().map(d => `${esc(d.date.slice(4, 6))}/${esc(d.date.slice(6))} ${d.racesWithPrePlace}/${d.races}レース（複勝オッズ付き${d.placeSnapshots}件）`).join("・") : "記録なし"}</p></div>`;
+}
+function bindPrereg(){ const a = $("#pre25Freeze"); if (a) a.onclick = () => freeze2025(); const b = $("#pre25Run"); if (b) b.onclick = () => { if (!PRE25.armed){ PRE25.armed = true; toast("2025年の独立評価は1回だけです。もう一度押すと実行します"); setTimeout(() => PRE25.armed = false, 8000); return; } PRE25.armed = false; prereg2025(); }; }
+
 function renderLearnTab(){
   if (!JRAC.st && !JRAC.loading && SERVER.enabled && !SERVER.cloud){ JRAC.loading = true; jraStatus().then(() => { if (ST.tab === "learn") renderLearnTab(); }); }
   const el = $("#p-learn"); if (!el) return;
   if (!BF.status && !BF.loading && SERVER.enabled && !SERVER.cloud && SERVER.on){ BF.loading = true; bfRefresh().then(() => { BF.loading = false; if (ST.tab === "learn") renderLearnTab(); }); }
   const m = LEARN.model, d = ST.date;
   const dates = m?.hist || [];
-  el.innerHTML = `
+  el.innerHTML = `${preregPanel()}${researchPanel()}
     <div class="learnbox"><h3>蓄積しているデータ</h3>
       ${m ? `<p>答え合わせ済み <b>${m.races}レース</b>（${dates.length}開催日）・最終更新 ${esc(new Date(m.updated).toLocaleString("ja-JP"))}</p>
       <div class="tbl-wrap"><table><thead><tr><th>開催日</th><th class="r">記録したレース</th><th class="r">1着の当てやすさ：モデル</th><th class="r">オッズ</th><th class="r">統合</th></tr></thead>
@@ -7282,6 +7724,7 @@ function renderLearnTab(){
   document.querySelectorAll?.("[data-hist]").forEach(el => el.onchange = el.oninput = () => { HIST[el.dataset.hist] = el.type === "checkbox" ? el.checked : el.value; HIST.page = 0; renderLearnTab(); });
   document.querySelectorAll?.("[data-hpage]").forEach(el => el.onclick = () => { HIST.page = Math.max(0, HIST.page + +el.dataset.hpage); renderLearnTab(); });
   const bsel = $("#biasSel"); if (bsel) bsel.onchange = e => { LS.set("keibaBiasMode", e.target.value); Object.keys(ST.sims).forEach(markStale); renderLearnTab(); toast("馬場の偏りの反映を切り替えました。予想し直すと反映されます"); };
+  bindResearch(); bindPrereg();
   const rb = $("#reBatch"); if (rb) rb.onclick = async () => { CHECK_MODE.v = "latest"; await runBatch(true); showCheck(ST.date); };
 }
 async function loadLearn(){
@@ -7732,7 +8175,7 @@ function renderAllTab(){
       ${x.oddsAsOf ? `<div class="cond">オッズ ${esc(x.oddsAsOf)} 時点</div>` : ""}
       ${(() => { const c = CHECK[d]?.per?.[r.id]; const moR = x.mo5?.length && r.result?.pay ? (() => { const inv = x.mo5.reduce((a, t) => a + t.stake, 0), ret = x.mo5.reduce((a, t) => a + payOf(t, r.result), 0); return `<br>★本命ルール（馬連${x.mo5[0].nums.join("-")}・${inv.toLocaleString()}円） <b class="${ret >= inv ? "pos" : "neg"}">${ret - inv >= 0 ? "+" : "−"}${Math.abs(Math.round(ret - inv)).toLocaleString()}円</b>`; })() : ""; if (!c) return r.result ? `<div class="resline">結果 <b>${r.result.order.slice(0, 3).join("→")}</b>${moR}</div>` : ""; const pl = k => c.plans[k] ? `${c.plans[k].ret - c.plans[k].inv >= 0 ? "+" : "−"}${Math.abs(Math.round(c.plans[k].ret - c.plans[k].inv)).toLocaleString()}円` : "見送り";
         return `<div class="resline">結果 <b>${c.order.join("→")}</b>　◎${c.favPos ? c.favPos + "着" : "着外"}${moR}</div>`; })()}
-      <div class="foot"><button class="btn" data-open="${r.id}">詳しく見る・3D再生</button> <button class="btn" data-img="${r.id}">画像を作る</button></div>
+      <div class="foot"><button class="btn" data-open="${r.id}">詳しく見る・3D再生</button> <button class="btn" data-img="${r.id}">画像を作る</button>${SERVER.on && !SERVER.cloud && raceStart(r) > new Date() ? ` <button class="btn" data-odds1="${r.id}" ${SERVER.status?.running || BATCH.running ? "disabled" : ""}>このレースのオッズだけ更新</button>` : ""}</div>
     </div>`;
   };
   const done = list.map(rowOf).filter(x => x && x.marks?.length);
@@ -7777,6 +8220,7 @@ function renderAllTab(){
   const pcb = el.querySelector("#perfCumBtn"); if (pcb) pcb.onclick = () => { PERF.want = true; renderAllTab(); };
   const ca = el.querySelector("#checkAll"); if (ca) ca.onclick = () => checkAllDates();
   el.querySelectorAll("[data-img]").forEach(b => b.onclick = () => showRaceImage(b.dataset.img));
+  el.querySelectorAll("[data-odds1]").forEach(b => b.onclick = () => startOddsRace(b.dataset.odds1));
   el.querySelectorAll("[data-w5]").forEach(sl => sl.onchange = () => { const a = W5.pick[d].slice(); a[+sl.dataset.w5] = sl.value; W5.pick[d] = a; renderAllTab(); });
   el.querySelectorAll("[data-open]").forEach(b => b.onclick = () => { ST.raceId = b.dataset.open; ST.venue = DB.races[ST.raceId]?.venue; renderVenues(); renderAll(); setTab(ST.sims[ST.raceId] ? "result" : "card"); window.scrollTo({ top: 0, behavior: "smooth" }); });
 }

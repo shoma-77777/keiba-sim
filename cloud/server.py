@@ -46,6 +46,32 @@ def next_sunday(today=None):
 
 def snapshot_path(ymd): return DATA / f"races_{ymd}.json"
 
+# ===== 独立評価に取っておく年（2026-10-21）：この年の開催日は自動学習・答え合わせの学習に使わない =====
+def holdout_years():
+    fp = DATA / "research_holdout.json"
+    try: return set(json.loads(fp.read_text(encoding="utf-8")).get("years") or []) if fp.exists() else set()
+    except Exception: return set()
+def is_holdout(date_str):
+    ys = holdout_years(); d = re.sub(r"\D", "", str(date_str or ""))
+    return bool(ys) and d[:4] in ys
+# 発走前オッズの記録状況（直近の開催の保存ファイルを数える）
+def oddslog_status(days=60):
+    out = {"collector": getattr(kc, "COLLECTOR_VER", "旧版"), "dates": []}
+    for fp in sorted(DATA.glob("races_*.json"))[-days:]:
+        try: snap = json.loads(fp.read_text(encoding="utf-8"))
+        except Exception: continue
+        races = snap.get("races") or []; nr = npl = nent = 0; first = last = None
+        for r in races:
+            m = re.match(r"(\d{1,2}):(\d{2})", r.get("postTime") or "")
+            post = f"{r.get('date')} {int(m.group(1)):02d}:{m.group(2)}" if m and r.get("date") else None
+            pre = [h for e in (r.get("entries") or []) for h in (e.get("oddsHist") or []) if post and str(h.get("t", ""))[:16] <= post]
+            withpl = [h for h in pre if h.get("pl") is not None]
+            if pre: nr += 1
+            if withpl: npl += 1
+            nent += len(withpl)
+        out["dates"].append({"date": fp.stem[6:], "races": len(races), "racesWithPreOdds": nr, "racesWithPrePlace": npl, "placeSnapshots": nent})
+    return out
+
 CUSHION_FILE = DATA / "cushion.json"
 def cushion_label(c):
     # JRAの区分：12以上 硬め／10〜12 やや硬め／8〜10 標準／7〜8 やや軟らかめ／7以下 軟らかめ
@@ -56,7 +82,7 @@ def fetch_cushion(f):
     当日の朝（7時ごろ）に発表される値を、その日のレースに使う。戻り値: 蓄積済みの {"obs": {"YYYY-MM-DD|競馬場": {...}}}"""
     store = json.loads(CUSHION_FILE.read_text(encoding="utf-8")) if CUSHION_FILE.exists() else {"obs": {}}
     try:
-        html = f.get("https://www.jra.go.jp/keiba/baba/_data_cushion.html", ttl_hours=0.5, encoding="shift_jis")
+        html = f.get("https://www.jra.go.jp/keiba/baba/_data_cushion.html", ttl_hours=0.1, encoding="shift_jis")
         sp = kc.soup(html); today = dt.date.today()
         for blk in sp.select("div[id^=rc]"):
             venue = (blk.get("title") or "").strip()
@@ -137,25 +163,56 @@ def update_results(ymd):
     finally:
         with LOCK: JOB.update(running=False, finished_at=dt.datetime.now().astimezone().isoformat(timespec="seconds"))
 
-def update_date(ymd, odds_only=False):
-    """指定日の全レースを取得してDBとJSONに保存"""
+def update_date(ymd, odds_only=False, race_ids=None):
+    """指定日の全レースを取得してDBとJSONに保存。race_ids を渡すとオッズ更新をそのレースだけにする（2026-10-24）"""
     f = kc.Fetcher(delay=1.2)
     date = dt.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:]))
     with LOCK:
-        JOB.update(running=True, date=ymd, step="レース一覧", done=0, total=0, error=None, kind="odds" if odds_only else "full", log=[])
+        JOB.update(running=True, date=ymd, step="レース一覧", done=0, total=0, error=None, kind=("odds1" if race_ids else "odds") if odds_only else "full", races=list(race_ids or []), log=[])
     try:
         snap = json.loads(snapshot_path(ymd).read_text(encoding="utf-8")) if snapshot_path(ymd).exists() else None
         if odds_only:
             if not snap: raise RuntimeError("先に「この日の全レースを取得」を実行してください")
             races = snap["races"]
-            with LOCK: JOB.update(step="オッズ更新", total=len(races))
+            if race_ids:
+                races = [r for r in races if r.get("id") in race_ids]
+                if not races: raise RuntimeError("指定のレースがこの日のデータにありません")
             ok, errs = 0, []
             # 当日朝に発表されるクッション値を取り込む（発表前は平均値で計算）
             try:
-                tr = fetch_track(f, ymd, sorted({r["venue"] for r in races if r.get("entries")}))
+                tr = fetch_track(f, ymd, sorted({r["venue"] for r in races if r.get("entries")}))   # 1レースだけの更新でも、その競馬場の分を取り込む（10/24）
                 if tr: snap.setdefault("track", {}); [snap["track"].setdefault(k, {}).update(v) for k, v in tr.items()]
             except Exception as ex: log(f"クッション値の取り込みをスキップ: {ex}")
             fin = 0
+            # 10/24：1レースだけの更新でも、同じ競馬場・芝ダで発走済みなのに結果が未取得のレースは結果を取る
+            #  （画面側の「当日の偏り（前残り・差し）」は、そのレースより前に終わった同じ競馬場・芝ダの結果から計算するため）
+            if race_ids:
+                keys = {(x.get("venue"), x.get("surface")) for x in races}
+                for r in snap["races"]:
+                    if r.get("id") in race_ids or not r.get("entries") or (r.get("venue"), r.get("surface")) not in keys: continue
+                    if race_started(ymd, r, 15) and not (r.get("result") or {}).get("rows"):
+                        try:
+                            if finalize_race(f, r): fin += 1
+                        except Exception as ex: print(f"  結果の取得スキップ ({r['id']}): {ex}")
+                if fin: log(f"同じ競馬場・芝ダの終わったレースの結果を{fin}レース取り込みました（当日の偏りに使う）")
+            # 10/24：当日の馬場状態（良→稍重など）は、オッズ更新のたびに読み直す。
+            #  競馬場×芝ダごとに、まだ発走していない最初のレースの出馬表を毎回取り直し（キャッシュなし）、同じ競馬場・芝ダの残りのレースにも反映する
+            if ymd == dt.date.today().strftime("%Y%m%d"):
+                allr = snap["races"]; seen = {}
+                for r in allr:
+                    key = (r.get("venue"), r.get("surface"))
+                    if not r.get("entries") or key in seen or race_started(ymd, r, 0): continue
+                    if race_ids and key not in {(x.get("venue"), x.get("surface")) for x in races}: continue
+                    try: kc.body_weights(f, r, ttl_hours=0.0); seen[key] = (r.get("going"), r.get("weather"), r.get("goingAt"))
+                    except Exception as ex: print(f"  馬場状態の取得スキップ ({r['id']}): {ex}")
+                for r in allr:
+                    g = seen.get((r.get("venue"), r.get("surface")))
+                    if not g or not g[0] or race_started(ymd, r, 0): continue
+                    if r.get("going") and r["going"] != g[0]: r["goingPrev"] = r["going"]
+                    r["going"] = g[0]; r["goingAt"] = g[2]
+                    if g[1]: r["weather"] = g[1]
+                chg = sorted({f"{v}{sf}：{g[0]}" for (v, sf), g in seen.items() if g[0]})
+                if chg: log("馬場状態（最新）：" + "・".join(chg))
             for i, r in enumerate(races):
                 if r.get("entries") and race_started(ymd, r, 15):
                     # 発走済み：結果と確定オッズを一度だけ取る（その日のあとのレースの「当日の馬場の偏り」に使う）
@@ -166,8 +223,8 @@ def update_date(ymd, odds_only=False):
                     # 開催当日は出馬表を読み直して、最新の馬場状態（朝や雨で変わる）を1時間ごとに反映。
                     # 馬体重（発走の約70分前に発表）は、発表時刻が近づいたら毎回確認する
                     near = race_started(ymd, r, -80) and not all(e.get("bw") for e in r["entries"])
-                    if near or ymd == dt.date.today().strftime("%Y%m%d"):
-                        try: kc.body_weights(f, r, ttl_hours=0.1 if near else 1.0)
+                    if near or (race_ids and ymd == dt.date.today().strftime("%Y%m%d")):
+                        try: kc.body_weights(f, r, ttl_hours=0.0 if race_ids else 0.1)
                         except Exception as ex: print(f"  出馬表（馬場・馬体重）取得スキップ ({r['id']}): {ex}")
                     n, src, err = kc.odds(f, r, ttl_hours=0.02)
                     if n: ok += 1; kc.combo_odds(f, r, ttl_hours=0.02)
@@ -178,6 +235,7 @@ def update_date(ymd, odds_only=False):
             snap["updated"] = dt.datetime.now().astimezone().isoformat(timespec="seconds")
             snapshot_path(ymd).write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
             srcs = sorted({r.get("oddsSrc") for r in races if r.get("oddsSrc")})
+            if race_ids: log(f"{races[0]['venue']}{races[0]['no']}R のオッズを更新しました（{races[0].get('oddsSrc') or ''}・{races[0].get('oddsAsOf') or ''}時点）"); threading.Thread(target=after_update, args=(ymd,), daemon=True).start(); return
             log(f"オッズを更新しました（{ok}/{len(races)}レース・{'/'.join(srcs)}・{max((r.get('oddsAsOf') or '') for r in races)}時点）" + (f"・結果確定{fin}レース" if fin else ""))
             after_update(ymd)
             return
@@ -312,7 +370,19 @@ class Handler(SimpleHTTPRequestHandler):
             s["nextSunday"] = next_sunday().strftime("%Y%m%d"); s["dates"] = [d["date"] for d in collect_db()["dates"]]
             return self._json(s)
         if u.path == "/api/db": return self._json(collect_db())
-        if u.path == "/api/backfill/status": return self._json(bf.status())
+        if u.path == "/api/backfill/status":
+            st = bf.status(); ho = holdout_years()
+            if ho:
+                held = [d for d in st.get("pending", []) if d[:4] in ho]
+                st["pending"] = [d for d in st.get("pending", []) if d[:4] not in ho]; st["holdoutDays"] = held; st["holdoutYears"] = sorted(ho)
+            return self._json(st)
+        if u.path == "/api/oddslog": return self._json(oddslog_status())
+        if u.path == "/api/research/frozen":
+            fp = DATA / "research_frozen_model.json"; o = json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {}
+            ho = holdout_years(); lp = DATA / "learn.json"
+            recs = json.loads(lp.read_text(encoding="utf-8")).get("records", []) if lp.exists() else []
+            o["holdoutYears"] = sorted(ho); o["learnHoldoutRecords"] = sum(1 for r in recs if str(r.get("date", ""))[:4] in ho)
+            return self._json(o)
         if u.path == "/api/backfill/day":
             ymd = re.sub(r"\D", "", (q.get("date") or [""])[0])[:8]
             j = bf.day_data(ymd, races_only=bool(q.get("races"))) if len(ymd) == 8 else None
@@ -325,6 +395,13 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path == "/api/prereg":
             fp = DATA / "prereg.json"
             return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {})
+        if u.path == "/api/research":
+            # 穴馬研究の実験履歴・設定・特徴量の作成状況（中断しても続きから再開できるようにファイルに保存）
+            fp = DATA / "research.json"
+            return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {"experiments": [], "holdoutUsed": [], "featDays": []})
+        if u.path == "/api/research/features":
+            fp = DATA / "research_features.json"
+            return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {"rows": [], "days": []})
         if u.path == "/api/autosearch":
             fp = DATA / "autosearch.json"
             return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {"sets": []})
@@ -362,8 +439,11 @@ class Handler(SimpleHTTPRequestHandler):
             ymd = re.sub(r"\D", "", (q.get("date") or [next_sunday().strftime("%Y%m%d")])[0])[:8]
             if len(ymd) != 8: return self._json({"ok": False, "message": "日付が正しくありません"}, 400)
             if u.path == "/api/results": threading.Thread(target=update_results, args=(ymd,), daemon=True).start()
-            else: threading.Thread(target=update_date, args=(ymd, u.path == "/api/odds"), daemon=True).start()
-            return self._json({"ok": True, "date": ymd})
+            else:
+                rid = [x for x in re.split(r"[,\s]+", (q.get("race") or [""])[0]) if re.fullmatch(r"\d{12}", x)] if u.path == "/api/odds" else []
+                if q.get("race") and not rid: return self._json({"ok": False, "message": "レースの指定が正しくありません"}, 400)
+                threading.Thread(target=update_date, args=(ymd, u.path == "/api/odds", rid or None), daemon=True).start()
+            return self._json({"ok": True, "date": ymd, "races": rid if u.path == "/api/odds" else []})
         if u.path.startswith("/api/cloud/"):
             cm = cloud_mod()
             if not cm: return self._json({"ok": False, "message": "requests が必要です"}, 500)
@@ -407,6 +487,53 @@ class Handler(SimpleHTTPRequestHandler):
                 threading.Thread(target=lambda: _safe(lambda: _push_after(None)), daemon=True).start()   # スマホ・クラウドにも反映
                 return self._json({"ok": True})
             except Exception as ex: return self._json({"ok": False, "message": str(ex)}, 400)
+        if u.path in ("/api/research", "/api/research/features"):
+            n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8") if n else "{}"
+            try:
+                j = json.loads(body or "{}")
+                if u.path == "/api/research/features":
+                    # 特徴量の追記（開催日ごと）。reset=true で作り直し
+                    fp = DATA / "research_features.json"
+                    cur = json.loads(fp.read_text(encoding="utf-8")) if fp.exists() and not j.get("reset") else {"rows": [], "days": [], "meta": {}}
+                    days = set(cur.get("days", []))
+                    add = [r for r in (j.get("rows") or []) if r.get("date", "").replace("-", "") not in days or j.get("reset")]
+                    cur["rows"] = cur.get("rows", []) + add
+                    cur["days"] = sorted(days | set(j.get("days") or []))
+                    if j.get("meta"): cur["meta"] = j["meta"]
+                    tmp = DATA / "research_features.tmp"; tmp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8"); os.replace(tmp, fp)
+                    return self._json({"ok": True, "rows": len(cur["rows"]), "days": len(cur["days"])})
+                if j.get("action") == "freeze":
+                    # 今の学習済みモデルを凍結して保存し、指定の年を独立評価用に取っておく（すでに凍結済みなら上書きしない）
+                    fz = DATA / "research_frozen_model.json"; ho = DATA / "research_holdout.json"
+                    if fz.exists() and not j.get("force"): return self._json({"ok": False, "message": "すでに凍結済みです"}, 400)
+                    lm = DATA / "learn_model.json"; lk = DATA / "lock.json"
+                    model = json.loads(lm.read_text(encoding="utf-8")) if lm.exists() else None
+                    lock = json.loads(lk.read_text(encoding="utf-8")) if lk.exists() else None
+                    years = sorted(set(str(y) for y in (j.get("years") or [])))
+                    recs = json.loads((DATA / "learn.json").read_text(encoding="utf-8")).get("records", []) if (DATA / "learn.json").exists() else []
+                    bad = [r.get("date") for r in recs if str(r.get("date", ""))[:4] in years]
+                    if bad: return self._json({"ok": False, "message": f"学習の記録にすでに{years}年が{len(bad)}件あります。独立評価は成立しません"}, 400)
+                    import hashlib
+                    blob = json.dumps({"model": model, "lock": lock}, ensure_ascii=False, sort_keys=True)
+                    meta = {"at": dt.datetime.now().isoformat(timespec="seconds"), "years": years, "records": len(recs),
+                            "recordDates": [min((r.get("date", "") for r in recs), default=""), max((r.get("date", "") for r in recs), default="")],
+                            "sha256": hashlib.sha256(blob.encode("utf-8")).hexdigest()}
+                    fz.write_text(json.dumps({"meta": meta, "model": model, "lock": lock}, ensure_ascii=False), encoding="utf-8")
+                    ho.write_text(json.dumps({"years": years, "frozenAt": meta["at"], "reason": "独立評価（research_prereg_2025.md）"}, ensure_ascii=False), encoding="utf-8")
+                    return self._json({"ok": True, "meta": meta})
+                fp = DATA / "research.json"
+                cur = json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {"experiments": [], "holdoutUsed": []}
+                # 同じ年の独立評価は1回だけ
+                if j.get("experiment", {}).get("kind") == "prereg" and set(j.get("holdoutUsed") or []) & set(cur.get("holdoutUsed") or []):
+                    return self._json({"ok": False, "message": "この年の独立評価はすでに実行済みです"}, 400)
+                if j.get("experiment"): cur.setdefault("experiments", []).append(j["experiment"])
+                if j.get("config"): cur["config"] = j["config"]
+                # 最終評価に使った期間は取り消せない（一度使ったら記録に残り続ける）
+                if j.get("holdoutUsed"): cur["holdoutUsed"] = sorted(set(cur.get("holdoutUsed", [])) | set(j["holdoutUsed"]))
+                tmp = DATA / "research.tmp"; tmp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8"); os.replace(tmp, fp)
+                return self._json({"ok": True, "experiments": len(cur.get("experiments", []))})
+            except Exception as e:
+                return self._json({"ok": False, "message": str(e)}, 400)
         if u.path == "/api/prereg":
             # 本番テストの封印：seal＝見た日とルールを固定（開封済みか未封印のときだけ。開封前に作り直すことはできない）／open＝結果を1回だけ保存
             n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8") if n else "{}"
@@ -488,8 +615,11 @@ class Handler(SimpleHTTPRequestHandler):
                 # 記録は絶対に減らさない：送られてきた記録（records でも append でも）を、保存済みの記録に上書き・追加する
                 old = json.loads(lp.read_text(encoding="utf-8")).get("records", []) if lp.exists() else []
                 m = {r["id"]: r for r in old}
+                drop = 0
                 for r in (j.get("records") or []) + (j.get("append") or []):
+                    if is_holdout(r.get("date")): drop += 1; continue      # 独立評価に取っておく年の記録は学習に入れない
                     o = m.get(r["id"]); m[r["id"]] = {**r, "bets": r.get("bets") or (o or {}).get("bets")}
+                if drop: log(f"独立評価に取っておく年の記録 {drop}件は学習に入れませんでした")
                 recs = sorted(m.values(), key=lambda r: (r.get("date", ""), r.get("id", "")))
                 if len(recs) < len(old): return self._json({"ok": False, "message": "記録が減る保存は受け付けません"}, 400)
                 model = j.get("model")

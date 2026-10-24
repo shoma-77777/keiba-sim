@@ -17,6 +17,7 @@ SQLite（keiba.db）に保存し、シミュレーターアプリ用の JSON を
 - サイト側のHTML構造が変わると取得できなくなることがあります。その場合はセレクタを調整してください。
 """
 import argparse, datetime as dt, json, os, re, sqlite3, sys, time, hashlib
+COLLECTOR_VER = "20261021b"   # 発走前の単勝・複勝オッズを oddsHist に残す版
 from pathlib import Path
 
 try:
@@ -278,14 +279,26 @@ def odds(f, race, ttl_hours=0.5):
     if not src:
         return 0, None, " / ".join(errs) or "オッズなし（発売前）"
     stamp = asof or dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    # 2026-10-21：履歴は発走前の分だけ残す（発走後の取得で発走前の記録が押し出されないように）。発走前のオッズで検証するため
+    post = None
+    try:
+        m = re.match(r"(\d{1,2}):(\d{2})", race.get("postTime") or "")
+        if m and race.get("date"): post = f"{race['date']} {int(m.group(1)):02d}:{m.group(2)}"
+    except Exception: post = None
     for e in ents:
         x = got.get(e["num"])
         if not x: continue
         e.update({k: v for k, v in x.items() if v is not None})
         hist = e.get("oddsHist") or []
-        if not hist or hist[-1].get("t") != stamp:
-            hist.append({"t": stamp, "o": x["odds"], "p": x.get("pop")})
-        e["oddsHist"] = hist[-12:]
+        if (not hist or hist[-1].get("t") != stamp) and (post is None or stamp[:16] <= post):
+            # 2026-10-21：複勝オッズも残す（発走前の「複勝下限÷単勝」を後から検証できるように。確定オッズで上書きされるため）
+            mb = None
+            try:
+                if post: mb = round((dt.datetime.strptime(post, "%Y-%m-%d %H:%M") - dt.datetime.strptime(stamp[:16], "%Y-%m-%d %H:%M")).total_seconds() / 60)
+            except Exception: mb = None
+            # t＝取得時刻・mb＝発走まで何分前・o/p＝単勝オッズと人気・pl/ph＝複勝オッズの下限/上限（すべて取得した時点の値。確定オッズは e["odds"] 等と race["oddsFinal"] 側）
+            hist.append({"t": stamp, "mb": mb, "o": x["odds"], "p": x.get("pop"), "pl": x.get("placeLo"), "ph": x.get("placeHi")})
+        e["oddsHist"] = hist[-40:]
     race["oddsAsOf"] = stamp; race["oddsSrc"] = src
     return len(got), src, None
 
