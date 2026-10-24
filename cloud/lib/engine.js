@@ -37,8 +37,19 @@ const Engine = (() => {
   const jockeyPts = j => JOCKEY[jockeyKey(j)] ?? 0;
 
   // --- クラス判定 ---
-  const GRADE_BASE = {G1:80,G2:74,G3:70,L:67,OP:66,"3勝":62,"2勝":56,"1勝":50,"未勝利":44,"新馬":42,"障害":40};
-  const GRADE_RANK = {G1:7,G2:6,G3:5,L:4,OP:4,"3勝":3,"2勝":2,"1勝":1,"未勝利":0,"新馬":0,"障害":0};
+  // 2026-10-24：地方競馬（NAR）のレースは、前は名前にクラスの文字がないと「JRAのOP（66）」扱いになっていた（地方のみの馬を2.8倍高く見ていた）。
+  //  地方のレース→次のJRAのレースの着差から、JRAのクラスに直した水準で評価する（1,355組・中央値）：C級36・B級42・A級49・それ以外（2歳・特別・重賞など）42。交流重賞（Jpn）は今までどおり
+  const GRADE_BASE = {G1:80,G2:74,G3:70,L:67,OP:66,"3勝":62,"2勝":56,"1勝":50,"未勝利":44,"新馬":42,"障害":40,"地方A":49,"地方B":42,"地方C":36,"地方":42};
+  const GRADE_RANK = {G1:7,G2:6,G3:5,L:4,OP:4,"3勝":3,"2勝":2,"1勝":1,"未勝利":0,"新馬":0,"障害":0,"地方A":1,"地方B":1,"地方C":0,"地方":1};
+  const NAR_RE = /川崎|大井|船橋|浦和|園田|姫路|名古屋|盛岡|水沢|門別|佐賀|金沢|笠松|高知|帯広/;
+  function narGrade(name){
+    const n = name || "";
+    if (/Jpn|JPN/.test(n)) return null;
+    if (/C[1-4]|^C|[（(]C/.test(n)) return "地方C";
+    if (/B[1-4]|^B|[（(]B/.test(n)) return "地方B";
+    if (/A[1-2]|^A|[（(]A/.test(n)) return "地方A";
+    return "地方";
+  }
   function gradeOf(name){
     const n = name || "";
     if (/障害/.test(n)) return /G|J・G/.test(n) ? "OP" : "障害";
@@ -71,8 +82,9 @@ const Engine = (() => {
     }
     r.pos = +r.pos; r.field = +r.field; r.going = r.going || "-"; r.time = r.time || "-";
     r.last3f = num(r.last3f); r.margin = num(r.margin); r.pop = num(r.pop ?? r.popularity); r.gate = num(r.gate); r.weight = num(r.weight);
-    r.grade = r.grade || gradeOf(r.race || ""); r.note = r.note || r.comment || "";
-    r.overseas = !JRA.has(r.venue) && !/川崎|大井|船橋|浦和|園田|名古屋|盛岡|門別|佐賀|金沢|笠松|高知|水沢/.test(r.venue);
+    r.nar = !JRA.has(r.venue) && NAR_RE.test(r.venue || "");
+    r.grade = r.grade || (r.nar && narGrade(r.race)) || gradeOf(r.race || ""); r.note = r.note || r.comment || "";
+    r.overseas = !JRA.has(r.venue) && !r.nar;
     return r;
   }
   // オッズが一部欠けている（取消・発売前の一部など）ときは、欠けた馬を最低人気の2倍とみなす
@@ -257,7 +269,8 @@ const Engine = (() => {
       const surfW = r.surface === surf ? 1 : (r.surface === "障" || race.surface === "障") ? 0.2 : 0.5;
       const distW = 0.5 + 0.5 * Math.exp(-Math.pow((r.dist - D) / 800, 2));
       const w = rec * surfW * distW * (r.overseas ? 0.6 : 1);
-      sw += w; sr += w * r.adjRating; if (i < 5) best = Math.max(best, r.adjRating - (surfW < 1 ? 4 : 0));
+      // 2026-10-24：別の芝ダの走りを「最高値」に使うときの−4点は障害だけに（初めての芝ダの馬を低く見すぎていたため）
+      sw += w; sr += w * r.adjRating; if (i < 5) best = Math.max(best, r.adjRating - (surfW < 1 ? (r.surface === "障" || race.surface === "障" ? 4 : 0) : 0));
     });
     const raceBase = GRADE_BASE[race.grade] ?? 64;
     out.ability = sw > 0 ? 0.65 * (sr / sw) + 0.35 * best : raceBase - 6;
@@ -276,7 +289,8 @@ const Engine = (() => {
       let v = 0; same.forEach(r => { v += good(r) * (r.dist - c) ** 2; });
       const sd = Math.max(250, Math.sqrt(v / ws));
       out.distCenter = Math.round(c); out.distSpread = Math.round(sd);
-      let pts = -6 * Math.min(1, ((D - c) / (sd * 2.5)) ** 2);
+      // 2026-10-24：減点の最大を−6→−3に（初めての距離帯の馬の実際の勝率は見込みの1.6倍だった）
+      let pts = -3 * Math.min(1, ((D - c) / (sd * 2.5)) ** 2);
       if (same.some(r => (r.pos <= 3 || (r.margin != null && r.margin <= 0.3)) && Math.abs(r.dist - D) <= 200)) pts += 0.8;
       out.distApt = pts * (same.length >= 3 ? 1 : 0.6);
     } else { out.distApt = 0; out.distCenter = null; }
@@ -284,7 +298,9 @@ const Engine = (() => {
     const rel = arr => { const m = mean(arr.map(r => r.adjRating)), all = mean(flat.map(r => r.adjRating)); return (m != null && all != null) ? m - all : null; };
     // 芝/ダート
     const sDiff = rel(flat.filter(r => r.surface === surf));
-    out.surfApt = race.surface === "障" ? 0 : sDiff != null ? clamp(sDiff * 0.3, -3, 2) : (flat.length ? -3.5 : 0);
+    // 2026-10-24：初めての芝ダは一律−3.5点にしていたが、実際の勝率は見込みの1.8倍（約1万3千頭）だったので減点しない
+    //  芝ダの得意・不得意の効きも半分に（0.3→0.15・上限2→1。得意とみた馬は実際は見込みの0.8倍だった）
+    out.surfApt = race.surface === "障" ? 0 : sDiff != null ? clamp(sDiff * 0.15, -1.5, 1) : 0;
     // 馬場状態
     const wetR = flat.filter(r => wet(r.going)), dryR = flat.filter(r => r.going === "良");
     out.wetDiff = (wetR.length && dryR.length) ? mean(wetR.map(r => r.adjRating)) - mean(dryR.map(r => r.adjRating)) : null;
@@ -434,8 +450,11 @@ const Engine = (() => {
         騎手: jNow,
         乗替: p.lastJockey && jockeyKey(p.lastJockey) !== jockeyKey(e.jockey) ? clamp((jNow - jLast) * 0.4, -0.8, 0.8) : 0,
         調教: ((opts.training?.[e.num] ?? e.training?.score ?? h.training?.score ?? 50) - 50) / 10,
-        ローテ: p.daysOff == null ? 0 : p.daysOff > 365 ? -3 : p.daysOff > 180 ? -1.5 : p.daysOff < 14 ? -0.5 : 0,
-        年齢: (age === 3 && R.date >= R.date.slice(0,4) + "-09") ? 0.8 : age >= 7 ? -(age - 6) * 0.8 : 0,
+        // 2026-10-24：休み明けの減点（1年超−3・半年超−1.5・中1週−0.5）はやめた（半年以上休んだ馬の実際の勝率は見込みの1.2〜1.4倍で、減点と逆だった）
+        ローテ: 0,
+        // 2026-10-24：高齢の減点を6歳からに（前は7歳から。7歳以上の実際の勝率は見込みの0.6〜0.8倍だった）。
+        //  1歳ごと1.5点も試したが、スピード指数の修正と合わせると0.8点の方が予測・◎ともわずかに良かった
+        年齢: (age === 3 && R.date >= R.date.slice(0,4) + "-09") ? 0.8 : age >= 6 ? -(age - 5) * 0.8 : 0,
         手動: opts.manual?.[e.num] ?? 0
       };
       const bp = bloodProfile(h, R, horsesDB), sp = seasonProfile(p.runs, R.date);
@@ -493,7 +512,9 @@ const Engine = (() => {
     field.forEach(f => {
       const p = f.prof, gRel = (f.num - 1) / Math.max(1, N - 1);
       // スピード指数：場の平均との差（指数1＝約0.1秒、能力評価との二重計上を避け0.35倍）
-      f.adj.スピード = (p.speedFig != null && meanFig != null) ? clamp((p.speedFig - meanFig) * 0.35, -4, 4) : (meanFig != null ? -1 : 0);
+      // 2026-10-24：この芝ダのスピード指数がない馬（初めての芝ダなど）に−1点していたのをやめた
+      // 2026-10-24：スピード指数の効きを0.35→0.15に（指数が低い馬ほど実際は見込みの2倍以上走り、高い馬は0.8倍だった＝効かせすぎ）
+      f.adj.スピード = (p.speedFig != null && meanFig != null) ? clamp((p.speedFig - meanFig) * 0.15, -4, 4) : 0;
       // レース傾向（過去の同レースの集計にもとづく）
       let tr = 0; const why = [];
       if (trend){
