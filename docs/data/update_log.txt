@@ -1,5 +1,3 @@
-2026-10-17 20:25:57 新潟5R 2歳新馬 15頭・オッズYahoo!競馬
-2026-10-17 20:26:07 新潟6R 3歳以上1勝クラス 15頭・オッズYahoo!競馬
 2026-10-17 20:26:17 新潟7R 3歳以上1勝クラス 18頭・オッズYahoo!競馬
 2026-10-17 20:26:28 新潟8R 3歳以上1勝クラス 15頭・オッズYahoo!競馬
 2026-10-17 20:26:38 新潟9R 松浜特別 14頭・オッズYahoo!競馬
@@ -298,3 +296,5 @@
 2026-10-24 09:11:15 オッズ取得できず 新潟5R: netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
 2026-10-24 09:11:15 オッズを更新しました（34/36レース・Yahoo!競馬/netkeiba・2026-10-24 09:11時点）
 2026-10-24 09:19:24 オッズを更新しました（36/36レース・Yahoo!競馬/netkeiba・2026-10-24 09:19時点）
+2026-10-24 09:48:11 オッズ取得できず 京都3R: netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+2026-10-24 09:48:11 オッズを更新しました（35/36レース・Yahoo!競馬/netkeiba・2026-10-24 09:48時点）
