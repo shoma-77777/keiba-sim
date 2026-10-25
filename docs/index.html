@@ -6090,7 +6090,7 @@ async function raceImage(r, x){
   rr(24, y, W - 48, 520, 18, "rgba(0,0,0,0.45)", "rgba(242,201,76,0.35)");
   rr(44, y + 18, 8, 50, 4, "#f2c94c"); txt("注目穴馬", 66, y + 60, 44, "#f2c94c", { f: FD, w: "normal" });
   // 2026-10-25：自信度（5段階）のバッジを右上に（1頭版のとき）
-  { const tt = DS.length >= 2 ? null : darkTier(d?.top3); if (tt){ const tc = tt.n >= 3 ? "#1a1206" : "#fff", segs = [["自信度 ", tc, 1], ["★".repeat(tt.n), tc, 1], ["★".repeat(5 - tt.n), tc, 0.28], [" " + tt.label, tc, 1]];
+  { const tt = DS.length >= 2 ? null : darkTier(tierP(x, d)); if (tt){ const tc = tt.n >= 3 ? "#1a1206" : "#fff", segs = [["自信度 ", tc, 1], ["★".repeat(tt.n), tc, 1], ["★".repeat(5 - tt.n), tc, 0.28], [" " + tt.label, tc, 1]];
       font(30, "bold"); const ws = segs.map(q => g.measureText(q[0]).width), lw = ws.reduce((a, b) => a + b, 0) + 40; rr(W - 44 - lw, y + 22, lw, 50, 25, tt.col);
       let xx = W - 44 - lw + 20; segs.forEach((q, k) => { g.globalAlpha = q[2]; txt(q[0], xx, y + 58, 30, q[1]); xx += ws[k]; }); g.globalAlpha = 1; } }
   if (DS.length >= 2 || d?.conf){ const lbl = DS.length >= 2 ? `◎○▲に入った穴馬 ${DS.length}頭` : "◎○▲に入った穴馬"; font(22); const lw = g.measureText(lbl).width + 28; rr(300, y + 28, lw, 38, 19, "rgba(242,201,76,0.15)", "#f2c94c", 1.5); txt(lbl, 300 + lw / 2, y + 55, 22, "#f2c94c", { al: "center" }); }
@@ -6103,11 +6103,11 @@ async function raceImage(r, x){
       rr(x0 + 70, hy + 16, 72, 72, 8, WAKU[wk - 1] || "#fff", "#999"); txt(h.num, x0 + 106, hy + 74, 54, WAKU_TX[wk - 1] || "#111", { al: "center", f: FD, w: "normal" });
       txt(h.name || "", x0 + 156, hy + 62, 40, "#fff", { f: FD, w: "normal", max: cw - 170 });
       txt(`${h.pop ? h.pop + "番人気" : ""}｜単勝`, x0 + 20, hy + 128, 28, "#fff"); font(28); const ow = g.measureText(`${h.pop ? h.pop + "番人気" : ""}｜単勝`).width; txt(`${h.odds ?? "—"}倍`, x0 + 28 + ow, hy + 130, 36, "#f2c94c");
-      { const tt = darkTier(h.top3); if (tt){ const tc = tt.n >= 3 ? "#1a1206" : "#fff", segs = [["★".repeat(tt.n), 1], ["★".repeat(5 - tt.n), 0.28], [" " + tt.label, 1]]; font(20, "bold"); const ws = segs.map(q => g.measureText(q[0]).width), lw = ws.reduce((a, c) => a + c, 0) + 22;
+      { const tt = darkTier(tierP(x, h)); if (tt){ const tc = tt.n >= 3 ? "#1a1206" : "#fff", segs = [["★".repeat(tt.n), 1], ["★".repeat(5 - tt.n), 0.28], [" " + tt.label, 1]]; font(20, "bold"); const ws = segs.map(q => g.measureText(q[0]).width), lw = ws.reduce((a, c) => a + c, 0) + 22;
         rr(x0 + cw - 14 - lw, hy + 104, lw, 34, 17, tt.col); let xx = x0 + cw - 14 - lw + 11; segs.forEach((q, k) => { g.globalAlpha = q[1]; txt(q[0], xx, hy + 128, 20, tc); xx += ws[k]; }); g.globalAlpha = 1; } }
       rr(x0 + 16, hy + 152, cw - 32, 96, 10, "#c62828"); txt("1着率（シミュ）", x0 + 34, hy + 190, 24, "#fff"); txt(P(h.win), x0 + cw - 34, hy + 230, 56, "#fff", { al: "right", f: FD, w: "normal" });
       const t2 = (xx, lb, v) => { rr(xx, hy + 262, (cw - 48) / 2, 84, 10, "#fff"); txt(lb, xx + (cw - 48) / 4, hy + 292, 22, "#222", { al: "center" }); txt(v, xx + (cw - 48) / 4, hy + 334, 36, "#111", { al: "center", f: FD, w: "normal" }); };
-      txt(`連対率 ${P(h.top2)}　複勝率 ${P(h.top3)}`, x0 + 20, hy + 284, 24, "#fff");
+      txt(`連対率 ${P(h.top2)}　複勝率 ${P(tierP(x, h) ?? h.top3)}`, x0 + 20, hy + 284, 24, "#fff");   // 複勝率は自信度と同じ値（10/25）
       const hw = (h.why?.length ? h.why : d && d.num === h.num ? d.why || [] : [])[0];
       if (hw){ font(18); g.fillStyle = "#f7e7a6"; g.textAlign = "left"; const lines = []; let ln = ""; for (const ch of String(hw)){ if (g.measureText(ln + ch).width > cw - 36){ lines.push(ln); ln = ch; } else ln += ch; } lines.push(ln);
         lines.slice(0, 5).forEach((t, q) => g.fillText(q === 4 && lines.length > 5 ? t.slice(0, -1) + "…" : t, x0 + 18, hy + 310 + q * 20)); }
@@ -6193,12 +6193,14 @@ function raceXText(r, x){
   const head = `【${r.venue}${r.no}R ${race}】`;
   const mk = (x.marks || []).slice(0, 3).map((m, k) => `${"◎○▲"[k]}${m.num}${nm(m.name)}`);
   const DS = (x.darks ? x.darks : (x.marks || []).map((m, k) => ({ ...m, mk: k })).filter(m => (m.pop || 0) >= 5)).slice(0, 2);
-  const tierTxt = h => { const t = darkTier(h?.top3); return t ? `【${t.stars}${t.label}】` : ""; };
-  const ana = DS.length ? `穴馬は${DS.map(h => `${h.num}${nm(h.name)}(${h.pop}人気)${tierTxt(h)}`).join("と")}` : x.dark ? `穴馬は${x.dark.num}${nm(x.dark.name)}(${x.dark.pop}人気)${tierTxt(x.dark)}` : "";
+  const tierTxt = h => { const t = darkTier(tierP(x, h)); return t ? `【${t.stars}${t.label}】` : ""; };
+  // 2026-10-25：画像と同じ馬を書く（画像は2頭のときだけ◎○▲の穴馬2頭、それ以外は注目穴馬）
+  const ana = (DS.length >= 2 || (DS.length && !x.dark)) ? `穴馬は${DS.map(h => `${h.num}${nm(h.name)}(${h.pop}人気)${tierTxt(h)}`).join("と")}` : x.dark ? `穴馬は${x.dark.num}${nm(x.dark.name)}(${x.dark.pop}人気)${tierTxt(x.dark)}` : "";
   const buy = "";   // 買い目（★馬連）はX投稿文には入れない
   const tags = [`#${r.venue}${r.no}R`, race && race.length <= 12 ? `#${race}` : null, `#${r.venue}競馬`, "#競馬予想"].filter(Boolean);
   const m0 = x.marks?.[0], pc = v => v == null ? "" : (v * 100).toFixed(1) + "%";
-  const w0 = (x.dark?.why || [])[0], note = w0 && L(w0) <= 110 ? `${x.dark.num}番：${w0}` : m0 ? `本命の1着率${pc(m0.win)}${DS[0] ? `、穴の${DS[0].num}も3着内${pc(DS[0].top3)}` : ""}` : "";
+  const useDS = DS.length >= 2 || (DS.length && !x.dark), H0 = useDS ? DS[0] : x.dark;   // 2026-10-25：文章に出す穴馬と同じ馬の理由・数字を書く
+  const w0 = (H0?.why || [])[0], p0 = tierP(x, H0), note = w0 && L(w0) <= 110 ? `${H0.num}番：${w0}` : m0 ? `本命の1着率${pc(m0.win)}${H0 && p0 != null ? `、穴の${H0.num}も3着内${pc(p0)}` : ""}` : "";
   const TR = (x.field >= 14 && x.subs5?.length ? x.subs5 : (x.subs || [])).slice(0, 5); const tri = TR.length ? `△${TR.map(m => m.num).join(".")}` : "";
   const build = (useBuy, nt, useNote) => [head, mk.join("\n"), tri, ana, useBuy ? buy : "", useNote ? note : "", tags.slice(0, nt).join(" ")].filter(Boolean).join("\n");
   for (const [b, nt, n] of [[1, 4, 1], [1, 3, 1], [1, 4, 0], [1, 3, 0], [0, 4, 0], [0, 3, 0], [0, 2, 0], [0, 1, 0]]){ const t = build(b, nt, n); if (L(t) <= 280) return t; }
@@ -6250,10 +6252,21 @@ function calT3(p, pop){
   for (let k = 1; k < T3CAL.length; k++){ const [x1, y1] = T3CAL[k], [x0, y0] = T3CAL[k - 1]; if (p <= x1) return y0 + (y1 - y0) * (p - x0) / (x1 - x0); }
   return T3CAL[T3CAL.length - 1][1];
 }
+// 2026-10-25：自信度（★5段階）の元になる「3着内の見込み」を、注目穴馬の選び方と同じ式（単勝オッズからの3着内率を補正）で全馬ぶん出す。
+//  画像・X投稿文・カードで同じ値を使い、表示がずれないようにする
+function marketPe(field){
+  try { if (!Engine.oddsReady(field)) return null;
+    const fo = Engine.filledOdds(field), inv = fo.map(o => 1 / o), si = inv.reduce((p, q) => p + q, 0), pw = inv.map(v => v / si), N = pw.length;
+    const lg = v => Math.log(v / (1 - v)), cl = v => Math.min(0.97, Math.max(0.003, v));
+    return pw.map((_, i) => { let t = pw[i]; for (let j = 0; j < N; j++){ if (j === i) continue; t += pw[j] * pw[i] / (1 - pw[j]); for (let k = 0; k < N; k++){ if (k === i || k === j) continue; t += pw[j] * (pw[k] / (1 - pw[j])) * (pw[i] / Math.max(1e-6, 1 - pw[j] - pw[k])); } }
+      return cl(1 / (1 + Math.exp(-(0.95 * lg(cl(t)) + 0.1)))); });
+  } catch (e) { return null; }
+}
+function tierP(x, h){ if (!h) return null; if (h.pe != null) return h.pe; if (x?.dark && +h.num === +x.dark.num) return x.dark.top3; return null; }
 function summarizeSim(r, sim){
   const w = sim.weighted.slice().sort((a, b) => b.win - a.win);
-  const f = sim.ctx.field;
-  const mk = s => ({ num: s.num, name: s.name, win: s.win, top2: s.top2, top3: calT3(s.top3, f[s.i].pop), top3Sim: s.top3, odds: f[s.i].odds ?? null, pop: f[s.i].pop ?? null, waku: f[s.i].waku ?? null, jockey: f[s.i].jockey || null, style: f[s.i].prof?.style || f[s.i].style || null });
+  const f = sim.ctx.field, PE = marketPe(f);
+  const mk = s => ({ num: s.num, name: s.name, win: s.win, top2: s.top2, top3: calT3(s.top3, f[s.i].pop), top3Sim: s.top3, pe: PE ? PE[s.i] : null, odds: f[s.i].odds ?? null, pop: f[s.i].pop ?? null, waku: f[s.i].waku ?? null, jockey: f[s.i].jockey || null, style: f[s.i].prof?.style || f[s.i].style || null });
   const tri = sim.triTop[0];
   const tk = t => `${t.type} ${t.nums.join("-")} ${t.stake}円→的中${Math.round(t.stake * t.odds).toLocaleString()}円`;
   const tks = pl => pl && !pl.none && !pl.noOdds && pl.tickets?.length ? pl.tickets.map(t => ({ type: t.type, nums: t.nums, stake: t.stake, odds: t.odds })) : null;
@@ -7818,7 +7831,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261025f";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
+const APP_BUILD = "20261025g";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
 const PRE25 = { busy: false, msg: "", res: null,
   hit: { mu: [3.37976, 11.89168, 14.55231], s: [0.68478, 4.63845, 2.34832], w: [-0.42417, -0.23955, -0.06202], b: -1.92086 }, ca: 1.0949232, cb: 0.2081896 };
 const pre25Pev = (f, n) => { if (!f || !f.pl || !f.ph || !(f.odds > 1)) return null; const x = [Math.log(f.odds), Math.log(f.odds) ** 2, n]; let z = PRE25.hit.b; for (let j = 0; j < 3; j++) z += PRE25.hit.w[j] * (x[j] - PRE25.hit.mu[j]) / PRE25.hit.s[j]; return 1 / (1 + Math.exp(-z)) * (PRE25.ca * f.pl + PRE25.cb * (f.ph - f.pl)); };
@@ -8405,7 +8418,7 @@ function renderAllTab(){
       ${x.tri100?.length ? `<div class="line"><span class="verdict">◇穴軸3連複（検証中）</span> <b>${x.tri100.length}点・${(x.tri100.length * 100).toLocaleString()}円</b> <span class="small">フォーメーション：${triFormText(x.tri100).map(l => `<b style="white-space:nowrap">${l}</b>`).join("　")}</span><div class="small">1400m以下のレースで、◇複勝ルールの馬が軸。3連複100倍以上の組だけを当たりやすい順に最大20点・各100円。過去343レースで回収133%（確定オッズ・推定オッズで計算）。10回に1回ほどしか当たらないので連敗に注意</div></div>` : ""}
       ${x.uma ? `<div class="line">最有力の馬連 <b>${x.uma.nums.join("-")}</b> <span class="small">（シミュの的中確率${pct(x.uma.p)}%${x.uma.odds ? `・${x.uma.odds}倍` : ""}）</span></div>` : ""}
       ${x.tri ? `<div class="line">最有力の3連単 <b>${x.tri.nums.join("→")}</b> <span class="small">（${pct(x.tri.p)}%）</span></div>` : ""}
-      ${x.dark ? `<div class="line">${(t => t ? `<span class="tierb" style="background:${t.col};color:${t.n >= 3 ? "#1a1206" : "#fff"}">自信度 ${"★".repeat(t.n)}<span style="opacity:.3">${"★".repeat(5 - t.n)}</span> ${t.label}</span> ` : "")(darkTier(x.dark.top3))}注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}${x.dark.win != null ? "勝率" + pct(x.dark.win) + "%・" : ""}3着内${pct(x.dark.top3)}%</span>${x.dark.conf ? ` <b class="pos">◎○▲に入った穴馬</b><span class="small">（過去の3着内22%）</span>` : ` <span class="small">（◎○▲には5番人気以下がいないので、印の外で、シミュの3着内率が一番高い穴）</span>`}${bestDark && bestDark.id === x.id ? ` <span class="chip ana">この日の最注目穴馬</span>` : ""}</div>` : ""}
+      ${x.dark ? `<div class="line">${(t => t ? `<span class="tierb" style="background:${t.col};color:${t.n >= 3 ? "#1a1206" : "#fff"}">自信度 ${"★".repeat(t.n)}<span style="opacity:.3">${"★".repeat(5 - t.n)}</span> ${t.label}</span> ` : "")(darkTier(tierP(x, x.dark)))}注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}${x.dark.win != null ? "勝率" + pct(x.dark.win) + "%・" : ""}3着内${pct(x.dark.top3)}%</span>${x.dark.conf ? ` <b class="pos">◎○▲に入った穴馬</b><span class="small">（過去の3着内22%）</span>` : ` <span class="small">（◎○▲には5番人気以下がいないので、印の外で、シミュの3着内率が一番高い穴）</span>`}${bestDark && bestDark.id === x.id ? ` <span class="chip ana">この日の最注目穴馬</span>` : ""}</div>` : ""}
       ${x.oddsAsOf ? `<div class="cond">オッズ ${esc(x.oddsAsOf)} 時点</div>` : ""}
       ${(() => { const c = CHECK[d]?.per?.[r.id]; const moR = x.mo5?.length && r.result?.pay ? (() => { const inv = x.mo5.reduce((a, t) => a + t.stake, 0), ret = x.mo5.reduce((a, t) => a + payOf(t, r.result), 0); return `<br>★本命ルール（馬連${x.mo5[0].nums.join("-")}・${inv.toLocaleString()}円） <b class="${ret >= inv ? "pos" : "neg"}">${ret - inv >= 0 ? "+" : "−"}${Math.abs(Math.round(ret - inv)).toLocaleString()}円</b>`; })() : ""; if (!c) return r.result ? `<div class="resline">結果 <b>${r.result.order.slice(0, 3).join("→")}</b>${moR}</div>` : ""; const pl = k => c.plans[k] ? `${c.plans[k].ret - c.plans[k].inv >= 0 ? "+" : "−"}${Math.abs(Math.round(c.plans[k].ret - c.plans[k].inv)).toLocaleString()}円` : "見送り";
         return `<div class="resline">結果 <b>${c.order.join("→")}</b>　◎${c.favPos ? c.favPos + "着" : "着外"}${moR}</div>`; })()}
