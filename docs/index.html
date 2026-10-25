@@ -5724,7 +5724,7 @@ function kickFact(ctx, f){
 //  スロー想定で末脚が目立たない差し馬：0.93倍（偶然の範囲）→ 注意書きだけ
 function paceFit(ctx, f){
   let pf; try { pf = Engine.paceForecast(ctx); } catch (e) { return null; }
-  const st = f.prof?.style || f.style, kf = kickFact(ctx, f), closer = st === "差し" || st === "追込";
+  const st = f.prof?.n > 0 ? (f.prof?.style || f.style) : null, kf = kickFact(ctx, f), closer = st === "差し" || st === "追込";   // 出走歴なしは脚質不明（10/25）
   if (kf && pf.best === "high") return { w: 7, t: `今回は前に行く馬が${pf.frontCount}頭でハイペース想定（${Math.round(pf.high * 100)}%）。上がりメンバー${kf.rank === 1 ? "最速" : "2位"}の脚が生きる流れ`, ok: true };
   if (closer && pf.best === "slow" && !kf) return { w: 0, t: null, ok: false, why: "スロー想定で、上がりも上位ではない差し馬" };
   return null;
@@ -5852,7 +5852,7 @@ function darkStory(ctx, f){
 //  事実が2つ未満（推奨できる材料がない）の馬は注目穴馬にしない
 function darkFacts(ctx, f){
   const race = ctx.race || {}, D = +race.distance, S = race.surface, out = [], p = f.prof || {}, F = ctx.field || [];
-  const add = (w, t, tag) => { if (t && !out.some(o => o.tag === tag)) out.push({ w, t, tag }); };
+  const add = (w, t, tag) => { if (t) t = String(t).replace(/[。．]+$/, ""); if (t && !out.some(o => o.tag === tag)) out.push({ w, t, tag }); };
   // 推奨の1文（敗因→条件変化→根拠）。あれば2つ分の重みとして数える
   let story = null; try { story = darkStory(ctx, f); } catch (e) {}
   try { darkInsight(ctx, f).forEach(t => {
@@ -5862,7 +5862,8 @@ function darkFacts(ctx, f){
   const up = (f.h2h?.list || []).filter(o => o.win && o.pop && f.pop && +o.pop < +f.pop);
   if (up.length && f.h2h.beat > f.h2h.lost) add(9, `直接対決で今回人気上位の${up.slice(0, 2).map(o => o.name).join("・")}に先着済み`, "h2h");
   // スピード指数・能力のメンバー順位
-  const rank = (val, key) => { const v = F.map(g => g.prof?.[key]).filter(x => x != null && isFinite(x)).sort((a, b) => b - a); return val != null && v.length >= 5 ? v.indexOf(val) + 1 : null; };
+  // 2026-10-25：出走歴のない馬（新馬など）は能力が全員同じ仮の値なので、順位を付けない（以前は全員「メンバー1位」になっていた）
+  const rank = (val, key) => { if (!(p.n > 0)) return null; const v = F.filter(g => g.prof?.n > 0).map(g => g.prof?.[key]).filter(x => x != null && isFinite(x)).sort((a, b) => b - a); return val != null && v.length >= 5 ? v.indexOf(val) + 1 : null; };
   const sr = rank(p.speedFig, "speedFig"); if (sr && sr <= 3) add(sr === 1 ? 8 : 6, `近走のスピード指数はメンバー${sr}位`, "fig");
   const ar = rank(p.ability, "ability"); if (ar && ar <= 3 && (!sr || sr > 3)) add(5, `近走の内容から見た能力はメンバー${ar}位`, "abil");
   // 得意距離
@@ -6266,7 +6267,7 @@ function tierP(x, h){ if (!h) return null; if (h.pe != null) return h.pe; if (x?
 function summarizeSim(r, sim){
   const w = sim.weighted.slice().sort((a, b) => b.win - a.win);
   const f = sim.ctx.field, PE = marketPe(f);
-  const mk = s => ({ num: s.num, name: s.name, win: s.win, top2: s.top2, top3: calT3(s.top3, f[s.i].pop), top3Sim: s.top3, pe: PE ? PE[s.i] : null, odds: f[s.i].odds ?? null, pop: f[s.i].pop ?? null, waku: f[s.i].waku ?? null, jockey: f[s.i].jockey || null, style: f[s.i].prof?.style || f[s.i].style || null });
+  const mk = s => ({ num: s.num, name: s.name, win: s.win, top2: s.top2, top3: calT3(s.top3, f[s.i].pop), top3Sim: s.top3, pe: PE ? PE[s.i] : null, odds: f[s.i].odds ?? null, pop: f[s.i].pop ?? null, waku: f[s.i].waku ?? null, jockey: f[s.i].jockey || null, style: f[s.i].prof?.n > 0 ? (f[s.i].prof?.style || f[s.i].style || null) : null });   // 出走歴なしは脚質を出さない（10/25）
   const tri = sim.triTop[0];
   const tk = t => `${t.type} ${t.nums.join("-")} ${t.stake}円→的中${Math.round(t.stake * t.odds).toLocaleString()}円`;
   const tks = pl => pl && !pl.none && !pl.noOdds && pl.tickets?.length ? pl.tickets.map(t => ({ type: t.type, nums: t.nums, stake: t.stake, odds: t.odds })) : null;
@@ -6331,7 +6332,7 @@ function summarizeSim(r, sim){
       const konsen = fav.odds >= 3 && w[0].win < 0.20, sekkin = popB >= 2 && popB <= 3 && (w[0].win - w[1].win) < 0.03; if (!konsen && !sekkin) return null;
       const cs = sim.weighted.filter(q => { const e = f[q.i]; return (e.pop || 0) >= 5 && e.odds > 1 && e.placeLo > 1 && e.placeLo / e.odds >= 0.28 && q.top3 >= 0.30; }).sort((a, b) => b.top3 - a.top3);
       return cs.length ? [{ type: "単勝", nums: [cs[0].num], stake: 1000 }] : null; })(),
-    dark: sim.dark ? { waku: sim.dark.f.waku ?? null, conf: !!sim.dark.conf, ana: (sim.dark.f.ana || []).filter(a => !ODDS_TAGS.has(a)).slice(0, 4), top2: sim.dark.a.top2 ?? null, num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: sim.dark.pe ?? calT3(MM ? MM.place[sim.dark.i] : sim.dark.a.top3, sim.dark.f.pop), placeEV: sim.dark.placeEV ?? null, top3Sim: MM ? MM.place[sim.dark.i] : sim.dark.a.top3, win: MM ? MM.win[sim.dark.i] : sim.dark.a.win, jockey: sim.dark.f.jockey || null, style: sim.dark.f.prof?.style || null, why: darkWhy(sim) } : null,
+    dark: sim.dark ? { waku: sim.dark.f.waku ?? null, conf: !!sim.dark.conf, ana: (sim.dark.f.ana || []).filter(a => !ODDS_TAGS.has(a)).slice(0, 4), top2: sim.dark.a.top2 ?? null, num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: sim.dark.pe ?? calT3(MM ? MM.place[sim.dark.i] : sim.dark.a.top3, sim.dark.f.pop), placeEV: sim.dark.placeEV ?? null, top3Sim: MM ? MM.place[sim.dark.i] : sim.dark.a.top3, win: MM ? MM.win[sim.dark.i] : sim.dark.a.win, jockey: sim.dark.f.jockey || null, style: sim.dark.f.prof?.n > 0 ? (sim.dark.f.prof?.style || null) : null, why: darkWhy(sim) } : null,
     ...dkTickets(w.map(x => x.num), sim.dark?.f.num),
     ...moTickets(w, f, r),
     fr: (() => { const H = f.filter(x => x.odds > 1), pw = MM ? H.map(x => MM.win[f.indexOf(x)]) : H.map(x => sim.weighted.find(s2 => s2.num === x.num)?.win || 0);
@@ -7831,7 +7832,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261025g";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
+const APP_BUILD = "20261025h";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
 const PRE25 = { busy: false, msg: "", res: null,
   hit: { mu: [3.37976, 11.89168, 14.55231], s: [0.68478, 4.63845, 2.34832], w: [-0.42417, -0.23955, -0.06202], b: -1.92086 }, ca: 1.0949232, cb: 0.2081896 };
 const pre25Pev = (f, n) => { if (!f || !f.pl || !f.ph || !(f.odds > 1)) return null; const x = [Math.log(f.odds), Math.log(f.odds) ** 2, n]; let z = PRE25.hit.b; for (let j = 0; j < 3; j++) z += PRE25.hit.w[j] * (x[j] - PRE25.hit.mu[j]) / PRE25.hit.s[j]; return 1 / (1 + Math.exp(-z)) * (PRE25.ca * f.pl + PRE25.cb * (f.ph - f.pl)); };
