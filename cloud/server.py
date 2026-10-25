@@ -45,6 +45,12 @@ def next_sunday(today=None):
     d = today or dt.date.today()
     return d + dt.timedelta(days=(6 - d.weekday()) % 7)
 
+def next_race_day(now=None):
+    """次に予想する開催日（2026-10-25）：土曜は18時まではその土曜、それ以外は次の日曜"""
+    n = now or dt.datetime.now()
+    if n.weekday() == 5 and n.hour < 18: return n.date()
+    return next_sunday(n.date())
+
 def snapshot_path(ymd): return DATA / f"races_{ymd}.json"
 
 # ===== 独立評価に取っておく年（2026-10-21）：この年の開催日は自動学習・答え合わせの学習に使わない =====
@@ -321,7 +327,7 @@ def after_update(ymd):
 def write_status(extra=None):
     """クラウド版の画面が読む status.json（/api/status と同じ中身）"""
     with LOCK: st = dict(JOB)
-    st["nextSunday"] = next_sunday().strftime("%Y%m%d")
+    st["nextSunday"] = next_race_day().strftime("%Y%m%d")   # 名前は互換のため。中身は次の開催日（土曜を含む）
     st["dates"] = [d["date"] for d in collect_db()["dates"]]
     st["updated"] = dt.datetime.now().astimezone().isoformat(timespec="seconds")
     st.update(extra or {})
@@ -368,7 +374,7 @@ class Handler(SimpleHTTPRequestHandler):
         u = urlparse(self.path); q = parse_qs(u.query)
         if u.path == "/api/status":
             with LOCK: s = dict(JOB)
-            s["nextSunday"] = next_sunday().strftime("%Y%m%d"); s["dates"] = [d["date"] for d in collect_db()["dates"]]
+            s["nextSunday"] = next_race_day().strftime("%Y%m%d"); s["dates"] = [d["date"] for d in collect_db()["dates"]]
             return self._json(s)
         if u.path == "/api/db": return self._json(collect_db())
         if u.path == "/api/backfill/status":
@@ -438,7 +444,7 @@ class Handler(SimpleHTTPRequestHandler):
         u = urlparse(self.path); q = parse_qs(u.query)
         if u.path in ("/api/update", "/api/odds", "/api/results"):
             if JOB["running"]: return self._json({"ok": False, "message": "取得中です。終わるまでお待ちください"}, 409)
-            ymd = re.sub(r"\D", "", (q.get("date") or [next_sunday().strftime("%Y%m%d")])[0])[:8]
+            ymd = re.sub(r"\D", "", (q.get("date") or [next_race_day().strftime("%Y%m%d")])[0])[:8]
             if len(ymd) != 8: return self._json({"ok": False, "message": "日付が正しくありません"}, 400)
             if u.path == "/api/results": threading.Thread(target=update_results, args=(ymd,), daemon=True).start()
             else:

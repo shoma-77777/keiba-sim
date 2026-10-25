@@ -298,6 +298,24 @@ tr.darkrow{background:color-mix(in srgb,var(--gold) 9%,transparent)}
 .perf .sub{font-size:11.5px;color:var(--muted);line-height:1.5}
 .perf td.win{border-color:var(--good);box-shadow:inset 0 0 0 1px var(--good)}
 .perf select{max-width:100%;font-size:12px}
+.perfm{display:none}
+@media (max-width:700px){
+  .perfm{display:block}
+  .perfwide .perf thead,.perfwide .perf tbody tr:not(:last-child){display:none}
+  .perfwide .perf{min-width:0}
+  .perfwide .perf tbody tr:last-child td:not(.rowh){display:none}
+  .perfwide .perf tbody tr:last-child td[colspan]{display:table-cell}
+}
+.pcard{border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin:0 0 8px;background:var(--surface2)}
+.pcard.win{border-color:var(--good);box-shadow:inset 0 0 0 1px var(--good)}
+.pcard .ph{font-weight:700;font-size:13.5px;margin-bottom:4px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.pcard .ph span{font-weight:500;color:var(--muted);font-size:12px}
+.pm{display:grid;grid-template-columns:7.5em 4.2em 1fr;align-items:baseline;gap:6px;padding:3px 0;border-top:1px dashed var(--line);font-size:12.5px}
+.pm .pl{color:var(--muted)}
+.pm .pv{font-weight:700;font-size:17px;font-variant-numeric:tabular-nums;text-align:right}
+.pm .pv.mut{color:var(--muted)}
+.pm .ps{color:var(--muted);font-size:12px}
+.perfm select{max-width:60vw;font-size:13px}
 .rc .resline{font-size:12.5px;border-top:1px dashed var(--line);padding-top:6px}
 .learnchip{border:1px solid #3b7fc4;color:#3b7fc4;background:var(--surface);border-radius:14px;padding:3px 10px;font-size:12px;font-weight:700;cursor:pointer}
 .checkmode{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 8px}
@@ -6087,32 +6105,37 @@ async function raceImage(r, x){
   txt(`${r.surface}${r.distance}m｜${pace}｜${x.field}頭`, 46, 244, 30, "#e8e8e8");
   // 注目穴馬
   const d = x.dark; let y = 270;
-  const DS = (x.darks ? x.darks : (x.marks || []).map((m, k) => ({ ...m, mk: k })).filter(m => (m.pop || 0) >= 5)).slice(0, 2);
+  const DS = darkSet(x);
   rr(24, y, W - 48, 520, 18, "rgba(0,0,0,0.45)", "rgba(242,201,76,0.35)");
   rr(44, y + 18, 8, 50, 4, "#f2c94c"); txt("注目穴馬", 66, y + 60, 44, "#f2c94c", { f: FD, w: "normal" });
   // 2026-10-25：自信度（5段階）のバッジを右上に（1頭版のとき）
   { const tt = DS.length >= 2 ? null : darkTier(tierP(x, d)); if (tt){ const tc = tt.n >= 3 ? "#1a1206" : "#fff", segs = [["自信度 ", tc, 1], ["★".repeat(tt.n), tc, 1], ["★".repeat(5 - tt.n), tc, 0.28], [" " + tt.label, tc, 1]];
       font(30, "bold"); const ws = segs.map(q => g.measureText(q[0]).width), lw = ws.reduce((a, b) => a + b, 0) + 40; rr(W - 44 - lw, y + 22, lw, 50, 25, tt.col);
       let xx = W - 44 - lw + 20; segs.forEach((q, k) => { g.globalAlpha = q[2]; txt(q[0], xx, y + 58, 30, q[1]); xx += ws[k]; }); g.globalAlpha = 1; } }
-  if (DS.length >= 2 || d?.conf){ const lbl = DS.length >= 2 ? `◎○▲に入った穴馬 ${DS.length}頭` : "◎○▲に入った穴馬"; font(22); const lw = g.measureText(lbl).width + 28; rr(300, y + 28, lw, 38, 19, "rgba(242,201,76,0.15)", "#f2c94c", 1.5); txt(lbl, 300 + lw / 2, y + 55, 22, "#f2c94c", { al: "center" }); }
+  if (DS.length >= 2 || d?.conf){ const lbl = DS.length >= 2 ? (DS.every(h => h.mk != null) ? `◎○▲に入った穴馬 ${DS.length}頭` : `注目穴馬と${DS.filter(h => h.mk != null).map(h => MARKS[h.mk]).join("")}の穴馬`) : "◎○▲に入った穴馬"; font(22); const lw = g.measureText(lbl).width + 28; rr(300, y + 28, lw, 38, 19, "rgba(242,201,76,0.15)", "#f2c94c", 1.5); txt(lbl, 300 + lw / 2, y + 55, 22, "#f2c94c", { al: "center" }); }
   g.strokeStyle = "rgba(242,201,76,0.4)"; g.lineWidth = 1.5; g.beginPath(); g.moveTo(44, y + 82); g.lineTo(W - 44, y + 82); g.stroke();
   if (DS.length >= 2){
     // 2頭版：左右に並べる
     DS.forEach((h, k) => { const x0 = 44 + k * 476, cw = 460, hy = y + 98; const wk = wakuNo(r, h.num, x.field, h.waku);
       rr(x0, hy, cw, 400, 14, "rgba(255,255,255,0.05)", "rgba(242,201,76,0.3)", 1.5);
-      txt(MARKS[h.mk] || "", x0 + 18, hy + 58, 44, "#f2c94c");
+      txt(h.mk != null ? MARKS[h.mk] : "☆", x0 + 18, hy + 58, 44, "#f2c94c");
       rr(x0 + 70, hy + 16, 72, 72, 8, WAKU[wk - 1] || "#fff", "#999"); txt(h.num, x0 + 106, hy + 74, 54, WAKU_TX[wk - 1] || "#111", { al: "center", f: FD, w: "normal" });
       txt(h.name || "", x0 + 156, hy + 62, 40, "#fff", { f: FD, w: "normal", max: cw - 170 });
-      txt(`${h.pop ? h.pop + "番人気" : ""}｜単勝`, x0 + 20, hy + 128, 28, "#fff"); font(28); const ow = g.measureText(`${h.pop ? h.pop + "番人気" : ""}｜単勝`).width; txt(`${h.odds ?? "—"}倍`, x0 + 28 + ow, hy + 130, 36, "#f2c94c");
-      { const tt = darkTier(tierP(x, h)); if (tt){ const tc = tt.n >= 3 ? "#1a1206" : "#fff", segs = [["★".repeat(tt.n), 1], ["★".repeat(5 - tt.n), 0.28], [" " + tt.label, 1]]; font(20, "bold"); const ws = segs.map(q => g.measureText(q[0]).width), lw = ws.reduce((a, c) => a + c, 0) + 22;
-        rr(x0 + cw - 14 - lw, hy + 104, lw, 34, 17, tt.col); let xx = x0 + cw - 14 - lw + 11; segs.forEach((q, k) => { g.globalAlpha = q[1]; txt(q[0], xx, hy + 128, 20, tc); xx += ws[k]; }); g.globalAlpha = 1; } }
+      txt(`${h.pop ? h.pop + "番人気" : ""}｜単勝`, x0 + 20, hy + 128, 24, "#fff"); font(24); const ow = g.measureText(`${h.pop ? h.pop + "番人気" : ""}｜単勝`).width; txt(`${h.odds ?? "—"}倍`, x0 + 26 + ow, hy + 130, 30, "#f2c94c");
+      font(30); const oEnd = x0 + 26 + ow + g.measureText(`${h.odds ?? "—"}倍`).width;   // 10/25：自信度の札がオッズに重ならないように
+      { const tt = darkTier(tierP(x, h)); if (tt){ const tc = tt.n >= 3 ? "#1a1206" : "#fff"; let segs = [["★".repeat(tt.n), 1], ["★".repeat(5 - tt.n), 0.28], [" " + tt.label, 1]], fz = 20, ws, lw;
+        const meas = () => { font(fz, "bold"); ws = segs.map(q => g.measureText(q[0]).width); lw = ws.reduce((a, c) => a + c, 0) + Math.round(fz * 1.1); };
+        meas(); while (x0 + cw - 14 - lw < oEnd + 8 && fz > 15){ fz--; meas(); } if (x0 + cw - 14 - lw < oEnd + 8){ fz = 20; segs = [[tt.label, 1]]; meas(); }
+        rr(x0 + cw - 14 - lw, hy + 104, lw, 34, 17, tt.col); let xx = x0 + cw - 14 - lw + Math.round(fz * 0.55); segs.forEach((q, k) => { g.globalAlpha = q[1]; txt(q[0], xx, hy + 127, fz, tc); xx += ws[k]; }); g.globalAlpha = 1; } }
       rr(x0 + 16, hy + 152, cw - 32, 96, 10, "#c62828"); txt("1着率（シミュ）", x0 + 34, hy + 190, 24, "#fff"); txt(P(h.win), x0 + cw - 34, hy + 230, 56, "#fff", { al: "right", f: FD, w: "normal" });
       const t2 = (xx, lb, v) => { rr(xx, hy + 262, (cw - 48) / 2, 84, 10, "#fff"); txt(lb, xx + (cw - 48) / 4, hy + 292, 22, "#222", { al: "center" }); txt(v, xx + (cw - 48) / 4, hy + 334, 36, "#111", { al: "center", f: FD, w: "normal" }); };
       txt(`連対率 ${P(h.top2)}　複勝率 ${P(tierP(x, h) ?? h.top3)}`, x0 + 20, hy + 284, 24, "#fff");   // 複勝率は自信度と同じ値（10/25）
       const hw = (h.why?.length ? h.why : d && d.num === h.num ? d.why || [] : [])[0];
       if (hw){ font(18); g.fillStyle = "#f7e7a6"; g.textAlign = "left"; const lines = []; let ln = ""; for (const ch of String(hw)){ if (g.measureText(ln + ch).width > cw - 36){ lines.push(ln); ln = ch; } else ln += ch; } lines.push(ln);
         lines.slice(0, 5).forEach((t, q) => g.fillText(q === 4 && lines.length > 5 ? t.slice(0, -1) + "…" : t, x0 + 18, hy + 310 + q * 20)); }
-      else { const tg = [...(h.ana || []).filter(a => !ODDS_TAGS.has(a)), h.style].filter(Boolean).slice(0, 2).join("・"); if (tg) txt(tg, x0 + cw / 2, hy + 382, 22, "#f7e7a6", { al: "center", max: cw - 30 }); } });
+      else { const tg = [...(h.ana || []).filter(a => !ODDS_TAGS.has(a)), h.style].filter(Boolean).slice(0, 2).join("・");
+        txt(h.mk != null ? `シミュレーションで${MARKS[h.mk]}評価（記録から言える推奨材料は少なめ）` : "", x0 + 18, hy + 330, 18, "#f7e7a6", { max: cw - 36 });
+        if (tg) txt(tg, x0 + cw / 2, hy + 382, 22, "#f7e7a6", { al: "center", max: cw - 30 }); } });
   } else if (d){
     const wk = wakuNo(r, d.num, x.field, d.waku);
     rr(48, y + 96, 112, 112, 10, WAKU[wk - 1] || "#fff", "#999"); txt(d.num, 104, y + 186, 86, WAKU_TX[wk - 1] || "#111", { al: "center", f: FD, w: "normal" });
@@ -6193,7 +6216,7 @@ function raceXText(r, x){
   const race = nm(r.name).replace(/[（(].*?[)）]/g, "");
   const head = `【${r.venue}${r.no}R ${race}】`;
   const mk = (x.marks || []).slice(0, 3).map((m, k) => `${"◎○▲"[k]}${m.num}${nm(m.name)}`);
-  const DS = (x.darks ? x.darks : (x.marks || []).map((m, k) => ({ ...m, mk: k })).filter(m => (m.pop || 0) >= 5)).slice(0, 2);
+  const DS = darkSet(x);
   const tierTxt = h => { const t = darkTier(tierP(x, h)); return t ? `【${t.stars}${t.label}】` : ""; };
   // 2026-10-25：画像と同じ馬を書く（画像は2頭のときだけ◎○▲の穴馬2頭、それ以外は注目穴馬）
   const ana = (DS.length >= 2 || (DS.length && !x.dark)) ? `穴馬は${DS.map(h => `${h.num}${nm(h.name)}(${h.pop}人気)${tierTxt(h)}`).join("と")}` : x.dark ? `穴馬は${x.dark.num}${nm(x.dark.name)}(${x.dark.pop}人気)${tierTxt(x.dark)}` : "";
@@ -6225,6 +6248,14 @@ function dayPicks(items){
 }
 // 2026-10-25：注目穴馬の自信度（5段階）。3着内の見込みで分ける。過去の5番人気以下約12万5千頭で、見込みどおりの割合で3着内に来ていた：
 //  ★5 激アツ（30%以上・実際31%）／★4 勝負気配（24〜30%・27%）／★3 狙い目（18〜24%・21%）／★2 一発ある（13〜18%・16%）／★1 大穴ロマン（13%未満・6%）
+// 2026-10-25：画像・X投稿文に出す穴馬。注目穴馬（☆）＋◎○▲に入った5番人気以下の馬（推奨理由がなくても）を、最大2頭。
+//  10/18から「推奨理由のない印の穴馬」を外していたため、○に7番人気がいても1頭しか出ないことがあった
+function darkSet(x){
+  const top = (x.marks || []).slice(0, 3).map((m, k) => ({ ...m, mk: k })), out = [];
+  if (x.dark){ const k = top.findIndex(m => +m.num === +x.dark.num); out.push({ ...x.dark, mk: k >= 0 ? k : null, isDark: true }); }
+  top.filter(m => (m.pop || 0) >= 5).forEach(m => { if (out.some(o => +o.num === +m.num)) return; const dd = (x.darks || []).find(q => +q.num === +m.num); out.push({ ...m, ...(dd || {}), mk: m.mk }); });
+  return out.slice(0, 2);
+}
 function darkTier(p){
   if (p == null || !isFinite(p)) return null;
   const T = [[0.30, 5, "激アツ", "#ff3b30"], [0.24, 4, "勝負気配", "#ff8a00"], [0.18, 3, "狙い目", "#f2c94c"], [0.13, 2, "一発ある", "#4fc3f7"], [0, 1, "大穴ロマン", "#b0bec5"]];
@@ -6286,7 +6317,7 @@ function summarizeSim(r, sim){
     // ◎○▲に入った5番人気以下（2頭以上なら画像は2頭版）
     // 14頭以上は△を5頭まで（画像用）
     subs5: f.length >= 14 ? w.slice(3, 8).map(mk) : null,
-    darks: w.slice(0, 3).map((x, k) => ({ x, k })).filter(q => (f[q.x.i].pop || 0) >= 5).map(q => ({ ...mk(q.x), mk: q.k, ana: (f[q.x.i].ana || []).filter(a => !ODDS_TAGS.has(a)).slice(0, 3), why: (() => { try { const tx = darkText(sim.ctx, f[q.x.i]); return tx ? [tx] : []; } catch (e) { return []; } })() })).filter(d => d.why.length),
+    darks: w.slice(0, 3).map((x, k) => ({ x, k })).filter(q => (f[q.x.i].pop || 0) >= 5).map(q => ({ ...mk(q.x), mk: q.k, ana: (f[q.x.i].ana || []).filter(a => !ODDS_TAGS.has(a)).slice(0, 3), why: (() => { try { const tx = darkText(sim.ctx, f[q.x.i]); return tx ? [tx] : []; } catch (e) { return []; } })() })),   // 10/25：理由がない印の穴馬も残す（画像・文章で2頭出すため）
     star: (() => { const dn = sim.dark?.f.num; const k = w.findIndex(s => s.num === dn); return dn != null && k >= 3 ? mk(w[k]) : null; })(),
     pace: (() => { const pf = Engine.paceForecast(sim.ctx); return { slow: pf.slow, mid: pf.mid, high: pf.high, best: pf.best, front: pf.frontCount }; })(),
     t1: tks(sim.plans?.[1000]), t5: tks(sim.plans?.[5000]),
@@ -6375,7 +6406,8 @@ async function cloudApi(path, opt){
   const u = new URL(path, "http://x"), p = u.pathname, method = opt?.method || "GET";
   if (p === "/api/status"){
     const st = await staticJson("status.json", opt?.timeout).catch(e => { if (String(e).includes("404")) return { dates: [] }; throw e; });
-    const d = new Date(); d.setDate(d.getDate() + ((7 - d.getDay()) % 7));
+    // 2026-10-25：土曜も開催日として扱う（名前は nextSunday のまま：土曜18時までは その土曜、それ以外は次の日曜）
+    const d = new Date(); if (!(d.getDay() === 6 && d.getHours() < 18)) d.setDate(d.getDate() + ((7 - d.getDay()) % 7));
     return { ...st, running: !!SERVER.cloudWait, nextSunday: iso(d).replace(/-/g, "") };
   }
   if (p === "/api/db"){
@@ -6475,7 +6507,7 @@ function renderUpd(){
       <button class="btn" id="checkBtn" ${BATCH.running || job || !n ? "disabled" : ""}>答え合わせ</button>
       <div class="progress"><i id="updProg" style="width:${job ? (SERVER.cloud ? Math.min(95, Math.round((Date.now() - (SERVER.cloudWait?.since || Date.now())) / 60000 / (SERVER.cloudWait?.kind === "odds" ? 5 : 20) * 100)) : Math.round(100 * (job.done || 0) / Math.max(1, job.total || 1))) : 0}%"></i></div>
     </div>
-    <div class="msg" id="updMsg">${SERVER.cloud ? (SERVER.lastMsg ? esc(SERVER.lastMsg) : `自動更新：金曜20時・土曜18時に全レース、土曜夜と日曜7〜16時は30分ごとにオッズ（PCの電源は不要）。${s?.error ? `<br><b>前回の取得でエラー：</b>${esc(s.error)}` : ""}`) : job ? `<b>${esc(job.step)}</b> ${job.done}/${job.total}　${esc(isoOf(job.date))} を取得中（PCで処理しています。画面を閉じても続きます）` : SERVER.lastMsg ? esc(SERVER.lastMsg) : (SERVER.enabled ? "「この日の全レースを取得」で1R〜12Rの全出走馬をDBに自動登録し、そのまま全レースを一括シミュレーションします（初回は15〜25分ほど）。" : "")}</div>
+    <div class="msg" id="updMsg">${SERVER.cloud ? (SERVER.lastMsg ? esc(SERVER.lastMsg) : `自動更新：金曜20時（土・日）と土曜18時（日曜）に全レース、土曜・日曜の7〜16時は15分ごとにオッズ、レース後に結果と答え合わせ（PCの電源は不要）。${s?.error ? `<br><b>前回の取得でエラー：</b>${esc(s.error)}` : ""}`) : job ? `<b>${esc(job.step)}</b> ${job.done}/${job.total}　${esc(isoOf(job.date))} を取得中（PCで処理しています。画面を閉じても続きます）` : SERVER.lastMsg ? esc(SERVER.lastMsg) : (SERVER.enabled ? "「この日の全レースを取得」で1R〜12Rの全出走馬をDBに自動登録し、そのまま全レースを一括シミュレーションします（初回は15〜25分ほど）。" : "")}</div>
     ${!SERVER.cloud && !SERVER.cloudInfo?.configured && SERVER.on ? `<div class="msg">外出先からスマホで使うには <a href="#" id="toCloud">クラウド公開の設定</a>（最初に一度だけ・無料）</div>` : ""}
     ${s?.log?.length ? `<details ${job && !SERVER.cloud ? "open" : ""}><summary class="small">取得ログ</summary><pre id="updLog">${esc(s.log.join("\n"))}</pre></details>` : ""}`;
   const dEl = $("#updDate"); if (dEl) dEl.onchange = e => { SERVER.updDate = e.target.value; };
@@ -7832,7 +7864,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261025h";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
+const APP_BUILD = "20261025k";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
 const PRE25 = { busy: false, msg: "", res: null,
   hit: { mu: [3.37976, 11.89168, 14.55231], s: [0.68478, 4.63845, 2.34832], w: [-0.42417, -0.23955, -0.06202], b: -1.92086 }, ca: 1.0949232, cb: 0.2081896 };
 const pre25Pev = (f, n) => { if (!f || !f.pl || !f.ph || !(f.odds > 1)) return null; const x = [Math.log(f.odds), Math.log(f.odds) ** 2, n]; let z = PRE25.hit.b; for (let j = 0; j < 3; j++) z += PRE25.hit.w[j] * (x[j] - PRE25.hit.mu[j]) / PRE25.hit.s[j]; return 1 / (1 + Math.exp(-z)) * (PRE25.ca * f.pl + PRE25.cb * (f.ph - f.pl)); };
@@ -8174,7 +8206,15 @@ function perfDashboard(d){
   const dayRow = PERF_PLANS.map(([k]) => { const t = c.tot[k]; return t ? { n: t.races, inv: t.invest, ret: t.ret, hit: t.hitRaces } : null; });
   const cum = PERF.want ? perfCum() : null; if (PERF.want && !cum && (SERVER.enabled || SERVER.cloud)) perfLoad();
   const sel = `<select id="perfRace">${ids.map(id => { const r = DB.races[id]; return `<option value="${id}" ${id === PERF.race ? "selected" : ""}>${r ? `${esc(r.venue)}${r.no}R ${esc(r.name || "")}` : id}</option>`; }).join("")}</select>`;
-  return `<div class="tbl-wrap"><table class="perf"><thead><tr><th class="rowh"></th>${PERF_PLANS.map(([, , a, b]) => `<th>${a}<br><b>${b}</b></th>`).join("")}</tr></thead><tbody>
+  // 2026-10-25：スマホ（幅700px未満）では表をやめて、買い方ごとのカードで縦に並べる（列が多くて文字が重なっていた）
+  const mini = (lb, x, empty) => { if (!x || !x.n) return `<div class="pm"><span class="pl">${lb}</span><span class="pv mut">—</span><span class="ps">${empty || "購入なし"}</span></div>`;
+    const roi = x.inv ? x.ret / x.inv : 0, prof = x.ret - x.inv;
+    return `<div class="pm"><span class="pl">${lb}</span><span class="pv ${roi >= 1 ? "pos" : "neg"}">${Math.round(roi * 100)}%</span><span class="ps">的中 ${x.hit}/${x.n}・<b class="${prof >= 0 ? "pos" : "neg"}">${prof >= 0 ? "+" : "−"}${Math.abs(Math.round(prof)).toLocaleString()}円</b></span></div>`; };
+  const cards = `<div class="perfm"><div class="small" style="margin-bottom:6px">指定レース ${sel.replace('id="perfRace"', 'id="perfRaceM"')}${pr ? `　結果 ${pr.order.join("→")}` : ""}</div>
+    ${PERF_PLANS.map(([, key, a, b], k) => `<div class="pcard ${dayRow[k] && dayRow[k].inv && dayRow[k].ret >= dayRow[k].inv ? "win" : ""}"><div class="ph">${a}<span>${b}</span></div>
+      ${mini("指定レース", raceRow[k])}${mini(`${esc(d.slice(5).replace("-", "/"))}の合計`, dayRow[k])}${cum ? mini("これまでの累計", cum.out[key], "まだ記録なし") : ""}</div>`).join("")}
+    ${cum ? "" : `<div class="sub small">累計は表の下の「累計も表示する」で出せます</div>`}</div>`;
+  return `${cards}<div class="tbl-wrap perfwide"><table class="perf"><thead><tr><th class="rowh"></th>${PERF_PLANS.map(([, , a, b]) => `<th>${a}<br><b>${b}</b></th>`).join("")}</tr></thead><tbody>
     <tr><td class="rowh">指定レース<br>${sel}${pr ? `<div class="sub">結果 ${pr.order.join("→")}</div>` : ""}</td>${raceRow.map(perfCell).join("")}</tr>
     <tr><td class="rowh">${esc(d.slice(5).replace("-", "/"))} の合計<div class="sub">${c.n}レース</div></td>${dayRow.map(perfCell).join("")}</tr>
     <tr><td class="rowh">これまでの累計<div class="sub">${cum ? `学習した${cum.races.toLocaleString()}レース` : PERF.loading ? "読み込み中…" : PERF.err ? "読み込めませんでした" : ""}</div></td>${cum ? PERF_PLANS.map(([, key]) => perfCell(cum.out[key], key === "t5s" || key === "dkA" || key === "dkB" || key === "fr" || /^mo\d?$/.test(key) ? "該当なし・まだ記録なし（10/11から記録）" : null)).join("") : `<td colspan="${PERF_PLANS.length}"><div class="sub">${PERF.loading ? "読み込み中…" : PERF.want ? "累計は、学習の記録がある端末（PCのアプリ）で表示されます" : `<button class="btn" id="perfCumBtn">累計も表示する（全記録を読むので時間がかかります）</button>`}</div></td>`}</tr>
@@ -8479,6 +8519,7 @@ function renderAllTab(){
   el.querySelectorAll("[data-xgcopy]").forEach(b => b.onclick = async () => { const t = XPOST.g?.[+b.dataset.xgcopy]; if (!t) return; try { await navigator.clipboard.writeText(t); toast("コピーしました"); } catch (e) { toast("コピーできませんでした（文字を選んでコピーしてください）"); } });
   el.querySelectorAll("[data-cm]").forEach(b => b.onclick = () => { CHECK_MODE.v = b.dataset.cm; CHECK_ALL.res = null; computeCheck(d); renderAllTab(); });
   const pr = el.querySelector("#perfRace"); if (pr) pr.onchange = e => { PERF.race = e.target.value; renderAllTab(); };
+  const prm = el.querySelector("#perfRaceM"); if (prm) prm.onchange = e => { PERF.race = e.target.value; renderAllTab(); };
   const pcb = el.querySelector("#perfCumBtn"); if (pcb) pcb.onclick = () => { PERF.want = true; renderAllTab(); };
   const ca = el.querySelector("#checkAll"); if (ca) ca.onclick = () => checkAllDates();
   el.querySelectorAll("[data-img]").forEach(b => b.onclick = () => showRaceImage(b.dataset.img));
