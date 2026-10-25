@@ -29,6 +29,7 @@ bf.init(DATA)
 jc.init(DATA)
 DB_PATH = Path(os.environ.get("KEIBA_DB") or (HERE / "keiba.db"))
 TWEAKS = DATA / "tweaks.json"
+NOTES_F = DATA / "notes.json"   # 不利メモ（画面で手書き・2026-10-25）
 JOB = {"running": False, "date": None, "step": "", "done": 0, "total": 0, "log": [], "error": None, "finished_at": None, "kind": None}
 LOCK = threading.Lock()
 
@@ -423,6 +424,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception:
                 return self._json({"ok": False}, 404)
         if u.path == "/api/tweaks": return self._json(json.loads(TWEAKS.read_text(encoding="utf-8")) if TWEAKS.exists() else {})
+        if u.path == "/api/notes": return self._json(json.loads(NOTES_F.read_text(encoding="utf-8")) if NOTES_F.exists() else {})
         if u.path == "/api/pre":
             ymd = re.sub(r"\D", "", (q.get("date") or [""])[0])[:8]
             return self._json(get_pre(ymd) if len(ymd) == 8 else {})
@@ -648,6 +650,15 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"ok": True, "records": len(recs), "modelSaved": model_ok})
             except Exception as ex:
                 return self._json({"ok": False, "message": str(ex)}, 400)
+        if u.path == "/api/notes":
+            n = int(self.headers.get("Content-Length", 0))
+            if n > 5_000_000: return self._json({"ok": False, "message": "too large"}, 413)
+            try:
+                j = json.loads(self.rfile.read(n).decode("utf-8"))
+                if not isinstance(j, dict): raise ValueError("object expected")
+                tmp = NOTES_F.with_suffix(".tmp"); tmp.write_text(json.dumps(j, ensure_ascii=False), encoding="utf-8"); tmp.replace(NOTES_F)
+                return self._json({"ok": True})
+            except Exception as ex: return self._json({"ok": False, "message": str(ex)}, 400)
         if u.path in ("/api/tweaks", "/api/summary"):
             n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8")
             if u.path == "/api/tweaks": target = TWEAKS

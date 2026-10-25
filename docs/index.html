@@ -196,6 +196,17 @@ td.hi{font-weight:700;color:var(--turf)}
 .chip{font-size:10.5px;padding:1px 7px;border-radius:10px;border:1px solid var(--line);white-space:nowrap;font-weight:500}
 .chip.ana{border-color:var(--gold);color:var(--gold);background:color-mix(in srgb,var(--gold) 10%,transparent)}
 .chip.disc{border-color:var(--muted);color:var(--muted)}
+.nbtn{all:unset;cursor:pointer;font-size:12px;margin-left:6px;padding:0 6px;border:1px solid var(--line);border-radius:10px;font-weight:500;color:var(--muted);white-space:nowrap}
+.nbtn.has{border-color:#e0559b;color:#e0559b}
+.nmemo{font-size:11px;font-weight:500;color:#e0559b;margin-top:2px;white-space:normal}
+#noteModal .box{background:var(--surface);color:var(--ink);border-radius:14px;padding:16px;width:min(460px,100%);max-height:90vh;overflow:auto;box-shadow:0 10px 40px rgba(0,0,0,.4)}
+#noteModal select,#noteModal textarea{width:100%;box-sizing:border-box;font-size:15px;margin:6px 0}
+#noteModal textarea{min-height:80px}
+#noteModal .nchips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+#noteModal .nchips button{all:unset;cursor:pointer;font-size:13px;padding:4px 10px;border:1px solid var(--line);border-radius:14px}
+#noteModal .nchips button.on{background:#e0559b;border-color:#e0559b;color:#fff}
+.nlist{max-height:260px;overflow:auto;font-size:12px}
+.nlist div{padding:4px 0;border-bottom:1px solid var(--line);cursor:pointer}
 .legend{margin:6px 0;padding-left:18px;display:flex;flex-direction:column;gap:3px}
 .matrix{display:flex;flex-direction:column;gap:6px;overflow-x:auto;padding-bottom:4px}
 .mrow{display:grid;grid-template-columns:34px repeat(3,minmax(150px,1fr));gap:6px}
@@ -626,7 +637,8 @@ const Engine = (() => {
     const runs = (horse.runs || []).map(parseRun).filter(r => r.pos > 0 && r.field > 0 && (!race.date || !r.date || r.date < race.date))
       .sort((a,b) => b.date.localeCompare(a.date));
     // 取り込んだレース後コメント・SNSの反応（馬ごとに 日付→テキスト）
-    runs.forEach(r => { const c = horse.notes?.[r.date]; if (c) r.note = (r.note ? r.note + "／" : "") + c; });
+    //  2026-10-25：画面で手書きした「不利メモ」（horse.userNotes）も同じ扱い。新しい重みは足さず、既存の「不利の言葉を含む走は度外視」の判定にだけ使う
+    runs.forEach(r => { const c = [horse.notes?.[r.date], horse.userNotes?.[r.date]].filter(Boolean).join("／"); if (c) r.note = (r.note ? r.note + "／" : "") + c; });
     const D = race.distance, surf = race.surface === "障" ? "芝" : race.surface;
     const flat = runs.filter(r => r.surface !== "障");
     const out = { runs, n: runs.length };
@@ -651,6 +663,20 @@ const Engine = (() => {
     runs.forEach(r => {
       r.adjRating = r.rating;
       if (r.trouble.length && r.rating < baseLine){ r.adjRating = baseLine + 0.5 * (r.rating - baseLine); r.discounted = true; }   // マイナス分を0.5倍
+    });
+    // 2026-10-25：不利メモの「不利がなければ何着くらい」（horse.userGain：日付→着順）。
+    //  同じレースでその着順だった馬の着差（DBにいなければ着順1つ0.15秒の目安）までの差の半分だけ、最大0.5秒、着差を縮めて評価し直す。
+    //  手書きの見立ては甘くなりやすいので半分・上限つき。度外視の値と比べて高いほうを使う
+    runs.forEach(r => {
+      const g = horse.userGain?.[r.date];
+      if (!(g >= 1) || !(r.pos > g) || r.margin == null || r.overseas) return;
+      let tm = g === 1 ? 0 : null;
+      if (tm == null && horses && r.raceId){ const X = oppIndex(horses);
+        for (const o of (X.idx[r.raceId] || [])){ if (o === horse) continue; const q = (o.runs || []).find(z => z.raceId === r.raceId); if (q){ const pq = parseRun(q); if (pq.pos === g && pq.margin != null){ tm = Math.max(0, pq.margin); break; } } } }
+      if (tm == null) tm = Math.max(0, r.margin - 0.15 * (r.pos - g));
+      const credit = clamp(0.5 * (r.margin - tm), 0, 0.5); if (credit <= 0) return;
+      const lifted = runRating({ ...r, margin: r.margin - credit }) + r.opp;
+      if (lifted > r.adjRating){ r.userLift = lifted - r.adjRating; r.adjRating = lifted; r.userCredit = credit; }
     });
     out.discounted = runs.filter(r => r.discounted).length;
     // スピード指数（全馬の全走から作った基準タイムで算出）
@@ -867,7 +893,7 @@ const Engine = (() => {
       const pop = e.pop || null;
       const ana = [];
       const hit = k => ana.push(k);
-      if (p.last?.discounted || (p.last?.trouble?.length && p.last.rating < p.ability)) hit("前走度外視");
+      if (p.last?.discounted || p.last?.userLift || (p.last?.trouble?.length && p.last.rating < p.ability)) hit("前走度外視");   // userLift：不利メモで「不利なければ○着」（2026-10-25）
       if (p.last?.grade === "G1" && (GRADE_RANK[R.grade] ?? 4) < 7 && p.last.pos >= 4) hit("G1からの格下げ");
       if (p.bigRaceTop3 && pop && pop >= 6) hit("実績の割に人気薄");
       if (p.distChange <= -200) hit("距離短縮");
@@ -4697,12 +4723,82 @@ function mergeImport(j){
   });
   // 旧方式の重みファイル（model_weights.json など）は使わない：学習は「学習・成績」の記録からだけ行う（二重の学習・未来の情報の混入を防ぐ）
   if (j.source) DB.meta.sources.push(j.source + (j.generated ? " " + j.generated : ""));
+  if (typeof applyNotes === "function" && Object.keys(NOTES).length) applyNotes();
   return { nr, nh };
 }
 function persist(){
   try { localStorage.setItem(STORE, JSON.stringify({ imports: imports, tweaks })); } catch (e) {}
   if (SERVER.on && !SERVER.cloud) fetch("/api/tweaks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(tweaks) }).catch(() => {});
 }
+// ===== 不利メモ（2026-10-25）=====
+//  馬ごと・走ごと（日付）に手で書くメモ。予想への使い方は「レース後コメント」と同じ：出遅れ・詰まり・外を回された等の言葉を含む走は
+//  次の予想から“度外視”（その走のマイナス評価を半分に）になり、前走なら穴要素「前走度外視」も付く。新しい重みや加点は足していない。
+//  保存先：このブラウザ（localStorage）＋PCのサーバー接続中は app/data/notes.json にも保存。削除は空文字で残す（PCとの同期で復活しないように）
+const NOTE_KEY = "keibaNotes.v1";
+let NOTES = {};   // { 馬ID: { name, d: { "YYYY-MM-DD": "メモ" } } }
+try { NOTES = JSON.parse(localStorage.getItem(NOTE_KEY) || "{}") || {}; } catch (e) { NOTES = {}; }
+const NOTE_CHIPS = ["出遅れ", "前が詰まった", "外を回された", "挟まれた", "躓いた", "掛かった", "進路がなかった", "落鉄", "馬場不向き", "展開不向き"];
+const NOTED = new Set();
+function noteHorse(k){ return DB.horses[k] || (NOTES[k]?.name ? Object.values(DB.horses).find(x => x.name === NOTES[k].name) : null) || null; }
+function applyNotes(){
+  NOTED.forEach(h => { delete h.userNotes; delete h.userGain; }); NOTED.clear();
+  Object.entries(NOTES).forEach(([k, v]) => { const d = Object.fromEntries(Object.entries(v.d || {}).filter(([, t]) => t)), g = Object.fromEntries(Object.entries(v.g || {}).filter(([, x]) => x >= 1));
+    if (!Object.keys(d).length && !Object.keys(g).length) return;
+    const h = noteHorse(k); if (!h) return; h.userNotes = { ...(h.userNotes || {}), ...d }; h.userGain = { ...(h.userGain || {}), ...g }; NOTED.add(h); });
+}
+const GAIN_TXT = g => g === 1 ? "勝っていた" : g ? `${g}着相当` : "";
+function notesOf(h){ const ds = new Set([...Object.keys(h?.userNotes || {}), ...Object.keys(h?.userGain || {})]);
+  return [...ds].sort((a, b) => b.localeCompare(a)).map(d => [d, [h.userNotes?.[d] || "", h.userGain?.[d] ? `【不利なければ${GAIN_TXT(h.userGain[d])}】` : ""].filter(Boolean).join(" ")]); }
+function saveNotes(){
+  try { localStorage.setItem(NOTE_KEY, JSON.stringify(NOTES)); } catch (e) {}
+  if (SERVER.on && !SERVER.cloud) fetch("/api/notes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(NOTES) }).catch(() => {});
+}
+async function syncNotes(){   // PCのサーバーのメモと合わせる（同じ日付はこのブラウザ側を優先）
+  if (!SERVER.on || SERVER.cloud) return;
+  try { const j = await api("/api/notes"); let add = 0;
+    Object.entries(j || {}).forEach(([k, v]) => { const o = NOTES[k] ||= { name: v.name, d: {} }; o.g ||= {};
+      Object.entries(v.d || {}).forEach(([d, t]) => { if (!(d in o.d)){ o.d[d] = t; if (v.g?.[d]) o.g[d] = v.g[d]; add++; } }); });
+    applyNotes(); saveNotes(); if (add) renderAll();
+  } catch (e) {}
+}
+function setNote(hid, name, date, text, gain){
+  const o = NOTES[hid] ||= { name, d: {} }; o.name = name || o.name; o.d[date] = (text || "").trim(); o.g ||= {}; if (gain >= 1) o.g[date] = +gain; else delete o.g[date];
+  applyNotes(); saveNotes();
+  // このメモの日より後のレースに出る予想は、計算し直すまで「古い」扱い
+  Object.values(DB.races).forEach(r => { if (r.date > date && r.entries?.some(e => (e.horseId || e.name) === hid || e.name === name)) markStale(r.id); });
+  renderAll(); if (ST.tab !== "db") { try { renderDB(); } catch (e) {} }
+}
+function openNoteModal(hid, date0){
+  const h = DB.horses[hid] || Object.values(DB.horses).find(x => x.name === hid); const name = h?.name || hid, key = h?.id || hid;
+  const r = curRace(); const runs = (h?.runs || []).map(Engine.parseRun).filter(q => q.date).sort((a, b) => b.date.localeCompare(a.date));
+  const opts = []; const seen = new Set();
+  if (r?.date && r.entries?.some(e => (e.horseId || e.name) === key || e.name === name)){ opts.push([r.date, `今回 ${r.date} ${r.venue}${r.no}R ${r.name || ""}`]); seen.add(r.date); }
+  runs.forEach(q => { if (seen.has(q.date)) return; seen.add(q.date); opts.push([q.date, `${q.date} ${q.venue || ""} ${q.race || ""} ${q.pos ? q.pos + "着" : ""}`]); });
+  if (!opts.length) opts.push([new Date().toISOString().slice(0, 10), "今日"]);
+  const d0 = date0 && seen.has(date0) ? date0 : opts[0][0];
+  let m = $("#noteModal"); if (m) m.remove(); m = document.createElement("div"); m.id = "noteModal";
+  m.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px";
+  m.innerHTML = `<div class="box"><h3 style="margin:0 0 6px;font-size:16px">📝 不利メモ：${esc(name)}</h3>
+    <label class="small">どのレース？</label><select id="nmDate">${opts.map(([d, l]) => `<option value="${d}" ${d === d0 ? "selected" : ""}>${esc(l)}${NOTES[key]?.d?.[d] || NOTES[key]?.g?.[d] ? "（メモあり）" : ""}</option>`).join("")}</select>
+    <div class="small">よくある不利（押すと追加）</div><div class="nchips">${NOTE_CHIPS.map(c => `<button type="button" data-c="${c}">${c}</button>`).join("")}</div>
+    <textarea id="nmText" placeholder="例：出遅れて外を回されたが、最後は凄い脚で4着まで追い上げた"></textarea>
+    <label class="small">不利がなければ何着くらい？（その走の着順より上を選ぶと、評価を上げます）</label>
+    <select id="nmGain"><option value="">選ばない（着順どおり）</option><option value="1">勝っていた</option><option value="2">2着くらい</option><option value="3">3着くらい</option><option value="5">掲示板（5着）くらい</option></select>
+    <p class="small" style="margin:4px 0 10px"><b>予想への反映</b>：①出遅れ・詰まった・外を回された などの言葉が入った負けは<b>度外視</b>（マイナスを半分に）。②「何着くらい」を選ぶと、同じレースのその着順の馬との差の<b>半分（最大0.5秒）</b>だけ着差を縮めて評価し直します（見立ては甘くなりやすいので控えめに）。①②の高いほうを使います。</p>
+    <div class="ctrls"><button class="btn primary" id="nmSave">保存</button><button class="btn" id="nmDel">このメモを消す</button><button class="btn" id="nmClose">閉じる</button></div></div>`;
+  document.body.appendChild(m);
+  const ta = $("#nmText"), sel = $("#nmDate"), gs = $("#nmGain");
+  const load = () => { ta.value = NOTES[key]?.d?.[sel.value] || ""; gs.value = NOTES[key]?.g?.[sel.value] || ""; m.querySelectorAll("[data-c]").forEach(b => b.classList.toggle("on", ta.value.includes(b.dataset.c))); };
+  load(); sel.onchange = load; ta.oninput = () => m.querySelectorAll("[data-c]").forEach(b => b.classList.toggle("on", ta.value.includes(b.dataset.c)));
+  m.querySelectorAll("[data-c]").forEach(b => b.onclick = () => { const c = b.dataset.c; if (ta.value.includes(c)) ta.value = ta.value.replace(new RegExp("[・、]?" + c), "").replace(/^[・、]/, ""); else ta.value = ta.value ? ta.value.replace(/[・、\s]*$/, "") + "・" + c : c; ta.oninput(); });
+  const close = () => m.remove();
+  m.onclick = e => { if (e.target === m) close(); }; $("#nmClose").onclick = close;
+  $("#nmSave").onclick = () => { if (!ta.value.trim() && !gs.value){ toast("メモが空です"); return; }
+    const q = runs.find(x => x.date === sel.value); if (gs.value && q?.pos && +gs.value >= q.pos){ toast(`実際の着順（${q.pos}着）より上を選んでください`); return; }
+    setNote(key, name, sel.value, ta.value, +gs.value || 0); close(); toast("メモを保存しました。次の予想（計算し直し）から反映されます"); };
+  $("#nmDel").onclick = () => { setNote(key, name, sel.value, "", 0); close(); toast("メモを消しました"); };
+}
+document.addEventListener("click", e => { const b = e.target.closest?.("[data-note]"); if (!b) return; e.preventDefault(); e.stopPropagation(); openNoteModal(b.dataset.note, b.dataset.nd || ""); }, true);
 const SERVER = { on: false, status: null, timer: null, enabled: typeof APP_MODE !== "undefined" && (APP_MODE === "server" || APP_MODE === "cloud"), cloud: typeof APP_MODE !== "undefined" && APP_MODE === "cloud" };
 let imports = [], tweaks = {};
 // 「オッズを○%信じる」の手動設定は、起動し直すと学習値（自動）に戻す（気づかないまま古い手動設定で計算し続けないように）
@@ -5033,7 +5129,8 @@ function renderCard(){
     const disc = p.discounted ? `<span class="chip disc" title="不利・大敗などでマイナス評価を半分にした走">度外視${p.discounted}走</span>` : "";
     return `<tr>
       <td>${ub(f.num, f.waku)}</td>
-      <td class="hname"><button data-h="${esc(f.horseId)}">${esc(f.name)}</button><div class="small">${esc(f.sexAge)}・${esc(f.trainer || "")}${f.pop ? `・${f.pop}人気` : ""} ${popMoveHtml(f)}</div><div class="small">${h?.sire ? `父 ${esc(h.sire)}${p.blood?.line ? `（${esc(p.blood.line)}）` : ""}・母父 ${esc(h.damsire || "—")}` : ""}</div>${ana}</td>
+      <td class="hname"><button data-h="${esc(f.horseId)}">${esc(f.name)}</button>${(() => { const ns = notesOf(h), cur = ns.find(([d]) => d === r.date), past = ns.filter(([d]) => d < r.date).slice(0, 2);
+        return `<button class="nbtn ${ns.length ? "has" : ""}" data-note="${esc(h?.id || f.horseId)}" data-nd="${esc(r.date || "")}" title="この馬の不利メモを書く">📝${ns.length ? ns.length : "メモ"}</button>${past.map(([d, t]) => `<div class="nmemo">📝${esc(d.slice(5).replace("-", "/"))} ${esc(t)}</div>`).join("")}${cur ? `<div class="nmemo">📝今回 ${esc(cur[1])}</div>` : ""}`; })()}<div class="small">${esc(f.sexAge)}・${esc(f.trainer || "")}${f.pop ? `・${f.pop}人気` : ""} ${popMoveHtml(f)}</div><div class="small">${h?.sire ? `父 ${esc(h.sire)}${p.blood?.line ? `（${esc(p.blood.line)}）` : ""}・母父 ${esc(h.damsire || "—")}` : ""}</div>${ana}</td>
       <td class="r num">${f.weight.toFixed(1)}</td>
       <td>${esc(f.jockey)}</td>
       <td><span class="style ${p.style}">${p.n ? p.style : "—"}</span></td>
@@ -5467,9 +5564,16 @@ function renderDB(){
   el.innerHTML = `<div class="db">
     <div><input type="search" id="dbq" placeholder="馬名・父で検索" value="${esc(q)}" style="width:100%;margin-bottom:8px" aria-label="馬名検索">
       <div class="hl" id="hl">${list.map(x => `<button data-id="${esc(x.id)}" aria-current="${x.id === ST.dbHorse}"><span>${esc(x.name || x.id)}</span><small>${(x.runs || []).length}走</small></button>`).join("") || `<div class="small" style="padding:10px">該当なし</div>`}</div>
-      <p class="small">登録 ${all.length} 頭</p></div>
+      <p class="small">登録 ${all.length} 頭</p>
+      ${(() => { const L = Object.entries(NOTES).flatMap(([k, v]) => [...new Set([...Object.keys(v.d || {}), ...Object.keys(v.g || {})])].filter(d => v.d?.[d] || v.g?.[d]).map(d => ({ k, n: v.name || k, d, t: (v.d?.[d] || "") + (v.g?.[d] ? `【不利なければ${GAIN_TXT(v.g[d])}】` : "") }))).sort((a, b) => b.d.localeCompare(a.d));
+        return `<details class="card" style="padding:8px"><summary class="small"><b>📝 不利メモ一覧（${L.length}件）</b></summary>
+        <div class="nlist">${L.map(x => `<div data-id="${esc(DB.horses[x.k] ? x.k : (noteHorse(x.k)?.id || x.k))}"><b>${esc(x.n)}</b> ${esc(x.d)}<br>${esc(x.t)}</div>`).join("") || `<div class="small">まだありません。出馬表の馬名の横の📝から書けます</div>`}</div>
+        <p class="small">ほかの端末へ移す：コピーした文字を、移したい端末のこの欄に貼り付けて「取込」</p>
+        <textarea id="nmIO" style="width:100%;min-height:60px" placeholder="馬名,日付,メモ（1行に1件）"></textarea>
+        <div class="ctrls"><button class="btn" id="nmCopy">全部コピー</button><button class="btn" id="nmImp">取込</button></div></details>`; })()}</div>
     <div class="card">${!h ? "馬を選んでください" : `
-      <h2>${esc(h.name || h.id)}</h2>
+      <h2>${esc(h.name || h.id)} <button class="nbtn ${notesOf(h).length ? "has" : ""}" data-note="${esc(h.id)}" data-nd="${esc(ent ? r.date : runs[0]?.date || "")}">📝不利メモを書く</button></h2>
+      ${notesOf(h).length ? `<div class="nmemo" style="margin-bottom:6px">${notesOf(h).map(([d, t]) => `📝${esc(d)} ${esc(t)}`).join("<br>")}</div>` : ""}
       <div class="ped">${h.sire ? `父 ${esc(h.sire)}` : "父 —"}${h.dam ? `　母 ${esc(h.dam)}` : ""}${h.damsire ? `　母父 ${esc(h.damsire)}` : ""}${ent ? `　｜ ${esc(r.name)} ${ent.num}番` : ""}</div>
       ${(() => { const rc = [0,0,0,0]; runs.forEach(x => rc[Math.min(3, x.pos - 1)]++); const mine = `${runs.length}戦${rc[0]}勝 [${rc.join("-")}]`;
         const ok = h.record && h.record.replace(/\s/g, "") === mine.replace(/\s/g, "");
@@ -5490,10 +5594,16 @@ function renderDB(){
         <div class="apt"><div class="k">能力レーティング</div><div class="v">${p.ability.toFixed(1)}</div><div class="s">${ent ? "今回条件での評価" : "直近走の条件で評価"}</div></div>
       </div>` : ""}
       <div class="tbl-wrap"><table><thead><tr><th>日付</th><th>場</th><th>レース</th><th>条件</th><th>馬場</th><th class="r">人気</th><th class="r">着順</th><th class="r">頭数</th><th class="r">着差</th><th class="r">タイム</th><th>通過</th><th class="r">上り</th><th class="r">指数</th><th>騎手</th><th class="r">評価</th><th>度外視・不利</th></tr></thead>
-      <tbody>${(p ? p.runs : runs).map(x => `<tr><td class="num">${esc(x.date)}</td><td>${esc(x.venue)}</td><td>${esc(x.race)}</td><td><span class="surf ${x.surface}">${x.surface}</span>${x.dist}</td><td>${esc(x.going)}</td><td class="r num">${x.pop ?? ""}</td><td class="r num ${x.pos <= 3 ? "pos" : ""}">${x.pos}</td><td class="r num">${x.field}</td><td class="r num">${x.margin != null ? x.margin.toFixed(1) : ""}</td><td class="r num">${esc(x.time)}</td><td class="num">${x.passing.join("-")}</td><td class="r num">${x.last3f ?? ""}</td><td class="r num">${x.fig != null ? x.fig.toFixed(1) : ""}</td><td>${esc(x.jockey || "")}</td><td class="r num">${x.adjRating != null ? x.adjRating.toFixed(1) + (x.discounted ? `<div class="small">元 ${x.rating.toFixed(1)}</div>` : "") : ""}</td><td class="trouble">${x.trouble?.length ? (x.discounted ? "<b>度外視</b>：" : "") + esc(x.trouble.join("／")) : ""}</td></tr>`).join("") || `<tr><td colspan="16" class="small">過去走データなし（新馬）</td></tr>`}</tbody></table></div>`}
+      <tbody>${(p ? p.runs : runs).map(x => `<tr><td class="num">${esc(x.date)}</td><td>${esc(x.venue)}</td><td>${esc(x.race)}</td><td><span class="surf ${x.surface}">${x.surface}</span>${x.dist}</td><td>${esc(x.going)}</td><td class="r num">${x.pop ?? ""}</td><td class="r num ${x.pos <= 3 ? "pos" : ""}">${x.pos}</td><td class="r num">${x.field}</td><td class="r num">${x.margin != null ? x.margin.toFixed(1) : ""}</td><td class="r num">${esc(x.time)}</td><td class="num">${x.passing.join("-")}</td><td class="r num">${x.last3f ?? ""}</td><td class="r num">${x.fig != null ? x.fig.toFixed(1) : ""}</td><td>${esc(x.jockey || "")}</td><td class="r num">${x.adjRating != null ? x.adjRating.toFixed(1) + (x.discounted || x.userLift ? `<div class="small">元 ${x.rating.toFixed(1)}${x.userLift ? `・メモで+${x.userLift.toFixed(1)}` : ""}</div>` : "") : ""}</td><td class="trouble">${x.trouble?.length ? (x.discounted ? "<b>度外視</b>：" : "") + esc(x.trouble.join("／")) : ""}<button class="nbtn ${h.userNotes?.[x.date] || h.userGain?.[x.date] ? "has" : ""}" data-note="${esc(h.id)}" data-nd="${esc(x.date)}">📝</button></td></tr>`).join("") || `<tr><td colspan="16" class="small">過去走データなし（新馬）</td></tr>`}</tbody></table></div>`}
     </div></div>`;
   $("#dbq").oninput = e => { ST.dbQuery = e.target.value; const pos = e.target.selectionStart; renderDB(); const i = $("#dbq"); i.focus(); i.setSelectionRange(pos, pos); };
   el.querySelectorAll("#hl [data-id]").forEach(b => b.onclick = () => { ST.dbHorse = b.dataset.id; renderDB(); });
+  el.querySelectorAll(".nlist [data-id]").forEach(b => b.onclick = () => { if (DB.horses[b.dataset.id]){ ST.dbHorse = b.dataset.id; renderDB(); } else toast("この馬はいまのデータに入っていません"); });
+  $("#nmCopy").onclick = () => { const txt = Object.entries(NOTES).flatMap(([k, v]) => [...new Set([...Object.keys(v.d || {}), ...Object.keys(v.g || {})])].filter(d => v.d?.[d] || v.g?.[d]).map(d => `${v.name || k},${d},${(v.d?.[d] || "").replace(/[\n,，]/g, " ")}${v.g?.[d] ? `【不利なければ${GAIN_TXT(v.g[d])}】` : ""}`)).join("\n");
+    if (!txt){ toast("メモがありません"); return; } navigator.clipboard.writeText(txt).then(() => toast("コピーしました"), () => { $("#nmIO").value = txt; $("#nmIO").select(); toast("欄に書き出しました。選択してコピーしてください"); }); };
+  $("#nmImp").onclick = () => { let n = 0; $("#nmIO").value.split(/\n/).map(l => l.trim()).filter(Boolean).forEach(l => { const [nm, d, ...rest] = l.split(/[,，\t]/); const date = (d || "").trim().replace(/\//g, "-"); let t = rest.join(" ").trim(); const gm = /【不利なければ(?:(勝っていた)|(\d+)着相当)】/.exec(t); const gain = gm ? (gm[1] ? 1 : +gm[2]) : 0; t = t.replace(/【不利なければ[^】]*】/, "").trim(); if (!nm || !/^\d{4}-\d{2}-\d{2}$/.test(date) || (!t && !gain)) return;
+      const h = Object.values(DB.horses).find(x => x.name === nm.trim()); const k = h?.id || nm.trim(); const o = NOTES[k] ||= { name: nm.trim(), d: {} }; o.d[date] = t; o.g ||= {}; if (gain) o.g[date] = gain; n++; });
+    if (!n){ toast("「馬名,日付,メモ」の形で入力してください（日付は2026-10-25の形）"); return; } applyNotes(); saveNotes(); renderAll(); renderDB(); toast(`${n}件のメモを取り込みました`); };
 }
 
 // ===== データ取込 =====
@@ -7026,6 +7136,7 @@ async function loadServerDB(){
       if (cleared) persist();
       mergeImport({ races: j.races, horses: j.horses });
       Object.assign(SEED.track, j.track || {});
+      syncNotes();
       if (j.cushion) CUSHION.avg = j.cushion;
       applyBodyWeight();
       const last = (j.dates || []).map(d => d.updated).filter(Boolean).sort().pop();
@@ -7129,7 +7240,7 @@ async function serverInit(){
   if (!Object.keys(ST.sims).length) runSim(true);
 }
 // ===== 学習（答え合わせの蓄積から、統合の仕方・要素の効き・馬場の偏りを更新） =====
-const LOGIC_VER = "5c42358f";
+const LOGIC_VER = "7133f2d4";
 const LEARN = { model: null, base: null, saved: null };
 // 実戦テスト（ルール固定）：固定した学習モデル。固定中は、全部の記録での学習は続けても予想には固定したモデルを使う
 const LOCK = { info: null, confirmOff: false };
@@ -7707,7 +7818,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261025d";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
+const APP_BUILD = "20261025f";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
 const PRE25 = { busy: false, msg: "", res: null,
   hit: { mu: [3.37976, 11.89168, 14.55231], s: [0.68478, 4.63845, 2.34832], w: [-0.42417, -0.23955, -0.06202], b: -1.92086 }, ca: 1.0949232, cb: 0.2081896 };
 const pre25Pev = (f, n) => { if (!f || !f.pl || !f.ph || !(f.odds > 1)) return null; const x = [Math.log(f.odds), Math.log(f.odds) ** 2, n]; let z = PRE25.hit.b; for (let j = 0; j < 3; j++) z += PRE25.hit.w[j] * (x[j] - PRE25.hit.mu[j]) / PRE25.hit.s[j]; return 1 / (1 + Math.exp(-z)) * (PRE25.ca * f.pl + PRE25.cb * (f.ph - f.pl)); };

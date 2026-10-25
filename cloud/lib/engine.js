@@ -223,7 +223,8 @@ const Engine = (() => {
     const runs = (horse.runs || []).map(parseRun).filter(r => r.pos > 0 && r.field > 0 && (!race.date || !r.date || r.date < race.date))
       .sort((a,b) => b.date.localeCompare(a.date));
     // 取り込んだレース後コメント・SNSの反応（馬ごとに 日付→テキスト）
-    runs.forEach(r => { const c = horse.notes?.[r.date]; if (c) r.note = (r.note ? r.note + "／" : "") + c; });
+    //  2026-10-25：画面で手書きした「不利メモ」（horse.userNotes）も同じ扱い。新しい重みは足さず、既存の「不利の言葉を含む走は度外視」の判定にだけ使う
+    runs.forEach(r => { const c = [horse.notes?.[r.date], horse.userNotes?.[r.date]].filter(Boolean).join("／"); if (c) r.note = (r.note ? r.note + "／" : "") + c; });
     const D = race.distance, surf = race.surface === "障" ? "芝" : race.surface;
     const flat = runs.filter(r => r.surface !== "障");
     const out = { runs, n: runs.length };
@@ -248,6 +249,20 @@ const Engine = (() => {
     runs.forEach(r => {
       r.adjRating = r.rating;
       if (r.trouble.length && r.rating < baseLine){ r.adjRating = baseLine + 0.5 * (r.rating - baseLine); r.discounted = true; }   // マイナス分を0.5倍
+    });
+    // 2026-10-25：不利メモの「不利がなければ何着くらい」（horse.userGain：日付→着順）。
+    //  同じレースでその着順だった馬の着差（DBにいなければ着順1つ0.15秒の目安）までの差の半分だけ、最大0.5秒、着差を縮めて評価し直す。
+    //  手書きの見立ては甘くなりやすいので半分・上限つき。度外視の値と比べて高いほうを使う
+    runs.forEach(r => {
+      const g = horse.userGain?.[r.date];
+      if (!(g >= 1) || !(r.pos > g) || r.margin == null || r.overseas) return;
+      let tm = g === 1 ? 0 : null;
+      if (tm == null && horses && r.raceId){ const X = oppIndex(horses);
+        for (const o of (X.idx[r.raceId] || [])){ if (o === horse) continue; const q = (o.runs || []).find(z => z.raceId === r.raceId); if (q){ const pq = parseRun(q); if (pq.pos === g && pq.margin != null){ tm = Math.max(0, pq.margin); break; } } } }
+      if (tm == null) tm = Math.max(0, r.margin - 0.15 * (r.pos - g));
+      const credit = clamp(0.5 * (r.margin - tm), 0, 0.5); if (credit <= 0) return;
+      const lifted = runRating({ ...r, margin: r.margin - credit }) + r.opp;
+      if (lifted > r.adjRating){ r.userLift = lifted - r.adjRating; r.adjRating = lifted; r.userCredit = credit; }
     });
     out.discounted = runs.filter(r => r.discounted).length;
     // スピード指数（全馬の全走から作った基準タイムで算出）
@@ -464,7 +479,7 @@ const Engine = (() => {
       const pop = e.pop || null;
       const ana = [];
       const hit = k => ana.push(k);
-      if (p.last?.discounted || (p.last?.trouble?.length && p.last.rating < p.ability)) hit("前走度外視");
+      if (p.last?.discounted || p.last?.userLift || (p.last?.trouble?.length && p.last.rating < p.ability)) hit("前走度外視");   // userLift：不利メモで「不利なければ○着」（2026-10-25）
       if (p.last?.grade === "G1" && (GRADE_RANK[R.grade] ?? 4) < 7 && p.last.pos >= 4) hit("G1からの格下げ");
       if (p.bigRaceTop3 && pop && pop >= 6) hit("実績の割に人気薄");
       if (p.distChange <= -200) hit("距離短縮");
