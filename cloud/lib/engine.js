@@ -245,6 +245,12 @@ const Engine = (() => {
 
     // 1走ごとの評価と度外視判定
     runs.forEach((r, i) => { r.opp = oppAdj(r, race.date, horse, horses); r.rating = runRating(r) + r.opp; r.trouble = detectTrouble(r, runs[i + 1], usualEarly, out.avgLast3f, mainSurf); });
+    // 2026-10-25：出遅れやすさ（馬ごと）。直近10走（8頭立て以上）のうち、1角が普段より大きく後ろだった走（出遅れ・後手）の回数で、出遅れの確率を変える。
+    //  クラウドの直近データ（2,005頭・14,201走、各走の前10走から次走を予想）：前10走で0回→次走7.0%・1回→14.8%・2回→19.6%・3回以上→22.2%（全体の平均12.4%）。
+    //  この比（0.56・1.19・1.58・1.79倍）をシミュの出遅れの確率（平均3%）に掛ける。4走未満の馬は平均どおり。全体の平均はほぼ変わらない（1.02倍）
+    const ssRuns = runs.filter(r => r.surface !== "障" && r.field > 7 && r.passing.length).slice(0, 10);
+    out.slowN = ssRuns.length; out.slowK = ssRuns.filter(r => r.trouble.some(t => /出遅/.test(t))).length;
+    out.slowMult = out.slowN >= 4 ? [0.56, 1.19, 1.58, 1.79][Math.min(3, out.slowK)] : 1;
     const baseLine = median(runs.map(r => r.rating)) ?? 60;
     runs.forEach(r => {
       r.adjRating = r.rating;
@@ -505,7 +511,7 @@ const Engine = (() => {
       const sigmaUp = ana.reduce((a, k) => a + (ANA[k]?.sig || 0), 0);
       Object.keys(adj).forEach(k => { if (k !== "能力" && k !== "手動" && WEIGHTS[k] != null) adj[k] *= WEIGHTS[k]; });
       let P = Object.values(adj).reduce((a,b)=>a+b,0);
-      return { ...e, prof: p, adj, P, sigma: p.sigma + sigmaUp * 0.5, earlyPos: p.earlyPos, style: p.style, kick: p.kick, horse: h, ana };
+      return { ...e, prof: p, adj, P, sigma: p.sigma + sigmaUp * 0.5, earlyPos: p.earlyPos, slowMult: p.slowMult || 1, style: p.style, kick: p.kick, horse: h, ana };
     });
     // ---- スピード指数・レース傾向・当日の馬場（クッション値など） ----
     const figs = field.map(f => f.prof.speedFig).filter(x => x != null);
@@ -648,13 +654,15 @@ const Engine = (() => {
       let early = clamp(f.earlyPos + gauss(rng) * 0.09, 0, 1);
       let p = f.P + gauss(rng) * f.sigma;
       const ev = [];
-      if (rng() < 0.03){ const l = 1 + 2 * rng(); p -= l; early = clamp(early + 0.18, 0, 1); ev.push("出遅れ"); }
+      // 出遅れの損（10/25）：以前は1〜3点（0.1〜0.3秒）。実際の後手の走は、その馬のふだんより着差が約0.38秒大きい（過去5年・16万走）ので3〜6点に。
+      //  過去3,227レース（前半2021-22年／後半2024-26年）で、勝ちの予測 2.0666→2.0661・2.0717→2.0702、3着内 0.4458→0.4456・0.4363→0.4361（両方わずかに改善）
+      if (rng() < 0.03 * (f.slowMult || 1)){ const l = 3 + 3 * rng(); p -= l; early = clamp(early + 0.18, 0, 1); ev.push("出遅れ"); }   // 出遅れやすさは馬ごと（10/25）
       const paceAdj = (pace - paceNeutral) * (early - 0.5) * 3.5;
       const strAdj = ctx.straightBias * (early - 0.5) * 0.8;
       const inside = 1 - (f.num - 1) / Math.max(1, N - 1);
       if (early > 0.45 && rng() < 0.08 + 0.08 * inside){ const l = 1 + 3 * rng(); p -= l; ev.push("進路カット"); }
       const total = p + paceAdj + strAdj;
-      res[i] = { i, total, early, ev };
+      res[i] = { i, total, early, ev, paceAdj, strAdj, luck: p - f.P };
     }
     const order = res.slice().sort((a,b) => b.total - a.total).map(r => r.i);
     if (!trace){ order.pace = pace; return order; }
@@ -662,7 +670,9 @@ const Engine = (() => {
     const paceTime = (pace - paceNeutral) * -0.35;
     const times = res.map(r => ctx.baseTime + paceTime - (r.total - ctx.refPts) * 0.1);
     const earlyOrder = res.slice().sort((a,b) => a.early - b.early).map(r => r.i);
-    return { order, times, early: res.map(r=>r.early), earlyOrder, events: res.map(r=>r.ev), pace, paceLabel: paceLabelOf(pace) };
+    // comp：その回の各馬の内訳（再生の吹き出し用。2026-10-25追加・集計には使わない）。luck＝その日のデキ＋不利（出遅れ・進路カット）
+    return { order, times, early: res.map(r=>r.early), earlyOrder, events: res.map(r=>r.ev), pace, paceLabel: paceLabelOf(pace),
+             comp: res.map(r => ({ paceAdj: r.paceAdj, strAdj: r.strAdj, luck: r.luck })) };
   }
 
   // --- モンテカルロ（chunk実行で進捗コールバック） ---
