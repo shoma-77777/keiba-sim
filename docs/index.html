@@ -328,7 +328,7 @@ tr.darkrow{background:color-mix(in srgb,var(--gold) 9%,transparent)}
 .allhead h3{font-size:15px}
 @media (prefers-reduced-motion: reduce){ *{transition:none!important} }
 @media (max-width:520px){ .raceband h2{font-size:18px} .finish{left:10px;right:10px;top:auto;bottom:46px;min-width:0} }
-.fillbuy{background:rgba(128,128,128,.10);border-radius:6px;padding:4px 6px}.mainbuy{background:rgba(255,200,0,.12);border-radius:6px;padding:4px 6px}.learnbox.mainplan{border:2px solid #e0a800}.learnbox.shoubuplan{border:3px solid #d32f2f;background:rgba(211,47,47,.06)}.shoubuplan h3{color:#d32f2f;font-size:18px}.learnbox.shoubuplan{max-width:100%;box-sizing:border-box;overflow:hidden}.sbl-list{display:flex;flex-direction:column;gap:8px;margin:8px 0}.sbi{border:1px solid var(--line);border-left:6px solid #999;border-radius:8px;padding:8px 10px;background:var(--surface,#fff);min-width:0}.sbi.chu{border-left-color:#e0a800}.sbi.ana{border-left-color:#d32f2f}.sbi.tri{border-left-color:#7b1fa2}.sbh{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}.sbt-t{font-variant-numeric:tabular-nums;color:var(--muted,#666)}.sbt-y{margin-left:auto}.sbb{margin-top:4px;font-size:16px;overflow-wrap:anywhere}.sbb .tf{margin-top:4px}.sbb .tfl{font-weight:700;font-size:15px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.sbb .small{font-size:12px;line-height:1.6;margin-top:2px;color:var(--muted,#666)}.sbl{display:inline-block;padding:2px 8px;border-radius:12px;font-weight:700;font-size:13px;color:#fff}.sbl.chu{background:#e0a800}.sbl.ana{background:#d32f2f}.sbl.tri{background:#7b1fa2}.shoubu{background:#d32f2f;color:#fff;font-weight:700;border-radius:6px;padding:6px 10px;margin:4px 0}.planbox{border-radius:8px;padding:6px 10px;margin:6px 0}.planbox .ph{font-weight:700;margin-bottom:2px}.planbox.hon{background:rgba(255,200,0,.16);border-left:5px solid #e0a800}.planbox.fil{background:rgba(128,128,128,.10);border-left:5px solid #999;opacity:.9}.fillbuy .verdict{background:#888;color:#fff}.fillbuy{opacity:.85}
+.fillbuy{background:rgba(128,128,128,.10);border-radius:6px;padding:4px 6px}.mainbuy{background:rgba(255,200,0,.12);border-radius:6px;padding:4px 6px}.learnbox.mainplan{border:2px solid #e0a800}.learnbox.shoubuplan{border:3px solid #d32f2f;background:rgba(211,47,47,.06)}.shoubuplan h3{color:#d32f2f;font-size:18px}.learnbox.shoubuplan{max-width:100%;box-sizing:border-box;overflow:hidden}.sbl-list{display:flex;flex-direction:column;gap:8px;margin:8px 0}.sbi{border:1px solid var(--line);border-left:6px solid #999;border-radius:8px;padding:8px 10px;background:var(--surface,#fff);min-width:0}.sbi.chu{border-left-color:#e0a800}.sbi.ana{border-left-color:#d32f2f}.sbi.tri{border-left-color:#7b1fa2}.sbh{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}.sbt-t{font-variant-numeric:tabular-nums;color:var(--muted,#666)}.sbt-y{margin-left:auto}.sbb{margin-top:4px;font-size:16px;overflow-wrap:anywhere}.sbb .tf{margin-top:4px}.sbb .tfl{font-weight:700;font-size:15px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.sbb .small{font-size:12px;line-height:1.6;margin-top:2px;color:var(--muted,#666)}.sbl{display:inline-block;padding:2px 8px;border-radius:12px;font-weight:700;font-size:13px;color:#fff}.sbl.chu{background:#e0a800}.sbl.ana{background:#d32f2f}.sbl.tri{background:#7b1fa2}.tierb{display:inline-block;padding:1px 8px;border-radius:10px;font-weight:700;font-size:12px;margin-right:4px}.shoubu{background:#d32f2f;color:#fff;font-weight:700;border-radius:6px;padding:6px 10px;margin:4px 0}.planbox{border-radius:8px;padding:6px 10px;margin:6px 0}.planbox .ph{font-weight:700;margin-bottom:2px}.planbox.hon{background:rgba(255,200,0,.16);border-left:5px solid #e0a800}.planbox.fil{background:rgba(128,128,128,.10);border-left:5px solid #999;opacity:.9}.fillbuy .verdict{background:#888;color:#fff}.fillbuy{opacity:.85}
 .rc .hd .vn{background:#1e5bc6;color:#fff;border-radius:4px;padding:0 6px;margin-right:6px;font-size:.85em}.rc .hd .pt{margin-left:auto;font-size:.85em;opacity:.8}.rc.topdark{border:2px solid #e0a800}.topbadge{background:#fff3c4;color:#5a4300;border-radius:6px;padding:3px 8px;margin:4px 0;font-weight:700;font-size:.9em}.learnbox.topdarks{border:2px solid #e0a800}.biasline{background:rgba(30,91,198,.08);border-radius:6px;padding:3px 6px}
 </style>
 
@@ -5979,6 +5979,10 @@ async function raceImage(r, x){
   const DS = (x.darks ? x.darks : (x.marks || []).map((m, k) => ({ ...m, mk: k })).filter(m => (m.pop || 0) >= 5)).slice(0, 2);
   rr(24, y, W - 48, 520, 18, "rgba(0,0,0,0.45)", "rgba(242,201,76,0.35)");
   rr(44, y + 18, 8, 50, 4, "#f2c94c"); txt("注目穴馬", 66, y + 60, 44, "#f2c94c", { f: FD, w: "normal" });
+  // 2026-10-25：自信度（5段階）のバッジを右上に（1頭版のとき）
+  { const tt = DS.length >= 2 ? null : darkTier(d?.top3); if (tt){ const tc = tt.n >= 3 ? "#1a1206" : "#fff", segs = [["自信度 ", tc, 1], ["★".repeat(tt.n), tc, 1], ["★".repeat(5 - tt.n), tc, 0.28], [" " + tt.label, tc, 1]];
+      font(30, "bold"); const ws = segs.map(q => g.measureText(q[0]).width), lw = ws.reduce((a, b) => a + b, 0) + 40; rr(W - 44 - lw, y + 22, lw, 50, 25, tt.col);
+      let xx = W - 44 - lw + 20; segs.forEach((q, k) => { g.globalAlpha = q[2]; txt(q[0], xx, y + 58, 30, q[1]); xx += ws[k]; }); g.globalAlpha = 1; } }
   if (DS.length >= 2 || d?.conf){ const lbl = DS.length >= 2 ? `◎○▲に入った穴馬 ${DS.length}頭` : "◎○▲に入った穴馬"; font(22); const lw = g.measureText(lbl).width + 28; rr(300, y + 28, lw, 38, 19, "rgba(242,201,76,0.15)", "#f2c94c", 1.5); txt(lbl, 300 + lw / 2, y + 55, 22, "#f2c94c", { al: "center" }); }
   g.strokeStyle = "rgba(242,201,76,0.4)"; g.lineWidth = 1.5; g.beginPath(); g.moveTo(44, y + 82); g.lineTo(W - 44, y + 82); g.stroke();
   if (DS.length >= 2){
@@ -5989,6 +5993,8 @@ async function raceImage(r, x){
       rr(x0 + 70, hy + 16, 72, 72, 8, WAKU[wk - 1] || "#fff", "#999"); txt(h.num, x0 + 106, hy + 74, 54, WAKU_TX[wk - 1] || "#111", { al: "center", f: FD, w: "normal" });
       txt(h.name || "", x0 + 156, hy + 62, 40, "#fff", { f: FD, w: "normal", max: cw - 170 });
       txt(`${h.pop ? h.pop + "番人気" : ""}｜単勝`, x0 + 20, hy + 128, 28, "#fff"); font(28); const ow = g.measureText(`${h.pop ? h.pop + "番人気" : ""}｜単勝`).width; txt(`${h.odds ?? "—"}倍`, x0 + 28 + ow, hy + 130, 36, "#f2c94c");
+      { const tt = darkTier(h.top3); if (tt){ const tc = tt.n >= 3 ? "#1a1206" : "#fff", segs = [["★".repeat(tt.n), 1], ["★".repeat(5 - tt.n), 0.28], [" " + tt.label, 1]]; font(20, "bold"); const ws = segs.map(q => g.measureText(q[0]).width), lw = ws.reduce((a, c) => a + c, 0) + 22;
+        rr(x0 + cw - 14 - lw, hy + 104, lw, 34, 17, tt.col); let xx = x0 + cw - 14 - lw + 11; segs.forEach((q, k) => { g.globalAlpha = q[1]; txt(q[0], xx, hy + 128, 20, tc); xx += ws[k]; }); g.globalAlpha = 1; } }
       rr(x0 + 16, hy + 152, cw - 32, 96, 10, "#c62828"); txt("1着率（シミュ）", x0 + 34, hy + 190, 24, "#fff"); txt(P(h.win), x0 + cw - 34, hy + 230, 56, "#fff", { al: "right", f: FD, w: "normal" });
       const t2 = (xx, lb, v) => { rr(xx, hy + 262, (cw - 48) / 2, 84, 10, "#fff"); txt(lb, xx + (cw - 48) / 4, hy + 292, 22, "#222", { al: "center" }); txt(v, xx + (cw - 48) / 4, hy + 334, 36, "#111", { al: "center", f: FD, w: "normal" }); };
       txt(`連対率 ${P(h.top2)}　複勝率 ${P(h.top3)}`, x0 + 20, hy + 284, 24, "#fff");
@@ -6077,7 +6083,8 @@ function raceXText(r, x){
   const head = `【${r.venue}${r.no}R ${race}】`;
   const mk = (x.marks || []).slice(0, 3).map((m, k) => `${"◎○▲"[k]}${m.num}${nm(m.name)}`);
   const DS = (x.darks ? x.darks : (x.marks || []).map((m, k) => ({ ...m, mk: k })).filter(m => (m.pop || 0) >= 5)).slice(0, 2);
-  const ana = DS.length ? `穴馬は${DS.map(h => `${h.num}${nm(h.name)}(${h.pop}人気)`).join("と")}` : x.dark ? `穴馬は${x.dark.num}${nm(x.dark.name)}(${x.dark.pop}人気)` : "";
+  const tierTxt = h => { const t = darkTier(h?.top3); return t ? `【${t.stars}${t.label}】` : ""; };
+  const ana = DS.length ? `穴馬は${DS.map(h => `${h.num}${nm(h.name)}(${h.pop}人気)${tierTxt(h)}`).join("と")}` : x.dark ? `穴馬は${x.dark.num}${nm(x.dark.name)}(${x.dark.pop}人気)${tierTxt(x.dark)}` : "";
   const buy = "";   // 買い目（★馬連）はX投稿文には入れない
   const tags = [`#${r.venue}${r.no}R`, race && race.length <= 12 ? `#${race}` : null, `#${r.venue}競馬`, "#競馬予想"].filter(Boolean);
   const m0 = x.marks?.[0], pc = v => v == null ? "" : (v * 100).toFixed(1) + "%";
@@ -6102,6 +6109,14 @@ function dayPicks(items){
   rest.sort((a, b) => (b.x.marks[0].win || 0) - (a.x.marks[0].win || 0)).slice(0, Math.max(0, 4 - core.length))
     .forEach(({ r, x }) => out.set(r.id, { tickets: [{ type: "馬連", nums: [x.marks[0].num, x.marks[1].num].sort((a, b) => a - b), stake: 1000 }], why: "埋め：ルールに当たるレースが4つ未満の日に、◎の勝率が高いレースで補充。回収率は90%台" }));
   return out;
+}
+// 2026-10-25：注目穴馬の自信度（5段階）。3着内の見込みで分ける。過去の5番人気以下約12万5千頭で、見込みどおりの割合で3着内に来ていた：
+//  ★5 激アツ（30%以上・実際31%）／★4 勝負気配（24〜30%・27%）／★3 狙い目（18〜24%・21%）／★2 一発ある（13〜18%・16%）／★1 大穴ロマン（13%未満・6%）
+function darkTier(p){
+  if (p == null || !isFinite(p)) return null;
+  const T = [[0.30, 5, "激アツ", "#ff3b30"], [0.24, 4, "勝負気配", "#ff8a00"], [0.18, 3, "狙い目", "#f2c94c"], [0.13, 2, "一発ある", "#4fc3f7"], [0, 1, "大穴ロマン", "#b0bec5"]];
+  const [, n, label, col] = T.find(t => p >= t[0]);
+  return { n, label, col, stars: "★".repeat(n) + "☆".repeat(5 - n) };
 }
 // 2026-10-24：穴軸3連複の買い目を、1点ずつではなくフォーメーションの形（軸−相手−相手）にまとめて書く。例：「11 − 4 − 2,5,7,9」
 function triForm(ts){
@@ -7692,7 +7707,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261025c";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
+const APP_BUILD = "20261025d";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
 const PRE25 = { busy: false, msg: "", res: null,
   hit: { mu: [3.37976, 11.89168, 14.55231], s: [0.68478, 4.63845, 2.34832], w: [-0.42417, -0.23955, -0.06202], b: -1.92086 }, ca: 1.0949232, cb: 0.2081896 };
 const pre25Pev = (f, n) => { if (!f || !f.pl || !f.ph || !(f.odds > 1)) return null; const x = [Math.log(f.odds), Math.log(f.odds) ** 2, n]; let z = PRE25.hit.b; for (let j = 0; j < 3; j++) z += PRE25.hit.w[j] * (x[j] - PRE25.hit.mu[j]) / PRE25.hit.s[j]; return 1 / (1 + Math.exp(-z)) * (PRE25.ca * f.pl + PRE25.cb * (f.ph - f.pl)); };
@@ -8279,7 +8294,7 @@ function renderAllTab(){
       ${x.tri100?.length ? `<div class="line"><span class="verdict">◇穴軸3連複（検証中）</span> <b>${x.tri100.length}点・${(x.tri100.length * 100).toLocaleString()}円</b> <span class="small">フォーメーション：${triFormText(x.tri100).map(l => `<b style="white-space:nowrap">${l}</b>`).join("　")}</span><div class="small">1400m以下のレースで、◇複勝ルールの馬が軸。3連複100倍以上の組だけを当たりやすい順に最大20点・各100円。過去343レースで回収133%（確定オッズ・推定オッズで計算）。10回に1回ほどしか当たらないので連敗に注意</div></div>` : ""}
       ${x.uma ? `<div class="line">最有力の馬連 <b>${x.uma.nums.join("-")}</b> <span class="small">（シミュの的中確率${pct(x.uma.p)}%${x.uma.odds ? `・${x.uma.odds}倍` : ""}）</span></div>` : ""}
       ${x.tri ? `<div class="line">最有力の3連単 <b>${x.tri.nums.join("→")}</b> <span class="small">（${pct(x.tri.p)}%）</span></div>` : ""}
-      ${x.dark ? `<div class="line">注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}${x.dark.win != null ? "勝率" + pct(x.dark.win) + "%・" : ""}3着内${pct(x.dark.top3)}%</span>${x.dark.conf ? ` <b class="pos">◎○▲に入った穴馬</b><span class="small">（過去の3着内22%）</span>` : ` <span class="small">（◎○▲には5番人気以下がいないので、印の外で、シミュの3着内率が一番高い穴）</span>`}${bestDark && bestDark.id === x.id ? ` <span class="chip ana">この日の最注目穴馬</span>` : ""}</div>` : ""}
+      ${x.dark ? `<div class="line">${(t => t ? `<span class="tierb" style="background:${t.col};color:${t.n >= 3 ? "#1a1206" : "#fff"}">自信度 ${"★".repeat(t.n)}<span style="opacity:.3">${"★".repeat(5 - t.n)}</span> ${t.label}</span> ` : "")(darkTier(x.dark.top3))}注目穴馬 <b>${x.dark.num}</b> ${esc(x.dark.name)} <span class="small">${x.dark.pop ? x.dark.pop + "人気・" : ""}${x.dark.odds ? x.dark.odds + "倍・" : ""}${x.dark.win != null ? "勝率" + pct(x.dark.win) + "%・" : ""}3着内${pct(x.dark.top3)}%</span>${x.dark.conf ? ` <b class="pos">◎○▲に入った穴馬</b><span class="small">（過去の3着内22%）</span>` : ` <span class="small">（◎○▲には5番人気以下がいないので、印の外で、シミュの3着内率が一番高い穴）</span>`}${bestDark && bestDark.id === x.id ? ` <span class="chip ana">この日の最注目穴馬</span>` : ""}</div>` : ""}
       ${x.oddsAsOf ? `<div class="cond">オッズ ${esc(x.oddsAsOf)} 時点</div>` : ""}
       ${(() => { const c = CHECK[d]?.per?.[r.id]; const moR = x.mo5?.length && r.result?.pay ? (() => { const inv = x.mo5.reduce((a, t) => a + t.stake, 0), ret = x.mo5.reduce((a, t) => a + payOf(t, r.result), 0); return `<br>★本命ルール（馬連${x.mo5[0].nums.join("-")}・${inv.toLocaleString()}円） <b class="${ret >= inv ? "pos" : "neg"}">${ret - inv >= 0 ? "+" : "−"}${Math.abs(Math.round(ret - inv)).toLocaleString()}円</b>`; })() : ""; if (!c) return r.result ? `<div class="resline">結果 <b>${r.result.order.slice(0, 3).join("→")}</b>${moR}</div>` : ""; const pl = k => c.plans[k] ? `${c.plans[k].ret - c.plans[k].inv >= 0 ? "+" : "−"}${Math.abs(Math.round(c.plans[k].ret - c.plans[k].inv)).toLocaleString()}円` : "見送り";
         return `<div class="resline">結果 <b>${c.order.join("→")}</b>　◎${c.favPos ? c.favPos + "着" : "着外"}${moR}</div>`; })()}
