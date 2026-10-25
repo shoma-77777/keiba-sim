@@ -235,7 +235,7 @@ def update_date(ymd, odds_only=False, race_ids=None):
             snap["updated"] = dt.datetime.now().astimezone().isoformat(timespec="seconds")
             snapshot_path(ymd).write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
             srcs = sorted({r.get("oddsSrc") for r in races if r.get("oddsSrc")})
-            if race_ids: log(f"{races[0]['venue']}{races[0]['no']}R のオッズを更新しました（{races[0].get('oddsSrc') or ''}・{races[0].get('oddsAsOf') or ''}時点）"); threading.Thread(target=after_update, args=(ymd,), daemon=True).start(); return
+            if race_ids: log(f"{'・'.join(x['venue'] + str(x['no']) + 'R' for x in races)} のオッズを更新しました（{races[0].get('oddsSrc') or ''}・{races[0].get('oddsAsOf') or ''}時点）"); threading.Thread(target=after_update, args=(ymd,), daemon=True).start(); return
             log(f"オッズを更新しました（{ok}/{len(races)}レース・{'/'.join(srcs)}・{max((r.get('oddsAsOf') or '') for r in races)}時点）" + (f"・結果確定{fin}レース" if fin else ""))
             after_update(ymd)
             return

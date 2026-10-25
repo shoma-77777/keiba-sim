@@ -20,6 +20,9 @@ on:
       bets:
         description: "（スマホの答え合わせから自動で送られる仮想収支）"
         default: ""
+      races:
+        description: "（オッズ更新をこのレースだけにする：レースIDのカンマ区切り）"
+        default: ""
 permissions:
   contents: write
 concurrency:
@@ -48,7 +51,10 @@ jobs:
       - name: 取得
         env:
           BETS_JSON: ${{ github.event.inputs.bets }}
-        run: python cloud/cloud_update.py --kind "${{ github.event.inputs.kind || 'auto' }}" --date "${{ github.event.inputs.date || 'next' }}"
+          IN_KIND: ${{ github.event.inputs.kind || 'auto' }}
+          IN_DATE: ${{ github.event.inputs.date || 'next' }}
+          IN_RACES: ${{ github.event.inputs.races || '' }}
+        run: python cloud/cloud_update.py --kind "$IN_KIND" --date "$IN_DATE" --races "$IN_RACES"
       - name: 学習（結果が出たレースから）
         run: node cloud/lib/learn_run.js docs/data || true
       - name: 発走前の予想を記録（答え合わせ用）

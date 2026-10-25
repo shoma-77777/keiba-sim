@@ -20,7 +20,8 @@ const DATA = process.argv[2] || path.join(__dirname, "..", "..", "docs", "data")
     const pre = JSON.parse(fs.readFileSync(path.join(DATA, f), "utf8"));
     Object.entries(pre.rows || {}).forEach(([id, x]) => { const res = resOf[id]; if (!res) return;
       const pick = ts => ts?.length ? [ts.reduce((a, t) => a + t.stake, 0), Math.round(ts.reduce((a, t) => a + payOf(t, res.pay), 0))] : [0, 0];
-      bets[id] = { t1: pick(x.t1), t5: pick(x.t5), te: pick(x.te), t1s: pick(x.t1s || x.t1), src: "pre" }; });
+      // 10/25：勝負の買い方（★中距離馬連・◇穴単勝・◇穴軸3連複）と◇複勝ルール・馬連ルールも、発走前の予想の買い目で成績を残す
+      bets[id] = { t1: pick(x.t1), t5: pick(x.t5), te: pick(x.te), t1s: pick(x.t1s || x.t1), mo: pick(x.mo), mo5: pick(x.mo5), mo9: pick(x.mo9), mo10: pick(x.mo10), pr28: pick(x.pr28), tri100: pick(x.tri100), win150: pick(x.win150), src: "pre" }; });
   });
   let attached = 0;
   (old.records || []).forEach(r => { if (bets[r.id] && JSON.stringify(r.bets) !== JSON.stringify(bets[r.id])){ r.bets = bets[r.id]; attached++; } });

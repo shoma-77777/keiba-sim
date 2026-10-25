@@ -6258,7 +6258,8 @@ async function cloudApi(path, opt){
     const cfg = await cloudConfig();
     if (!cfg.owner) throw new Error("クラウドの設定ファイルが見つかりません");
     const date = u.searchParams.get("date");
-    await gh(`/repos/${cfg.owner}/${cfg.repo}/actions/workflows/${cfg.workflow || "update.yml"}/dispatches`, { method: "POST", body: JSON.stringify({ ref: "main", inputs: { kind: p === "/api/odds" ? "odds" : p === "/api/results" ? "results" : "full", date } }) });
+    const races = p === "/api/odds" ? (u.searchParams.get("race") || "").replace(/[^0-9,]/g, "") : "";
+    await gh(`/repos/${cfg.owner}/${cfg.repo}/actions/workflows/${cfg.workflow || "update.yml"}/dispatches`, { method: "POST", body: JSON.stringify({ ref: "main", inputs: { kind: p === "/api/odds" ? "odds" : p === "/api/results" ? "results" : "full", date, ...(races ? { races } : {}) } }) });
     SERVER.cloudWait = { since: Date.now(), prev: SERVER.status?.updated || "", kind: p === "/api/odds" ? "odds" : p === "/api/results" ? "results" : "full", date };
     return { ok: true, date };
   }
@@ -6346,16 +6347,21 @@ function renderUpd(){
   const tc = $("#toCloud"); if (tc) tc.onclick = e => { e.preventDefault(); setTab("data"); };
 }
 // 1レースだけオッズを更新（2026-10-24）：PCのサーバーで動いているときだけ。終わったらそのレースだけ計算し直す
-async function startOddsRace(id){
-  const r = DB.races[id]; if (!r) return;
-  if (SERVER.status?.running || BATCH.running){ toast("ほかの処理中です。終わってからもう一度押してください"); return; }
+async function startOddsRace(id){ return startOddsRaces([id]); }
+// 2026-10-25：指定したレース（複数可）だけオッズを更新して、そのレースだけ計算し直す。🎯勝負の買い方の「勝負レースだけオッズ更新」でも使う。クラウド版でも使える
+async function startOddsRaces(ids){
+  ids = (ids || []).filter(id => DB.races[id]); if (!ids.length){ toast("更新するレースがありません（発走前の勝負レースがない）"); return; }
+  const r = DB.races[ids[0]];
+  if (SERVER.status?.running || SERVER.cloudWait || BATCH.running){ toast("ほかの処理中です。終わってからもう一度押してください"); return; }
   try {
-    const j = await api(`/api/odds?date=${ymdOf(r.date)}&race=${id}`, { method: "POST" });
+    const j = await api(`/api/odds?date=${ymdOf(r.date)}&race=${ids.join(",")}`, { method: "POST" });
     if (!j.ok) throw new Error(j.message || "開始できませんでした");
-    SERVER.pendingDate = r.date; SERVER.autoBatch = true; SERVER.oneRace = id;
-    toast(`${r.venue}${r.no}R のオッズを更新しています`);
+    SERVER.pendingDate = r.date; SERVER.autoBatch = true; SERVER.oneRace = ids.slice();
+    toast(ids.length === 1 ? `${r.venue}${r.no}R のオッズを更新しています` : `発走前の${ids.length}レースのオッズを更新しています`);
     pollJob(true);
-  } catch (err) { toast("開始できませんでした：" + err.message); }
+  } catch (err) {
+    if (err.message === "NO_TOKEN"){ setTab("data"); toast("このスマホから更新するには、最初に一度だけ設定が必要です"); return; }
+    toast("開始できませんでした：" + err.message); }
 }
 async function startJob(kind){
   const d = SERVER.updDate || (SERVER.status?.nextSunday ? isoOf(SERVER.status.nextSunday) : ST.date);
@@ -6385,7 +6391,7 @@ function pollJob(now){
         SERVER.cloudWait = null; SERVER.status = { ...s, running: false };
         SERVER.lastMsg = s.error ? "取得エラー：" + s.error : `クラウドの取得が完了（${s.updated.replace("T", " ").slice(0, 16)}）`;
         await loadServerDB(); const d = s.date ? isoOf(s.date) : null;
-        if (!s.error && d){ ST.date = d; renderDays(); renderVenues(); if (SERVER.afterCheck){ SERVER.afterCheck = false; showCheck(d); } else { BATCH.saved[d] = undefined; await loadServerSummary(d); runBatch(); } }
+        if (!s.error && d){ ST.date = d; renderDays(); renderVenues(); const one = SERVER.oneRace; SERVER.oneRace = null; if (SERVER.afterCheck){ SERVER.afterCheck = false; showCheck(d); } else if (one?.length){ runBatch(true, one); } else { BATCH.saved[d] = undefined; await loadServerSummary(d); runBatch(); } }
         renderUpd(); return;
       }
       if (run && run.status === "completed" && run.conclusion === "failure"){ SERVER.cloudWait = null; SERVER.lastMsg = "クラウドの取得が失敗しました。GitHub の Actions 画面でログを確認できます。"; renderUpd(); return; }
@@ -6406,7 +6412,7 @@ function pollJob(now){
       SERVER.pendingDate = null; const one = SERVER.oneRace; SERVER.oneRace = null;
       if (!s.error && d){ ST.date = d; renderDays(); renderVenues(); renderUpd();
         if (SERVER.afterCheck){ SERVER.afterCheck = false; SERVER.autoBatch = false; showCheck(d); }
-        else if (SERVER.autoBatch){ SERVER.autoBatch = false; one ? runBatch(true, [one]) : runBatch(); } }
+        else if (SERVER.autoBatch){ SERVER.autoBatch = false; one?.length ? runBatch(true, one) : runBatch(); } }
     }
   };
   SERVER.timer = setTimeout(tick, now ? 800 : 0);
@@ -7685,7 +7691,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261024m";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
+const APP_BUILD = "20261025b";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
 const PRE25 = { busy: false, msg: "", res: null,
   hit: { mu: [3.37976, 11.89168, 14.55231], s: [0.68478, 4.63845, 2.34832], w: [-0.42417, -0.23955, -0.06202], b: -1.92086 }, ca: 1.0949232, cb: 0.2081896 };
 const pre25Pev = (f, n) => { if (!f || !f.pl || !f.ph || !(f.odds > 1)) return null; const x = [Math.log(f.odds), Math.log(f.odds) ** 2, n]; let z = PRE25.hit.b; for (let j = 0; j < 3; j++) z += PRE25.hit.w[j] * (x[j] - PRE25.hit.mu[j]) / PRE25.hit.s[j]; return 1 / (1 + Math.exp(-z)) * (PRE25.ca * f.pl + PRE25.cb * (f.ph - f.pl)); };
@@ -8299,7 +8305,10 @@ function renderAllTab(){
         x.win150?.length ? { r, cls: "ana", lab: "◇穴単勝", buy: `単勝 <b>${x.win150[0].nums[0]}番</b>${(() => { const m = [...(x.marks || []), ...(x.darks || [])].find(q => q.num === x.win150[0].nums[0]) || (x.dark?.num === x.win150[0].nums[0] ? x.dark : null); return m ? ` ${esc(m.name || "")}${m.pop ? `（${m.pop}番人気）` : ""}` : ""; })()}`, yen: 1000 } : null,
         x.tri100?.length ? { r, cls: "tri", lab: "◇穴軸3連複", buy: `3連複 <b>${x.tri100.length}点</b>（軸 ${x.tri100[0].nums.find(n => x.tri100.every(t => t.nums.includes(n)))}番・100倍以上）<div class="tf">${triFormText(x.tri100).map(l => `<div class="tfl">${l}</div>`).join("")}</div>`, yen: x.tri100.length * 100 } : null].filter(Boolean));
       const tot = items.reduce((a, b) => a + b.yen, 0);
+      // 10/25：勝負レースだけでなく、まだ発走していない全レースを更新する（オッズが変わると、今まで当てはまらなかったレースが勝負レースになることがあるため）
+      const upIds = list.filter(r => r.entries?.length && raceStart(r) > new Date()).map(r => r.id), busy = SERVER.status?.running || SERVER.cloudWait || BATCH.running;
       return `<div class="learnbox shoubuplan"><h3>🎯 勝負の買い方（${new Set(items.map(i => i.r.id)).size}レース・合計${tot.toLocaleString()}円）</h3>
+        ${SERVER.enabled ? `<div class="ctrls"><button class="btn primary" id="sbOdds" ${!upIds.length || busy || !SERVER.on ? "disabled" : ""}>🎯 発走前のレースだけオッズ更新して勝負レースを探し直す（${upIds.length}レース）</button><span class="small">${SERVER.cloud ? "クラウドで2〜5分" : "1〜2分"}。発走済みのレースは取り直さず、発走前のレースだけを最新オッズで計算し直します（新しく勝負レースになるレースも拾えます）</span></div>` : ""}
         <p class="small">過去の回収率が高かった3つの買い方だけ：★中距離馬連（過去279R・140%）・◇穴単勝（211R・165%）・◇1400m以下の穴軸3連複（343R・133%）。合わせて週3〜4回・過去141%（確定オッズでの計算。発走前のオッズでは未確認）。</p>
         ${items.length ? `<div class="sbl-list">${items.map(i => `<div class="sbi ${i.cls}"><div class="sbh"><span class="sbt-t">${esc(i.r.postTime || "")}</span><b class="sbt-r">${esc(i.r.venue)}${i.r.no}R</b><span class="sbl ${i.cls}">${i.lab}</span><b class="sbt-y">${i.yen.toLocaleString()}円</b></div><div class="sbb">${i.buy}</div></div>`).join("")}</div>`
           : `<p>今日は当てはまるレースがありません（全レースを計算すると出ます。オッズ更新で増えることがあります）。</p>`}
@@ -8333,6 +8342,7 @@ function renderAllTab(){
   const ca = el.querySelector("#checkAll"); if (ca) ca.onclick = () => checkAllDates();
   el.querySelectorAll("[data-img]").forEach(b => b.onclick = () => showRaceImage(b.dataset.img));
   el.querySelectorAll("[data-odds1]").forEach(b => b.onclick = () => startOddsRace(b.dataset.odds1));
+  const sbo = el.querySelector("#sbOdds"); if (sbo) sbo.onclick = () => { const L = Object.values(DB.races).filter(r => r.date === ST.date && r.entries?.length && raceStart(r) > new Date()).map(r => r.id); startOddsRaces(L); };
   el.querySelectorAll("[data-w5]").forEach(sl => sl.onchange = () => { const a = W5.pick[d].slice(); a[+sl.dataset.w5] = sl.value; W5.pick[d] = a; renderAllTab(); });
   el.querySelectorAll("[data-open]").forEach(b => b.onclick = () => { ST.raceId = b.dataset.open; ST.venue = DB.races[ST.raceId]?.venue; renderVenues(); renderAll(); setTab(ST.sims[ST.raceId] ? "result" : "card"); window.scrollTo({ top: 0, behavior: "smooth" }); });
 }

@@ -9,7 +9,7 @@ docs/ は GitHub Pages で公開されるので、スマホはいつでも最新
   python cloud/cloud_update.py --kind full --date 20261011
   python cloud/cloud_update.py --kind odds
 """
-import argparse, datetime as dt, json, os, sys
+import argparse, datetime as dt, json, os, re, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -38,6 +38,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--kind", default="auto", choices=["auto", "full", "odds", "results", "learn"])
     ap.add_argument("--date", default="next")
+    ap.add_argument("--races", default="")   # 2026-10-25：オッズ更新をこのレースだけにする（カンマ区切りのレースID）
     a = ap.parse_args()
     ymd = S.next_sunday().strftime("%Y%m%d") if a.date in ("", "next") else a.date.replace("-", "")
     kind = a.kind
@@ -65,7 +66,8 @@ def main():
     if kind == "results":
         S.update_results(ymd)
     else:
-        S.update_date(ymd, odds_only=(kind == "odds"))
+        rid = [x for x in re.split(r"[,\s]+", a.races or "") if re.fullmatch(r"\d{12}", x)] if kind == "odds" else []
+        S.update_date(ymd, odds_only=(kind == "odds"), race_ids=rid or None)
     if kind == "odds" and S.JOB.get("error") and not S.snapshot_path(ymd).exists():
         print("スナップショットがないため全レース取得に切り替えます", flush=True)
         S.update_date(ymd, odds_only=False)
