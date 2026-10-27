@@ -825,6 +825,7 @@ def main():
     if not os.environ.get("KEIBA_NO_AUTO"):
         threading.Thread(target=auto_odds_loop, daemon=True).start()
         bf.resume_if_active()     # 途中だった過去データの取得を続きから再開
+        bf.watchdog()             # 10/27：取得が途中で止まったら1分以内に自動で再開
     cm = cloud_mod()
     if cm and cm.load_conf().get("token") and cm.load_conf().get("appVersion") != cm.app_version():
         threading.Thread(target=lambda: _safe(lambda: cm.republish(DATA, write_status)), daemon=True).start()   # アプリを新しくしたらクラウドも更新

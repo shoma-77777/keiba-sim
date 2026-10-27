@@ -5,7 +5,8 @@
 ・出走馬の全成績と血統は1頭につき1回だけ取得して data/past/horses.sqlite に保存（どの日を予想するときも、その日より前の出走だけを渡す）
 ・取得は古い日から順に進み、途中で止めても、アプリを閉じても、続きから再開する
 ・取得した日は、アプリの画面（PC）が「その日より前のデータだけで学習したモデル」で予想 → 答え合わせ → 学習 を古い順に自動で進める
-・サイトに負担をかけないよう、1回の取得ごとに1.5秒以上あける。ページはディスクに保存しない
+・サイトに負担をかけないよう、同時に1つずつ・取得の開始は1秒以上あける（10/27：1.5秒→1秒、待ち時間を「前の取得の開始から」に。馬単オッズは使わないので省く）。ページはディスクに保存しない
+・10/27：止まったら自動で再開（通信エラーは時間をおいてやり直し、取得の処理が止まっていたら1分以内に続きから再開）
 """
 import datetime as dt, json, sqlite3, threading, time, traceback
 from pathlib import Path
@@ -73,9 +74,23 @@ def resume_if_active():
 
 
 class _CountingFetcher(kc.Fetcher):
+    """1つずつ取得し、取得の開始どうしを delay 秒以上あける（応答を待っていた時間も間隔に数える）。通信エラーは時間をおいて最大4回やり直す"""
     def get(self, url, ttl_hours=None, encoding=None):
-        with LOCK: ST["requests"] += 1
-        return super().get(url, ttl_hours=ttl_hours, encoding=encoding)
+        last_ex = None
+        for k in range(4):
+            if _stopped(): break
+            wait = self.delay - (time.time() - getattr(self, "_t0", 0.0))
+            if wait > 0: time.sleep(wait)
+            self._t0 = time.time(); self.last = 0.0      # 親クラス側の待ち時間は使わない（上で待ったので）
+            with LOCK: ST["requests"] += 1; ST["lastReqAt"] = time.time()
+            try:
+                return super().get(url, ttl_hours=ttl_hours, encoding=encoding)
+            except Exception as ex:
+                last_ex = ex
+                code = getattr(getattr(ex, "response", None), "status_code", None)
+                if code in (400, 404): raise                 # ページがないものはやり直さない
+                time.sleep([5, 20, 60, 0][k])                  # 混んでいる・つながらないときは少し待ってやり直す
+        raise last_ex or RuntimeError("中止しました")
 
 
 def _stopped():
@@ -85,7 +100,7 @@ def _stopped():
 def _loop():
     try:
         pr = load_prog()
-        f = _CountingFetcher(delay=1.5, cache=False)
+        f = _CountingFetcher(delay=1.0, cache=False)
         d = dt.date.fromisoformat(pr["from"]); end = min(dt.date.fromisoformat(pr["to"]), dt.date.today() - dt.timedelta(days=1))
         con = _db()
         while d <= end and not _stopped():
@@ -98,7 +113,7 @@ def _loop():
             except Exception as ex:
                 _log(f"{d} のレース一覧を取得できませんでした（30秒後に再試行）: {ex}"); time.sleep(30); continue
             if not races:
-                pr["fetched"][ymd] = 0; save_prog(pr); d += dt.timedelta(days=1); continue
+                pr = load_prog(); pr["fetched"][ymd] = 0; save_prog(pr); d += dt.timedelta(days=1); continue   # 10/27：読み直してから保存（画面側が書いた「予想・学習済み」を消さないように）
             _log(f"{d}：{len(races)}レースを取得します")
             for i, r in enumerate(races):
                 if _stopped(): break
@@ -111,7 +126,7 @@ def _loop():
                         for e in r.get("entries") or []:
                             if bwr.get(e["num"]): e.update(bwr[e["num"]])
                     n, _, _ = kc.odds(f, r, ttl_hours=0)
-                    if n: kc.combo_odds(f, r, ttl_hours=0)
+                    if n: kc.combo_odds(f, r, ttl_hours=0, skip=("馬単",))
                     kc.training(f, r)
                     r["oddsFinal"] = True; r["oddsAsOf"] = "確定オッズ（過去データ）"; r["backfill"] = True
                 except Exception as ex:
@@ -141,12 +156,36 @@ def _loop():
             _log(f"{d}：{len(races)}レース・新しい馬{len(hids)}頭を保存")
             d += dt.timedelta(days=1)
         if not _stopped():
-            pr = load_prog(); pr["active"] = False; pr["fetchDone"] = dt.datetime.now().isoformat(timespec="seconds"); save_prog(pr)
+            pr = load_prog(); pr["active"] = False; pr["fetchDone"] = dt.datetime.now().isoformat(timespec="seconds"); pr["fetchDone_for"] = [pr.get("from"), pr.get("to")]; save_prog(pr)
             _log("指定期間の取得が終わりました")
     except Exception as ex:
-        _log("エラーで止まりました: " + str(ex)); traceback.print_exc()
+        _log("エラーで止まりました（1分以内に自動で再開します）: " + str(ex)); traceback.print_exc()
     finally:
         with LOCK: ST.update(running=False, phase="", cur=None)
+
+
+def _start_thread():
+    with LOCK:
+        if ST["running"]: return False
+        ST.update(running=True, stop=False, startedAt=dt.datetime.now().isoformat(timespec="seconds"))
+    threading.Thread(target=_loop, daemon=True).start()
+    return True
+
+
+def watchdog():
+    """10/27：取得の途中で止まったら自動で再開する（「止める」を押したとき・期間の最後まで取ったときは再開しない）"""
+    def run():
+        while True:
+            time.sleep(60)
+            try:
+                pr = load_prog()
+                if not (pr.get("active") and pr.get("from") and pr.get("to")) or pr.get("fetchDone_for") == [pr.get("from"), pr.get("to")]: continue
+                with LOCK: running, stopped = ST["running"], ST["stop"]
+                if not running and not stopped:
+                    if _start_thread(): _log("取得が止まっていたので、続きから自動で再開しました")
+            except Exception as ex:
+                print("[過去データ] 見張りのエラー:", ex, flush=True)
+    threading.Thread(target=run, daemon=True).start()
 
 
 def day_data(ymd, races_only=False):

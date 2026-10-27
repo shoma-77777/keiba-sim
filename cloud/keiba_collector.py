@@ -236,10 +236,11 @@ def _odds_yahoo(f, race, ttl_hours):
     return out, None
 
 COMBO_TYPES = {"4": ("馬連", 2), "5": ("ワイド", 2), "6": ("馬単", 2), "7": ("三連複", 3)}   # 3連単は約5000通りでデータが大きすぎるため対象外
-def combo_odds(f, race, ttl_hours=0.5):
-    """馬連・ワイド・3連複の実オッズ（期待値を推定配当でなく実際の配当で計算するため）。戻り値: 取れた券種数"""
+def combo_odds(f, race, ttl_hours=0.5, skip=()):
+    """馬連・ワイド・3連複の実オッズ（期待値を推定配当でなく実際の配当で計算するため）。戻り値: 取れた券種数。skip：取らない券種名（過去データの一括取得では使わない馬単を省いて速くする）"""
     out = {}
     for t, (label, k) in COMBO_TYPES.items():
+        if label in skip: continue
         try:
             url = (f"{BASE_RACE}/api/api_get_jra_odds.html?pid=api_get_jra_odds&input=UTF-8&output=json"
                    f"&race_id={race['id']}&type={t}&action=update&sort=odds&compress=0")
