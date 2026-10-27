@@ -8201,19 +8201,28 @@ async function bfProcessLoop(){
       await bfProcessDay(j, s.pending.length);
       if (ST.tab === "learn") renderLearnTab();
     }
-    if (BF.pendRecs.length) await bfPostLearn();
+    if (BF.pendRecs.length || BF.sinceFull) await bfPostLearn(true);    // 10/27：最後に1回だけ、全部の記録でモデルを作り直して保存
   } catch (e) { console.error(e); BF.msg = "処理が止まりました：" + e.message; }
   finally {
-    // 処理が終わったら（止めたときも）、すべての記録で学習したモデルに戻して、これからの予想に使う
-    if (BF.recs?.length){ const latest = BF.recs.reduce((m, r) => r.date > m ? r.date : m, ""); BF.full = Learn.build(BF.recs, latest); applyLearn(BF.full); }
+    // 処理が終わったら（止めたときも）、すべての記録で学習したモデルに戻して、これからの予想に使う（10/27：上で作り直したばかりなら作り直さない）
+    if (BF.recs?.length && BF.sinceFull){ const latest = BF.recs.reduce((m, r) => r.date > m ? r.date : m, ""); BF.full = Learn.build(BF.recs, latest); BF.sinceFull = 0; }
+    if (BF.full) applyLearn(BF.full);
     BF.proc = false; if (ST.tab === "learn") renderLearnTab();
   }
 }
-async function bfPostLearn(){
+async function bfPostLearn(force){
+  // 10/27：全部の記録（1万4千レース超）でのモデル作り直しは1回30秒以上かかり、その間画面が固まる（「待機または終了」が出る原因）。
+  //  そこで毎日は「その日の記録の追加」だけ保存し、モデルの作り直しは30開催日ごと・処理の終わり・止めたときだけにする（記録は毎日きちんと保存される）
+  BF.sinceFull = (BF.sinceFull || 0) + 1;
+  if (!force && BF.sinceFull < 30){
+    await api("/api/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ append: BF.pendRecs, bulk: true, noModel: true }), timeout: 120000 });
+    BF.pendRecs = []; return;
+  }
   // 保存するのは、すべての記録で学習したモデル（今後の予想に使う）
+  BF.msg = "全部の記録でモデルを作り直し中（30秒ほど画面が止まります）"; if (ST.tab === "learn") renderLearnTab(); await bfSleep(50);
   const latest = BF.recs.reduce((m, r) => r.date > m ? r.date : m, "");
   const model = Learn.build(BF.recs, latest || iso(new Date()));
-  BF.full = model; if (!simBusy) applyLearn(model);
+  BF.full = model; BF.sinceFull = 0; if (!simBusy) applyLearn(model);
   await api("/api/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, append: BF.pendRecs, bulk: true }), timeout: 120000 });
   BF.pendRecs = [];
 }
@@ -8685,7 +8694,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261027b";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
+const APP_BUILD = "20261027d";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
 const PRE25 = { busy: false, msg: "", res: null,
   hit: { mu: [3.37976, 11.89168, 14.55231], s: [0.68478, 4.63845, 2.34832], w: [-0.42417, -0.23955, -0.06202], b: -1.92086 }, ca: 1.0949232, cb: 0.2081896 };
 const pre25Pev = (f, n) => { if (!f || !f.pl || !f.ph || !(f.odds > 1)) return null; const x = [Math.log(f.odds), Math.log(f.odds) ** 2, n]; let z = PRE25.hit.b; for (let j = 0; j < 3; j++) z += PRE25.hit.w[j] * (x[j] - PRE25.hit.mu[j]) / PRE25.hit.s[j]; return 1 / (1 + Math.exp(-z)) * (PRE25.ca * f.pl + PRE25.cb * (f.ph - f.pl)); };
@@ -8753,17 +8762,12 @@ async function freeze2025(){
 }
 const ODDSLOG = { st: null, loading: false };
 function preregPanel(){
+  // 10/27：「2025年の独立評価」の欄は不要なので削除（発走前オッズの記録だけ残す）
   if (!SERVER.enabled || SERVER.cloud) return "";
-  if (!PRE25.fz && !PRE25.fzLoading){ PRE25.fzLoading = true; api("/api/research/frozen").then(j => { PRE25.fz = j || {}; PRE25.fzLoading = false; if (ST.tab === "learn") renderLearnTab(); }).catch(() => { PRE25.fz = {}; PRE25.fzLoading = false; }); }
   if (!ODDSLOG.st && !ODDSLOG.loading){ ODDSLOG.loading = true; api("/api/oddslog").then(j => { ODDSLOG.st = j || {}; ODDSLOG.loading = false; if (ST.tab === "learn") renderLearnTab(); }).catch(() => { ODDSLOG.st = {}; ODDSLOG.loading = false; }); }
-  const fz = PRE25.fz || {}, used = (RS.st?.holdoutUsed || []).includes("2025"), R = PRE25.res || (RS.st?.experiments || []).filter(x => x.kind === "prereg").at(-1)?.result;
-  const ol = ODDSLOG.st?.dates || [], f = x => x?.n ? `${x.n}頭・3着内${x.hit}%（同じ人気の${x.lift}倍）・投資${x.invest.toLocaleString()}円・払戻${x.ret.toLocaleString()}円・回収${x.roi}%（95%: ${x.ci95.join("〜")}%・上位3除く${x.roiExTop3}%）` : "対象なし";
-  return `<div class="learnbox"><h3>2025年の独立評価と、発走前オッズの記録 <span class="small">アプリの版 ${APP_BUILD}</span></h3>
-    <p class="small">凍結：${fz.meta ? `${esc(fz.meta.at)}・学習の記録 ${fz.meta.records.toLocaleString()}件（${esc(fz.meta.recordDates.join("〜"))}）・指紋 ${esc(fz.meta.sha256.slice(0, 12))}` : "まだ"}／取っておく年：${esc((fz.holdoutYears || []).join("・") || "なし")}／学習の記録にある2025年：${fz.learnHoldoutRecords ?? "—"}件／評価：${used ? "実行済み" : "未実行"}</p>
-    <div class="ctrls">${fz.meta ? "" : `<button class="btn" id="pre25Freeze">今のモデルを凍結して2025年を取っておく</button>`}<button class="btn" id="pre25Run" ${!fz.meta || used || PRE25.busy ? "disabled" : ""}>2025年の独立評価（1回だけ）</button></div>
-    ${PRE25.msg ? `<p class="small">${esc(PRE25.msg)}</p>` : ""}
-    ${R ? `<ul class="small"><li>H1 複勝妙味ルール：${f(R.H1)}</li><li>H2 注目穴馬で見込み1.0以上：${f(R.H2)}（比較：注目穴馬すべて ${f(R.H2base)}）</li><li>H3 推奨材料4つ以上：${f(R.H3)}</li><li>H4 候補内で見込み最大の1頭：${f(R.H4)}</li></ul>` : ""}
-    <p class="small"><b>発走前オッズの記録</b>（取得プログラム ${esc(ODDSLOG.st?.collector || "—")}）：${ol.length ? ol.slice(-6).reverse().map(d => `${esc(d.date.slice(4, 6))}/${esc(d.date.slice(6))} ${d.racesWithPrePlace}/${d.races}レース（複勝オッズ付き${d.placeSnapshots}件）`).join("・") : "記録なし"}</p></div>`;
+  const ol = ODDSLOG.st?.dates || [];
+  return `<div class="learnbox"><h3>発走前オッズの記録 <span class="small">アプリの版 ${APP_BUILD}</span></h3>
+    <p class="small">取得プログラム ${esc(ODDSLOG.st?.collector || "—")}：${ol.length ? ol.slice(-6).reverse().map(d => `${esc(d.date.slice(4, 6))}/${esc(d.date.slice(6))} ${d.racesWithPrePlace}/${d.races}レース（複勝オッズ付き${d.placeSnapshots}件）`).join("・") : "記録なし"}</p></div>`;
 }
 function bindPrereg(){ const a = $("#pre25Freeze"); if (a) a.onclick = () => freeze2025(); const b = $("#pre25Run"); if (b) b.onclick = () => { if (!PRE25.armed){ PRE25.armed = true; toast("2025年の独立評価は1回だけです。もう一度押すと実行します"); setTimeout(() => PRE25.armed = false, 8000); return; } PRE25.armed = false; prereg2025(); }; }
 
@@ -8774,13 +8778,7 @@ function renderLearnTab(){
   const m = LEARN.model, d = ST.date;
   const dates = m?.hist || [];
   el.innerHTML = `${preregPanel()}${researchPanel()}
-    <div class="learnbox"><h3>蓄積しているデータ</h3>
-      ${m ? `<p>答え合わせ済み <b>${m.races}レース</b>（${dates.length}開催日）・最終更新 ${esc(new Date(m.updated).toLocaleString("ja-JP"))}</p>
-      <div class="tbl-wrap"><table><thead><tr><th>開催日</th><th class="r">記録したレース</th><th class="r">1着の当てやすさ：モデル</th><th class="r">オッズ</th><th class="r">統合</th></tr></thead>
-      <tbody>${dates.slice().reverse().map(h => `<tr><td>${esc(h.date)}</td><td class="r num">${h.races}</td><td class="r num">${h.model?.toFixed?.(3) ?? h.model}</td><td class="r num">${h.market?.toFixed?.(3) ?? h.market}</td><td class="r num"><b>${h.blend?.toFixed?.(3) ?? h.blend}</b></td></tr>`).join("")}</tbody></table></div>
-      <p class="small">1レースごとに、各馬のモデルの確率・確定オッズ・各要素の補正値・着順・タイム・通過順・上がり3F・穴パターンを記録しています。数字（対数損失）は小さいほど当たっていることを表します。</p>`
-      : `<p>まだ蓄積はありません。レース後に「答え合わせ」を押すと、その日の結果が記録され、ここに表示されます。</p>`}
-    </div>
+    <!-- 10/27：「蓄積しているデータ」の表示は不要なので削除（開催日ごとの大きな表で、画面を重くしていた） -->
     ${m ? `<div class="learnbox"><h3>学習した内容（いまの予想に反映中）</h3>
       <p class="small"><b>モデルとオッズの統合</b>：p ∝ モデル<sup>${Bets.CAL.a}</sup> × オッズ<sup>${Bets.CAL.b}</sup>（学習前は 0.3・0.85${(m.version || 1) < 2 ? "。旧方式の学習値は使っていません" : ""}）</p>
       <p class="small"><b>要素の重み</b>：${Object.keys(m.weights || {}).length ? Object.entries(m.weights).map(([k, v]) => `${esc(k)} ×${v}`).join("・") : "まだ変更なし（レースが少ないうちはほぼ動かしません）"}</p>

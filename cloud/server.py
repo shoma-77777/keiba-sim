@@ -634,7 +634,7 @@ class Handler(SimpleHTTPRequestHandler):
                 # 記録の一部だけで学習したモデル（空のモデルなど）で、保存済みの記録全体のモデルを上書きしない
                 if not isinstance(model, dict) or (model.get("races") or 0) < len(recs) * 0.9:
                     old_m = json.loads(lp.read_text(encoding="utf-8")).get("model") if lp.exists() else None
-                    log(f"学習モデルの保存を見送りました（{(model or {}).get('races')}レース分のモデル・記録は{len(recs)}レース）")
+                    if not j.get("noModel"): log(f"学習モデルの保存を見送りました（{(model or {}).get('races')}レース分のモデル・記録は{len(recs)}レース）")   # 10/27：過去データの処理は毎日は記録だけ送る（モデルは30開催日ごと）
                     model = old_m if isinstance(old_m, dict) and (old_m.get("races") or 0) >= (model or {}).get("races", 0) else model
                     model_ok = False
                 else: model_ok = True
