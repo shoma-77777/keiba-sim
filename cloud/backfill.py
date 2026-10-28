@@ -85,7 +85,17 @@ class _CountingFetcher(kc.Fetcher):
             self._t0 = time.time(); self.last = 0.0      # 親クラス側の待ち時間は使わない（上で待ったので）
             with LOCK: ST["requests"] += 1; ST["lastReqAt"] = time.time()
             try:
-                return super().get(url, ttl_hours=ttl_hours, encoding=encoding)
+                # 10/28：応答が返ってこないまま何十分も止まることがあった（サイトに断られている間）。1回の取得は最長90秒で打ち切る
+                box = {}
+                def _do():
+                    try: box["v"] = kc.Fetcher.get(self, url, ttl_hours=ttl_hours, encoding=encoding)
+                    except Exception as e: box["e"] = e
+                th = threading.Thread(target=_do, daemon=True); th.start(); th.join(90)
+                if th.is_alive():
+                    self.s = __import__("requests").Session(); self.s.headers.update(kc.Fetcher(delay=0, cache=False).s.headers)   # 止まった接続は捨てて作り直す
+                    raise TimeoutError("90秒たっても応答がありませんでした")
+                if "e" in box: raise box["e"]
+                return box["v"]
             except Exception as ex:
                 last_ex = ex
                 code = getattr(getattr(ex, "response", None), "status_code", None)
@@ -144,7 +154,11 @@ def _loop():
                         if _stopped(): break
                         time.sleep(10)
                     wait_min = min(120, wait_min * 2); continue
-                _log(f"{d} のレース一覧を取得できませんでした（30秒後に再試行）: {ex}"); time.sleep(30); continue
+                _log(f"{d} のレース一覧を取得できませんでした（{wait_min}分後に再試行）: {ex}")
+                for _ in range(wait_min * 6):
+                    if _stopped(): break
+                    time.sleep(10)
+                continue
             wait_min = 30
             if not races:
                 pr = load_prog(); pr["fetched"][ymd] = 0; save_prog(pr); d += dt.timedelta(days=1); continue   # 10/27：読み直してから保存（画面側が書いた「予想・学習済み」を消さないように）
