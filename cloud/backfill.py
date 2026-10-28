@@ -102,7 +102,7 @@ def _loop():
         pr = load_prog()
         f = _CountingFetcher(delay=1.0, cache=False)
         d = dt.date.fromisoformat(pr["from"]); end = min(dt.date.fromisoformat(pr["to"]), dt.date.today() - dt.timedelta(days=1))
-        con = _db()
+        con = _db(); fails = {}
         while d <= end and not _stopped():
             ymd = d.strftime("%Y%m%d")
             if ymd in pr["fetched"]:
@@ -111,6 +111,12 @@ def _loop():
             try:
                 races = kc.race_list(f, d)
             except Exception as ex:
+                # 10/28：サイトが「その日は無効（400/404）」と返す日は、何度やり直しても同じなので、3回続いたら開催なしとして次の日へ（2019-09-02で一晩止まっていた）
+                code = getattr(getattr(ex, "response", None), "status_code", None)
+                fails[ymd] = fails.get(ymd, 0) + 1
+                if code in (400, 404) and fails[ymd] >= 3:
+                    _log(f"{d} はサイトに一覧がない日なので、開催なしとして次の日へ進みます（{code}）")
+                    pr = load_prog(); pr["fetched"][ymd] = 0; save_prog(pr); d += dt.timedelta(days=1); continue
                 _log(f"{d} のレース一覧を取得できませんでした（30秒後に再試行）: {ex}"); time.sleep(30); continue
             if not races:
                 pr = load_prog(); pr["fetched"][ymd] = 0; save_prog(pr); d += dt.timedelta(days=1); continue   # 10/27：読み直してから保存（画面側が書いた「予想・学習済み」を消さないように）
