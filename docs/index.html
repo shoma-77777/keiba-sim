@@ -8303,7 +8303,7 @@ function bfPanel(){
     <div class="ctrls"><label class="small"><input type="checkbox" id="bfAuto" ${s.autoResume ? "checked" : ""}> アプリを起動したら、取得と予想・学習の続きを自動で進める</label></div>
     <div class="ctrls"><label class="small"><input type="checkbox" id="bfFast" ${BF.fast ? "checked" : ""}> <b>高速モード</b>：買い目の予想と答え合わせ（1,000円・5,000円の成績）を省き、検証レポート（13〜16番）に使う記録だけを作る（通常は1レース4〜5秒・高速は1秒前後）。N数を増やすときはこちら。</label></div>
     ${bfVersionBox(s)}
-    ${s.from ? `<p class="small"><b>取得</b>：${s.running ? `取得中（${esc(s.cur || "")} ${esc(s.phase || "")}）` : s.fetchDone ? "完了" : "停止中"}・${s.daysChecked || 0}/${s.daysTotal || "—"}日を確認（${pct0}%）・開催${s.raceDays || 0}日・${(s.races || 0).toLocaleString()}レース・出走馬${(s.horses || 0).toLocaleString()}頭
+    ${s.from ? `<p class="small"><b>取得</b>：${s.running ? `取得中（${esc(s.cur || "")} ${esc(s.phase || "")}）${s.log?.length ? `<br>最新の記録：${esc(s.log[s.log.length - 1])}<br>` : ""}` : s.fetchDone && !s.active ? "完了" : "停止中"}・${s.daysChecked || 0}/${s.daysTotal || "—"}日を確認（${pct0}%）・開催${s.raceDays || 0}日・${(s.races || 0).toLocaleString()}レース・出走馬${(s.horses || 0).toLocaleString()}頭
       ${s.running ? `<br><span class="small">ここまでの取得 ${(s.requests || 0).toLocaleString()}回。最初のほうの日は出走馬の成績を初めて取るので1日分に30分ほどかかります（馬がそろうにつれ速くなります）。1日分が終わるたびに数字が増えます。</span>` : ""}
       <br><b>予想・答え合わせ・学習</b>：${days.length}開催日（${nR.toLocaleString()}レース）済み・残り${(s.pending || []).length}開催日${BF.reproc ? `（うち${BF.reproc}開催日は、前の版で作った記録を「その日より前のデータだけのモデル」で作り直し中）` : ""}${BF.proc ? `・処理中（${esc(BF.msg)}）` : BF.pause ? "・一時停止中" : ""}${last?.a != null ? `・今のモデルの比重 ${last.a}` : ""}</p>` : ""}
     ${days.length ? `<div class="tbl-wrap"><table><thead><tr><th>買い方</th><th class="r">購入R</th><th class="r">投資</th><th class="r">払戻</th><th class="r">回収率</th>${Object.keys(byYear).sort().map(y => `<th class="r">${y}年</th>`).join("")}</tr></thead><tbody>
@@ -8679,7 +8679,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261027e";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
+const APP_BUILD = "20261028a";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
 const PRE25 = { busy: false, msg: "", res: null,
   hit: { mu: [3.37976, 11.89168, 14.55231], s: [0.68478, 4.63845, 2.34832], w: [-0.42417, -0.23955, -0.06202], b: -1.92086 }, ca: 1.0949232, cb: 0.2081896 };
 const pre25Pev = (f, n) => { if (!f || !f.pl || !f.ph || !(f.odds > 1)) return null; const x = [Math.log(f.odds), Math.log(f.odds) ** 2, n]; let z = PRE25.hit.b; for (let j = 0; j < 3; j++) z += PRE25.hit.w[j] * (x[j] - PRE25.hit.mu[j]) / PRE25.hit.s[j]; return 1 / (1 + Math.exp(-z)) * (PRE25.ca * f.pl + PRE25.cb * (f.ph - f.pl)); };
@@ -8759,6 +8759,7 @@ function bindPrereg(){ const a = $("#pre25Freeze"); if (a) a.onclick = () => fre
 function renderLearnTab(){
   if (!JRAC.st && !JRAC.loading && SERVER.enabled && !SERVER.cloud){ JRAC.loading = true; jraStatus().then(() => { if (ST.tab === "learn") renderLearnTab(); }); }
   const el = $("#p-learn"); if (!el) return;
+  if (SERVER.enabled && !SERVER.cloud && SERVER.on && !BF.timer) bfEnsure();   // 10/28：学習タブを開いている間は、取得の状況を15秒ごとに読み直す（前は起動時に取得中でないと、表示が古いままだった）
   if (!BF.status && !BF.loading && SERVER.enabled && !SERVER.cloud && SERVER.on){ BF.loading = true; bfRefresh().then(() => { BF.loading = false; if (ST.tab === "learn") renderLearnTab(); }); }
   const m = LEARN.model, d = ST.date;
   const dates = m?.hist || [];
