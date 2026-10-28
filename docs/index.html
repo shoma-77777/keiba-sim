@@ -4806,7 +4806,7 @@ function createRace2D(){
     const add = (t, h, text, kind, pri = 1) => ev.push({ t, num: h?.num ?? null, text, kind, pri });
     // 出遅れ（この回の抽選。出遅れやすさは馬ごと＝直近10走の出遅れ回数で0.56〜1.79倍）。過去の回数も添える
     trace.events.forEach((e, i) => { if (!e.includes("出遅れ")) return; const pr = f[horses[i].i].prof || {};
-      add(0.8 + 0.1 * ev.length, horses[i], `${nmP(horses[i])} 出遅れ！${pr.slowK ? `（直近${pr.slowN}走で${pr.slowK}回）` : ""}`, "bad", 3); });
+      add(0.8 + 0.1 * ev.length, horses[i], `${nmP(horses[i])} 出遅れ！`, "bad", 3); });
     // ハナ争い・ペース（この回のペース。出走馬の脚質から決まる）
     const eo = trace.earlyOrder.map(i => horses[i]), a = eo[0], b = eo[1];
     const t300 = tL(Math.min(320, D * 0.18));
@@ -4817,22 +4817,7 @@ function createRace2D(){
     const tMid = tL(D * 0.5), rM = rankAt(tMid), fav = horses.find(h => pop(h) === 1), hon = horses.find(h => MK[h.num] === "◎");
     if (fav){ const r = rM[fav.num]; add(tMid, fav, `1番人気 ${nm(fav)}は${r <= 2 ? "先頭を うかがう" : r <= Math.ceil(S.N / 3) ? "好位で 楽な手応え" : r <= Math.ceil(S.N * 2 / 3) ? "中団で 脚をためる" : "後方から 一発狙い"}`, "pace", 1); }
     if (hon && hon !== fav){ const r = rM[hon.num]; add(tMid + 0.8, hon, `AI本命 ${nm(hon)}は${r <= 3 ? "前の位置" : r <= Math.ceil(S.N * 2 / 3) ? "中団" : "後方"}で 仕掛けを待つ`, "pace", 1); }
-    // コース・条件が合う（5着以内の馬だけ。補正が大きいものから）
-    const wet = /重|不/.test(race.going || "") && !/稍/.test(race.going || "");
-    const fits = [];
-    horses.forEach(h => { const ad = f[h.i].adj || {}; if (fin[h.num] > 5) return;
-      const pr = f[h.i].prof || {}, surf = race.surface === "障" ? "芝" : race.surface;
-      if ((ad.競馬場 || 0) >= 0.5){ const cr = (pr.runs || []).filter(q => q.venue === race.venue && q.surface === surf && q.pos > 0), c4 = [0, 0, 0, 0]; cr.forEach(q => c4[Math.min(3, q.pos - 1)]++);
-        fits.push([ad.競馬場, h, `${nm(h)} ${race.venue}${surf}巧者（${c4.join("-")}）`]); }
-      if (wet && (ad.馬場 || 0) >= 0.5) fits.push([ad.馬場, h, `${nm(h)} 道悪巧者（重・不良で普段より走る）`]);
-      if ((ad.枠 || 0) >= 0.4 && h.num <= Math.ceil(S.N / 3)) fits.push([ad.枠, h, `${nm(h)} 内枠有利のコースで内枠`]);
-      if ((ad.距離 || 0) >= 0.6) fits.push([ad.距離, h, `${nm(h)} 距離が合う${pr.distCenter ? `（好走の中心${pr.distCenter}m）` : ""}`]);
-      if ((ad.当日馬場 || 0) >= 0.5) fits.push([ad.当日馬場, h, `${nm(h)} 今日の馬場の傾向に合う`]);
-      if ((ad.騎手 || 0) >= 0.6 && f[h.i].jockey) fits.push([ad.騎手 * 0.8, h, `${nm(h)} ${f[h.i].jockey}騎手の好騎乗`]);
-      const tag = (f[h.i].ana || []).find(t => /叩き2戦目|前走度外視|鞍上強化|距離短縮|G1からの格下げ/.test(t)); if (tag) fits.push([0.55, h, `${nm(h)} ${tag}`]); });
-    fits.sort((x, y) => y[0] - x[0]);
-    const usedFit = new Set(); let kf = 0;
-    fits.forEach(([, h, t]) => { if (usedFit.has(h.num) || kf >= 3) return; usedFit.add(h.num); add(tL(D * (0.3 + 0.1 * kf)), h, t, "good", 2); kf++; });
+    // 10/27：「コース・条件が合う」「叩き2戦目」「G1からの格下げ」などレース前の材料は、レース中の出来事ではないので吹き出しに出さない
     // 進路カット（この回の抽選）
     trace.events.forEach((e, i) => { if (e.includes("進路カット")) add(tL(D * 0.62), horses[i], `${nm(horses[i])} 前が詰まって進路カット！`, "bad", 3); });
     // 直線：前にいた馬の失速／後ろからの追い込み／人気薄の粘り／人気馬の伸び悩み
@@ -8694,7 +8679,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261027d";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
+const APP_BUILD = "20261027e";   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
 const PRE25 = { busy: false, msg: "", res: null,
   hit: { mu: [3.37976, 11.89168, 14.55231], s: [0.68478, 4.63845, 2.34832], w: [-0.42417, -0.23955, -0.06202], b: -1.92086 }, ca: 1.0949232, cb: 0.2081896 };
 const pre25Pev = (f, n) => { if (!f || !f.pl || !f.ph || !(f.odds > 1)) return null; const x = [Math.log(f.odds), Math.log(f.odds) ** 2, n]; let z = PRE25.hit.b; for (let j = 0; j < 3; j++) z += PRE25.hit.w[j] * (x[j] - PRE25.hit.mu[j]) / PRE25.hit.s[j]; return 1 / (1 + Math.exp(-z)) * (PRE25.ca * f.pl + PRE25.cb * (f.ph - f.pl)); };
