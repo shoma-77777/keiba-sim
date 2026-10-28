@@ -5,7 +5,8 @@
 ・出走馬の全成績と血統は1頭につき1回だけ取得して data/past/horses.sqlite に保存（どの日を予想するときも、その日より前の出走だけを渡す）
 ・取得は古い日から順に進み、途中で止めても、アプリを閉じても、続きから再開する
 ・取得した日は、アプリの画面（PC）が「その日より前のデータだけで学習したモデル」で予想 → 答え合わせ → 学習 を古い順に自動で進める
-・サイトに負担をかけないよう、同時に1つずつ・取得の開始は1秒以上あける（10/27：1.5秒→1秒、待ち時間を「前の取得の開始から」に。馬単オッズは使わないので省く）。ページはディスクに保存しない
+・サイトに負担をかけないよう、同時に1つずつ・取得の開始は2秒以上あける（10/28：1秒にしたらサイトに一時的に断られたので2秒に。馬単オッズは使わないので省く）。ページはディスクに保存しない
+・10/28：サイトに断られた（エラー400/403/429）ときは、その日を保存せず30分〜2時間休んでから同じ日を取り直す。断られている間に欠けたまま保存した日は、起動時に見つけて取り直す
 ・10/27：止まったら自動で再開（通信エラーは時間をおいてやり直し、取得の処理が止まっていたら1分以内に続きから再開）
 """
 import datetime as dt, json, sqlite3, threading, time, traceback
@@ -97,12 +98,37 @@ def _stopped():
     with LOCK: return ST["stop"]
 
 
+BLOCK_CODES = (400, 403, 429)
+class Blocked(Exception): pass
+def _code(ex): return getattr(getattr(ex, "response", None), "status_code", None)
+
+
+def _repair_broken_days(pr):
+    """10/28：サイトに断られている間に保存してしまった「中身が欠けた日」を取り直す（2割以上のレースに出馬表か結果がない日）"""
+    n = 0
+    for ymd, cnt in list(pr.get("fetched", {}).items()):
+        if not cnt: continue
+        fp = PAST / f"day_{ymd}.json"
+        try:
+            races = json.loads(fp.read_text(encoding="utf-8")).get("races") or []
+        except Exception:
+            continue
+        bad = sum(1 for r in races if not r.get("entries") or not (r.get("result") or {}).get("rows"))
+        if races and bad >= max(2, len(races) * 0.2):
+            del pr["fetched"][ymd]; pr.get("processed", {}).pop(ymd, None); n += 1
+            _log(f"{ymd} は{len(races)}レース中{bad}レースが欠けていたので、取り直します")
+    return n
+
+
 def _loop():
     try:
         pr = load_prog()
-        f = _CountingFetcher(delay=1.0, cache=False)
+        f = _CountingFetcher(delay=2.0, cache=False)   # 10/28：1秒間隔でサイトに一時的に断られた（全ページがエラー400）ので、取得の開始どうしを2秒以上あける
         d = dt.date.fromisoformat(pr["from"]); end = min(dt.date.fromisoformat(pr["to"]), dt.date.today() - dt.timedelta(days=1))
-        con = _db(); fails = {}
+        con = _db(); wait_min = 30
+        pr = load_prog()
+        if _repair_broken_days(pr): save_prog(pr)
+        pr = load_prog()
         while d <= end and not _stopped():
             ymd = d.strftime("%Y%m%d")
             if ymd in pr["fetched"]:
@@ -111,16 +137,19 @@ def _loop():
             try:
                 races = kc.race_list(f, d)
             except Exception as ex:
-                # 10/28：サイトが「その日は無効（400/404）」と返す日は、何度やり直しても同じなので、3回続いたら開催なしとして次の日へ（2019-09-02で一晩止まっていた）
-                code = getattr(getattr(ex, "response", None), "status_code", None)
-                fails[ymd] = fails.get(ymd, 0) + 1
-                if code in (400, 404) and fails[ymd] >= 3:
-                    _log(f"{d} はサイトに一覧がない日なので、開催なしとして次の日へ進みます（{code}）")
-                    pr = load_prog(); pr["fetched"][ymd] = 0; save_prog(pr); d += dt.timedelta(days=1); continue
+                if _code(ex) in BLOCK_CODES:
+                    # 10/28：エラー400は「開催がない日」ではなく、サイトに一時的に断られている合図（トップページまで400になる）。日付は飛ばさず、間をあけて同じ日からやり直す
+                    _log(f"サイトから一時的にアクセスを断られています（{_code(ex)}）。{wait_min}分休んでから {d} を取り直します")
+                    for _ in range(wait_min * 6):
+                        if _stopped(): break
+                        time.sleep(10)
+                    wait_min = min(120, wait_min * 2); continue
                 _log(f"{d} のレース一覧を取得できませんでした（30秒後に再試行）: {ex}"); time.sleep(30); continue
+            wait_min = 30
             if not races:
                 pr = load_prog(); pr["fetched"][ymd] = 0; save_prog(pr); d += dt.timedelta(days=1); continue   # 10/27：読み直してから保存（画面側が書いた「予想・学習済み」を消さないように）
             _log(f"{d}：{len(races)}レースを取得します")
+            blocked = False
             for i, r in enumerate(races):
                 if _stopped(): break
                 with LOCK: ST.update(phase=f"出馬表・オッズ・結果 {i + 1}/{len(races)}")
@@ -136,8 +165,15 @@ def _loop():
                     kc.training(f, r)
                     r["oddsFinal"] = True; r["oddsAsOf"] = "確定オッズ（過去データ）"; r["backfill"] = True
                 except Exception as ex:
+                    if _code(ex) in BLOCK_CODES: blocked = True; break      # 10/28：断られたらその日は保存せず、休んでから取り直す
                     _log(f"{r.get('venue')}{r.get('no')}R の取得に失敗: {ex}"); r["entries"] = r.get("entries") or None
             if _stopped(): break
+            if blocked:
+                _log(f"サイトから一時的にアクセスを断られました。{d} は保存せず、{wait_min}分休んでから取り直します")
+                for _ in range(wait_min * 6):
+                    if _stopped(): break
+                    time.sleep(10)
+                wait_min = min(120, wait_min * 2); continue
             # 出走馬の全成績・血統（まだ持っていない馬だけ）
             have = {row[0] for row in con.execute("SELECT id FROM horses")}
             hids = []
@@ -152,10 +188,17 @@ def _loop():
                     runs = kc.horse_history(f, hid); ped = kc.horse_pedigree(f, hid)
                     con.execute("INSERT OR REPLACE INTO horses VALUES (?, ?, ?)", (hid, json.dumps({"name": name, "runs": runs, **ped}, ensure_ascii=False), dt.date.today().isoformat()))
                 except Exception as ex:
+                    if _code(ex) in BLOCK_CODES: blocked = True; break
                     _log(f"{name} の成績取得に失敗: {ex}")
                 if (k + 1) % 20 == 0: con.commit()
             con.commit()
             if _stopped(): break
+            if blocked:
+                _log(f"サイトから一時的にアクセスを断られました（馬の成績）。{d} は保存せず、{wait_min}分休んでから取り直します")
+                for _ in range(wait_min * 6):
+                    if _stopped(): break
+                    time.sleep(10)
+                wait_min = min(120, wait_min * 2); continue
             ids = sorted({e["horseId"] for r in races for e in (r.get("entries") or [])})
             (PAST / f"day_{ymd}.json").write_text(json.dumps({"date": d.isoformat(), "races": races, "horseIds": ids}, ensure_ascii=False), encoding="utf-8")
             pr = load_prog(); pr["fetched"][ymd] = len(races); save_prog(pr)
