@@ -58,6 +58,23 @@ def holdout_years():
     fp = DATA / "research_holdout.json"
     try: return set(json.loads(fp.read_text(encoding="utf-8")).get("years") or []) if fp.exists() else set()
     except Exception: return set()
+# 10/30：learn.json の読み書きは1つずつ（同時に2つ保存すると、ファイルが壊れて「Extra data」で読めなくなった）
+LEARN_LOCK = threading.RLock()
+def read_learn():
+    """learn.json を読む。後ろに余分なデータが付いて壊れていたら、先頭の正しい部分だけを使って直す（直す前のファイルは backup に残す）"""
+    lp = DATA / "learn.json"
+    if not lp.exists(): return {}
+    with LEARN_LOCK:
+        txt = lp.read_text(encoding="utf-8")
+        try:
+            return json.loads(txt)
+        except json.JSONDecodeError as ex:
+            obj, end = json.JSONDecoder().raw_decode(txt.lstrip())
+            bk = DATA / "backup"; bk.mkdir(exist_ok=True)
+            shutil.copyfile(lp, bk / f"learn_broken_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+            tmp = DATA / "learn.json.fix.tmp"; tmp.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8"); os.replace(tmp, lp)
+            log(f"学習の記録ファイルが壊れていたので直しました（{len(obj.get('records', []))}レース分を残し、壊れた元のファイルは backup に保存）: {ex}")
+            return obj
 def is_holdout(date_str):
     ys = holdout_years(); d = re.sub(r"\D", "", str(date_str or ""))
     return bool(ys) and d[:4] in ys
@@ -387,7 +404,7 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path == "/api/research/frozen":
             fp = DATA / "research_frozen_model.json"; o = json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {}
             ho = holdout_years(); lp = DATA / "learn.json"
-            recs = json.loads(lp.read_text(encoding="utf-8")).get("records", []) if lp.exists() else []
+            recs = read_learn().get("records", []) if lp.exists() else []
             o["holdoutYears"] = sorted(ho); o["learnHoldoutRecords"] = sum(1 for r in recs if str(r.get("date", ""))[:4] in ho)
             return self._json(o)
         if u.path == "/api/backfill/day":
@@ -414,11 +431,11 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {"sets": []})
         if u.path == "/api/learn" and q.get("count"):
             fp = DATA / "learn.json"
-            n = len(json.loads(fp.read_text(encoding="utf-8")).get("records", [])) if fp.exists() else 0
+            n = len(read_learn().get("records", [])) if fp.exists() else 0
             return self._json({"records": n})
         if u.path == "/api/learn":
             fp = DATA / ("learn.json" if q.get("full") else "learn_model.json")
-            return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {})
+            return self._json((read_learn() if q.get("full") else json.loads(fp.read_text(encoding="utf-8"))) if fp.exists() else {})
         if u.path == "/api/cloud": return self._json(cloud_mod().public_conf() if cloud_mod() else {"available": False})
         if u.path == "/api/cloud/qr.svg":
             c = cloud_mod().load_conf() if cloud_mod() else {}
@@ -518,7 +535,7 @@ class Handler(SimpleHTTPRequestHandler):
                     model = json.loads(lm.read_text(encoding="utf-8")) if lm.exists() else None
                     lock = json.loads(lk.read_text(encoding="utf-8")) if lk.exists() else None
                     years = sorted(set(str(y) for y in (j.get("years") or [])))
-                    recs = json.loads((DATA / "learn.json").read_text(encoding="utf-8")).get("records", []) if (DATA / "learn.json").exists() else []
+                    recs = read_learn().get("records", []) if (DATA / "learn.json").exists() else []
                     bad = [r.get("date") for r in recs if str(r.get("date", ""))[:4] in years]
                     if bad: return self._json({"ok": False, "message": f"学習の記録にすでに{years}年が{len(bad)}件あります。独立評価は成立しません"}, 400)
                     import hashlib
@@ -617,11 +634,14 @@ class Handler(SimpleHTTPRequestHandler):
             bf.mark_processed(ymd, j.get("result") or {}); return self._json({"ok": True})
         if u.path == "/api/learn":
             n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8")
+            _lk = False
             try:
                 j = json.loads(body)
                 lp = DATA / "learn.json"
                 # 記録は絶対に減らさない：送られてきた記録（records でも append でも）を、保存済みの記録に上書き・追加する
-                old = json.loads(lp.read_text(encoding="utf-8")).get("records", []) if lp.exists() else []
+                LEARN_LOCK.acquire(); _lk = True
+                L0 = read_learn() if lp.exists() else {}
+                old = L0.get("records", [])
                 m = {r["id"]: r for r in old}
                 drop = 0
                 for r in (j.get("records") or []) + (j.get("append") or []):
@@ -633,7 +653,7 @@ class Handler(SimpleHTTPRequestHandler):
                 model = j.get("model")
                 # 記録の一部だけで学習したモデル（空のモデルなど）で、保存済みの記録全体のモデルを上書きしない
                 if not isinstance(model, dict) or (model.get("races") or 0) < len(recs) * 0.9:
-                    old_m = json.loads(lp.read_text(encoding="utf-8")).get("model") if lp.exists() else None
+                    old_m = L0.get("model")
                     if not j.get("noModel"): log(f"学習モデルの保存を見送りました（{(model or {}).get('races')}レース分のモデル・記録は{len(recs)}レース）")   # 10/27：過去データの処理は毎日は記録だけ送る（モデルは30開催日ごと）
                     model = old_m if isinstance(old_m, dict) and (old_m.get("races") or 0) >= (model or {}).get("races", 0) else model
                     model_ok = False
@@ -656,6 +676,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"ok": True, "records": len(recs), "modelSaved": model_ok})
             except Exception as ex:
                 return self._json({"ok": False, "message": str(ex)}, 400)
+            finally:
+                if _lk: LEARN_LOCK.release()
         if u.path == "/api/notes":
             n = int(self.headers.get("Content-Length", 0))
             if n > 5_000_000: return self._json({"ok": False, "message": "too large"}, 413)
