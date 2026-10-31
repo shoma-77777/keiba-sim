@@ -459,6 +459,15 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
     def do_POST(self):
         u = urlparse(self.path); q = parse_qs(u.query)
+        # 10/31：アプリを新しくしたとき、画面から（またはClaudeから）サーバーを再起動する。このPCからの依頼だけ受け付ける
+        if u.path == "/api/restart":
+            if self.client_address[0] not in ("127.0.0.1", "::1"): return self._json({"ok": False, "message": "このPCからだけ再起動できます"}, 403)
+            if not os.environ.get("KEIBA_CHILD"): return self._json({"ok": False, "message": "自動再起動に対応した起動のしかたではありません。黒い画面を閉じて start_windows.bat から起動し直してください"}, 409)
+            def _bye():
+                time.sleep(1.0)
+                with LEARN_LOCK: print("[再起動] 新しいプログラムで起動し直します", flush=True); os._exit(RESTART_CODE)
+            threading.Thread(target=_bye, daemon=True).start()
+            return self._json({"ok": True})
         if u.path in ("/api/update", "/api/odds", "/api/results"):
             if JOB["running"]: return self._json({"ok": False, "message": "取得中です。終わるまでお待ちください"}, 409)
             ymd = re.sub(r"\D", "", (q.get("date") or [next_race_day().strftime("%Y%m%d")])[0])[:8]
@@ -829,6 +838,19 @@ def lan_ip():
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]; s.close(); return ip
     except Exception: return "127.0.0.1"
 
+RESTART_CODE = 3
+
+def supervise():
+    """10/31：見張り役。実際のサーバーは子のプロセスで動かし、子が「再起動」で終わったら、新しいプログラムを読み直して起動し直す（黒い画面は閉じなくてよい）"""
+    args = [a for a in sys.argv[1:]]; first = True
+    while True:
+        env = dict(os.environ, KEIBA_CHILD="1")
+        cmd = [sys.executable, os.path.abspath(__file__)] + args + ([] if first or "--no-browser" in args else ["--no-browser"])
+        try: code = subprocess.call(cmd, env=env)
+        except KeyboardInterrupt: return
+        if code != RESTART_CODE: return
+        first = False; print("[再起動] 3秒後に起動し直します", flush=True); time.sleep(3)
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
@@ -851,9 +873,12 @@ def main():
     cm = cloud_mod()
     if cm and cm.load_conf().get("token") and cm.load_conf().get("appVersion") != cm.app_version():
         threading.Thread(target=lambda: _safe(lambda: cm.republish(DATA, write_status)), daemon=True).start()   # アプリを新しくしたらクラウドも更新
-    try:
-        srv = ThreadingHTTPServer(("0.0.0.0", a.port), Handler)
-    except OSError:
+    srv = None
+    for _k in range(10 if os.environ.get("KEIBA_CHILD") else 1):
+        try: srv = ThreadingHTTPServer(("0.0.0.0", a.port), Handler); break
+        except OSError:
+            if _k < 9 and os.environ.get("KEIBA_CHILD"): time.sleep(1.5)
+    if srv is None:
         print(f"ポート {a.port} は使用中です。すでに起動していないか確認してください（ブラウザで http://localhost:{a.port} を開く）")
         if not a.no_browser: open_app_window(f"http://localhost:{a.port}")
         return
@@ -870,4 +895,5 @@ def main():
     except KeyboardInterrupt: pass
 
 if __name__ == "__main__":
-    main()
+    if os.environ.get("KEIBA_CHILD") or os.environ.get("KEIBA_NO_SUPERVISE") or any(x in sys.argv for x in ("--update", "--odds", "--results")): main()
+    else: supervise()
