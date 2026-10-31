@@ -640,7 +640,9 @@ class Handler(SimpleHTTPRequestHandler):
                 except Exception: return self._json({"ok": False, "message": "期間の指定が正しくありません"}, 400)
                 return self._json({"ok": bf.start(frm, to)})
             if u.path == "/api/backfill/stop": bf.stop(); return self._json({"ok": True})
-            if u.path == "/api/tospo/start": return self._json({"ok": tospo.start(j.get("from") or "2021-01-01")})
+            if u.path == "/api/tospo/start":
+                if j.get("reset") and not tospo.ST["running"]: pr = tospo._prog(); pr["done"] = {}; tospo._save_prog(pr)
+                return self._json({"ok": tospo.start(j.get("from") or "2021-10-01")})
             if u.path == "/api/tospo/stop": tospo.stop(); return self._json({"ok": True})
             if u.path == "/api/backfill/auto": bf.set_auto(j.get("on")); return self._json({"ok": True})
             if u.path == "/api/backfill/reprocess": return self._json({"ok": True, "n": bf.unmark_all() if j.get("all") else bf.unmark(j.get("dates") or [])})
