@@ -3015,3 +3015,41 @@
 2026-10-31 17:39:15 275/304頭
 2026-10-31 17:39:31 300/304頭
 2026-10-31 17:39:42 完了：24レース・304頭（重複除き304頭）を登録しました
+2026-10-31 17:43:28 24レース見つかりました
+2026-10-31 17:43:38 東京1R 2歳未勝利 15頭・オッズnetkeiba
+2026-10-31 17:43:47 東京2R 2歳未勝利 16頭・オッズnetkeiba
+2026-10-31 17:43:56 東京3R 2歳未勝利 9頭・オッズnetkeiba
+2026-10-31 17:44:06 東京4R 2歳新馬 14頭・オッズnetkeiba
+2026-10-31 17:44:15 東京5R 2歳新馬 8頭・オッズnetkeiba
+2026-10-31 17:44:24 東京6R 3歳以上1勝クラス 15頭・オッズnetkeiba
+2026-10-31 17:44:33 東京7R 3歳以上1勝クラス 15頭・オッズnetkeiba
+2026-10-31 17:44:42 東京8R 本栖湖特別 8頭・オッズnetkeiba
+2026-10-31 17:44:52 東京9R 紅葉S 14頭・オッズnetkeiba
+2026-10-31 17:45:01 東京10R 秋嶺S 16頭・オッズnetkeiba
+2026-10-31 17:45:10 東京11R 天皇賞(秋)(GI) 17頭・オッズnetkeiba
+2026-10-31 17:45:16 東京12R 清里特別 14頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/14頭分しか読めず）
+2026-10-31 17:45:21 京都1R 2歳未勝利 11頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/11頭分しか読めず）
+2026-10-31 17:45:26 京都2R 2歳未勝利 13頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/13頭分しか読めず）
+2026-10-31 17:45:32 京都3R 2歳未勝利 12頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/12頭分しか読めず）
+2026-10-31 17:45:37 京都4R 3歳以上障害未勝利 13頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/13頭分しか読めず）
+2026-10-31 17:45:42 京都5R 2歳新馬 17頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/17頭分しか読めず）
+2026-10-31 17:45:48 京都6R 2歳新馬 16頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/16頭分しか読めず）
+2026-10-31 17:45:53 京都7R 3歳以上1勝クラス 16頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/16頭分しか読めず）
+2026-10-31 17:45:59 京都8R 3歳以上1勝クラス 14頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/14頭分しか読めず）
+2026-10-31 17:46:04 京都9R 愛宕特別 10頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/10頭分しか読めず）
+2026-10-31 17:46:10 京都10R 古都S 9頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/9頭分しか読めず）
+2026-10-31 17:46:16 京都11R まほろばS(L) 13頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/13頭分しか読めず）
+2026-10-31 17:46:21 京都12R 3歳以上2勝クラス 13頭・オッズなし（netkeiba: 想定外の応答: {"status":"limit","data":"","update_count":"5","reason":"user update limit"} / Yahoo!競馬: 0/13頭分しか読めず）
+2026-10-31 17:47:33 25/318頭
+2026-10-31 17:49:18 50/318頭
+2026-10-31 17:51:15 75/318頭
+2026-10-31 17:52:26 100/318頭
+2026-10-31 17:53:38 125/318頭
+2026-10-31 17:54:43 150/318頭
+2026-10-31 17:55:54 175/318頭
+2026-10-31 17:56:39 200/318頭
+2026-10-31 17:58:59 225/318頭
+2026-10-31 18:01:17 250/318頭
+2026-10-31 18:02:19 275/318頭
+2026-10-31 18:03:38 300/318頭
+2026-10-31 18:04:46 完了：24レース・318頭（重複除き318頭）を登録しました
