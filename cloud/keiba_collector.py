@@ -201,7 +201,19 @@ def _decode_odds_payload(txt):
 def _odds_netkeiba(f, race, ttl_hours):
     url = (f"{BASE_RACE}/api/api_get_jra_odds.html?pid=api_get_jra_odds&input=UTF-8&output=json"
            f"&race_id={race['id']}&type=1&action=update&sort=odds&compress=0")
-    data = _decode_odds_payload(f.get(url, ttl_hours=ttl_hours))
+    # 2026-10-31：続けて取ると「user update limit（更新の回数制限）」と断られることがある（11/1の京都が全部オッズなしになった）。
+    #  断られたら action=init（最新の確定時刻の表）で取り直し、それでもだめなら少し待ってもう一度。断られた応答はキャッシュに残さない
+    data = None; last = None
+    for k, u in enumerate([url, url.replace("action=update", "action=init"), url + "&_r=1"]):
+        if k == 2: time.sleep(30)
+        txt = f.get(u, ttl_hours=0 if k else ttl_hours)
+        if '"status":"limit"' in (txt or "").replace(" ", ""):
+            last = txt
+            try: (CACHE / (hashlib.md5(u.encode()).hexdigest() + ".html")).unlink()
+            except Exception: pass
+            continue
+        data = _decode_odds_payload(txt); break
+    if data is None: raise ValueError("回数制限で断られました（しばらくしてから自動で取り直します）: " + str(last)[:80])
     od = (data.get("odds") or {})
     win, plc = od.get("1") or {}, od.get("2") or {}
     out = {}

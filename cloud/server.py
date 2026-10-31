@@ -22,10 +22,12 @@ sys.path.insert(0, str(HERE))
 import keiba_collector as kc   # noqa: E402
 import backfill as bf          # noqa: E402
 import jra_collect as jc        # noqa: E402
+import tospo                    # noqa: E402  10/31：東スポの陣営コメント
 
 WEB = HERE / "web"
 DATA = Path(os.environ.get("KEIBA_DATA") or (HERE / "data")); DATA.mkdir(parents=True, exist_ok=True)
 bf.init(DATA)
+tospo.init(DATA)
 jc.init(DATA)
 DB_PATH = Path(os.environ.get("KEIBA_DB") or (HERE / "keiba.db"))
 TWEAKS = DATA / "tweaks.json"
@@ -414,6 +416,8 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path == "/api/lock":
             fp = DATA / "lock.json"
             return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {})
+        if u.path == "/api/tospo/status": return self._json(tospo.status())
+        if u.path == "/api/tospo/race": return self._json(tospo.for_race((q.get("id") or [""])[0]) or {})
         if u.path == "/api/jra/status": return self._json(jc.status())
         if u.path == "/api/jra/incidents": return self._json(jc.incidents())
         if u.path == "/api/prereg":
@@ -626,7 +630,7 @@ class Handler(SimpleHTTPRequestHandler):
                 with open(lp, "a", encoding="utf-8") as f: f.write(body.replace("\n", " ") + "\n")
             except Exception: pass
             return self._json({"ok": True})
-        if u.path in ("/api/backfill/start", "/api/backfill/stop", "/api/backfill/done", "/api/backfill/reprocess", "/api/backfill/auto"):
+        if u.path in ("/api/backfill/start", "/api/backfill/stop", "/api/backfill/done", "/api/backfill/reprocess", "/api/backfill/auto", "/api/tospo/start", "/api/tospo/stop"):
             n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8") if n else "{}"
             try: j = json.loads(body or "{}")
             except Exception: j = {}
@@ -636,6 +640,8 @@ class Handler(SimpleHTTPRequestHandler):
                 except Exception: return self._json({"ok": False, "message": "期間の指定が正しくありません"}, 400)
                 return self._json({"ok": bf.start(frm, to)})
             if u.path == "/api/backfill/stop": bf.stop(); return self._json({"ok": True})
+            if u.path == "/api/tospo/start": return self._json({"ok": tospo.start(j.get("from") or "2021-01-01")})
+            if u.path == "/api/tospo/stop": tospo.stop(); return self._json({"ok": True})
             if u.path == "/api/backfill/auto": bf.set_auto(j.get("on")); return self._json({"ok": True})
             if u.path == "/api/backfill/reprocess": return self._json({"ok": True, "n": bf.unmark_all() if j.get("all") else bf.unmark(j.get("dates") or [])})
             ymd = re.sub(r"\D", "", str(j.get("date") or ""))[:8]
@@ -816,6 +822,41 @@ def auto_odds_loop():
     last = {}
     while True:
         time.sleep(60)
+        # 10/31：オッズが取れなかったレース（回数制限で断られた等）は、今日・明日の分を20分おきに、そのレースだけ取り直す
+        try:
+            now = dt.datetime.now()
+            if JOB["running"] or not (8 <= now.hour <= 23) or time.time() - last.get("miss", 0) < 20 * 60: raise StopIteration
+            for dd in (dt.date.today(), dt.date.today() + dt.timedelta(days=1)):
+                ymd2 = dd.strftime("%Y%m%d"); p2 = snapshot_path(ymd2)
+                if not p2.exists(): continue
+                snap2 = json.loads(p2.read_text(encoding="utf-8")); miss = []
+                for r in snap2.get("races", []):
+                    ents = r.get("entries") or []
+                    if not ents or r.get("surface") == "障": continue
+                    m = re.match(r"(\d{1,2}):(\d{2})", r.get("postTime") or "")
+                    if m and dt.datetime.combine(dd, dt.time(int(m.group(1)), int(m.group(2)))) < now: continue
+                    if sum(1 for e in ents if (e.get("odds") or 0) > 1) < len(ents) // 2: miss.append(r["id"])
+                if miss:
+                    last["miss"] = time.time(); log(f"オッズが取れていない{len(miss)}レースを取り直します（{ymd2}）"); update_date(ymd2, True, miss); break
+            else: last["miss"] = time.time()
+        except StopIteration: pass
+        except Exception as ex:
+            print("オッズの取り直しで警告:", ex)
+        # 10/31：今日・明日の重賞は、東スポの陣営コメントを前日の夕方（17〜23時）と当日の朝（6〜11時）に集める（1日2回まで）
+        try:
+            now = dt.datetime.now(); slot = "pm" if 17 <= now.hour <= 23 else ("am" if 6 <= now.hour <= 11 else None)
+            if slot and not tospo.ST["running"]:
+                for dd in (dt.date.today(), dt.date.today() + dt.timedelta(days=1)):
+                    p3 = snapshot_path(dd.strftime("%Y%m%d")); tag = f"tospo_{dd}_{slot}_{now.date()}"
+                    if last.get(tag) or not p3.exists(): continue
+                    if (dd == dt.date.today() and slot == "pm") or (dd > dt.date.today() and slot == "am"): continue
+                    gr = [r for r in json.loads(p3.read_text(encoding="utf-8")).get("races", []) if tospo._grade(r.get("name")) >= 5 and r.get("entries")]
+                    last[tag] = True
+                    if gr:
+                        pr = tospo._prog(); [pr["done"].pop(r["id"], None) for r in gr]; tospo._save_prog(pr)
+                        log(f"東スポの陣営コメントを集めます（{dd} の重賞 {len(gr)}レース）"); tospo.start(races=gr); break
+        except Exception as ex:
+            print("東スポのコメント集めで警告:", ex)
         try:
             ymd = dt.date.today().strftime("%Y%m%d"); p = snapshot_path(ymd)
             if JOB["running"] or not p.exists(): continue

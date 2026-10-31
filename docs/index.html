@@ -5554,6 +5554,17 @@ function valueScores(ctx, mkp){
   try { if (!mkp) return null; const f = ctx.field, fo = Engine.filledOdds(f), iv = fo.map(o => 1 / o), sm = iv.reduce((a, b) => a + b, 0);
     return mkp.map((p, i) => p >= 0.08 ? 10 + p / (iv[i] / sm) : p); } catch (err) { return null; }
 }
+// 10/31：東スポの陣営コメント（重賞だけ。PCのサーバーが集めたもの）。言葉で「良い／普通／悪い」に分けて表示（効くかどうかは検証中）
+const TOSPO = {};
+function tospoLoad(rid){ if (TOSPO[rid] !== undefined || !(typeof SERVER !== "undefined" && SERVER.on)) return; TOSPO[rid] = null;
+  api("/api/tospo/race?id=" + rid, { timeout: 15000 }).then(j => { TOSPO[rid] = j || {}; if (j?.horses && Object.keys(j.horses).length && ST.tab === "all") renderAllTab(); }).catch(() => { TOSPO[rid] = {}; }); }
+function tospoHtml(r){
+  try { if (!/G[123]|GⅠ|GⅡ|GⅢ|\(GI/.test(r.name || "")) return ""; const t = TOSPO[r.id]; if (t === undefined){ tospoLoad(r.id); return ""; }
+    const H = t?.horses; if (!H || !Object.keys(H).length) return "";
+    const rows = (r.entries || []).filter(e => H[e.horseId]?.length).map(e => { const a = H[e.horseId], sc = a.reduce((s, x) => s + (x.score || 0), 0), q = (a.find(x => x.quotes?.length)?.quotes[0] || "").slice(0, 40);
+      return `<span style="white-space:nowrap">${e.num}番 ${esc(e.name || "")} <b class="${sc > 0 ? "pos" : sc < 0 ? "neg" : ""}">${sc > 0 ? "良い" : sc < 0 ? "悪い" : "普通"}</b>${q ? `「${esc(q)}${q.length >= 40 ? "…" : ""}」` : ""}</span>`; });
+    return rows.length ? `<div class="line small"><b>東スポの陣営コメント（検証中・言葉で判定）</b>：${rows.join("　/　")}</div>` : "";
+  } catch (err) { return ""; } }
 function isTataki2(ctx, e){ try { return aiFeat(ctx, e).tataki2 === 1; } catch (err) { return false; } }
 function pickDarkHorse(ctx, stats, avgStats, M){
   // 2026-10-12：3着以内の的中率を優先して、5番人気以下で「オッズから見た3着内率」が一番高い馬を選ぶ（過去6,700レースで3着内24%・複勝回収76%。
@@ -6982,7 +6993,7 @@ async function raceImage(r, x){
   return c.toDataURL("image/png");
 }
 // 予想の計算の版：推奨文・注目穴馬の決め方を変えたら上げる。画像を作るとき、古い版の計算なら計算し直してから作る
-const ROW_VER = "20261031d";   // 10/24：エンジン修正＋穴馬の3着内率の表示補正＋注目穴馬の選び方（5〜8番人気・市場×シミュ）＋画像の推奨理由のはみ出し修正
+const ROW_VER = "20261031e";   // 10/24：エンジン修正＋穴馬の3着内率の表示補正＋注目穴馬の選び方（5〜8番人気・市場×シミュ）＋画像の推奨理由のはみ出し修正
 async function showRaceImage(id){
   const r0 = DB.races[id]; let row0 = BATCH.rows[id] || BATCH.saved[r0?.date]?.rows?.find(q => q.id === id);
   if (r0?.entries?.length && row0?.rv !== ROW_VER){ toast("最新の考え方で計算し直しています…"); try { await runSim(true, { id, runs: BATCH_RUNS }); } catch (e) {} }
@@ -8736,7 +8747,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261031d";
+const APP_BUILD = "20261031e";
 // 10/31：PCのアプリが新しくなったら、画面を自動で読み込み直す（2分ごとに確認。一括計算などの処理中は待つ）
 if (typeof __HEADLESS === "undefined" || !__HEADLESS) setTimeout(function appAutoReload(){
   (async () => { try {
@@ -9336,6 +9347,7 @@ function renderAllTab(){
       ${x.ai1t?.length ? `<div class="line"><span class="verdict">◇AI穴単勝（検証中・記録だけ）</span> 単勝 <b>${x.ai1t.map(t => t.nums[0]).join("・")}</b> 各500円 <span class="small">（◇AI穴複勝と同じ馬。効果はまだ確かめられていないので記録だけ）</span></div>` : ""}
       ${x.ai1w?.length ? `<div class="line"><span class="verdict">◇AI穴ワイド（検証中・記録だけ）</span> ワイド <b>${x.ai1w.map(t => t.nums.join("-")).join("・")}</b> 各500円 <span class="small">（◇AI穴複勝の馬と1番人気。効果はまだ確かめられていないので記録だけ）</span></div>` : ""}
       ${x.pr28?.length ? `<div class="line"><span class="verdict">◇複勝ルール（検証中）</span> 複勝 <b>${x.pr28.map(t => t.nums[0]).join("・")}</b> 各1,000円 <span class="small">（◎が1〜2番人気のレースで、5番人気以下・複勝オッズ下限÷単勝0.28以上・シミュ3着内30%以上。初めての芝/ダート・ダートの先行馬は除く。過去310レースで的中44%・回収約130%（確定オッズ）。発走前のオッズでは未確認）</span></div>` : ""}
+      ${tospoHtml(r)}
       ${x.tv3?.length ? `<div class="line"><span class="verdict go">◇割安軸3連複（勝負）</span> <b>${x.tv3.length}点・${x.tv3.reduce((a, t) => a + (t.stake || 100), 0).toLocaleString()}円</b> <span class="small">フォーメーション：${triFormText(x.tv3).map(l => `<b style="white-space:nowrap">${l}</b>`).join("　")}</span><div class="small">1600m以下で、◇割安複勝の馬が軸。3連複100倍以上の組を当たりやすい順に最大30点・各100円（300倍以上は200円）。2019〜26年の441レースで回収142%・的中12%（確定オッズ）。高配当の数回に頼る買い方です</div></div>` : ""}
       ${x.pl7?.length ? `<div class="line"><span class="verdict">◇割安複勝（検証中）</span> 複勝 <b>${x.pl7.map(t => t.nums[0]).join("・")}</b> 各1,000円 <span class="small">（7〜9番人気で複勝オッズが単勝に比べて割安、過去に1勝以上。2019〜2026年の762頭で3着内20%・回収116%（確定オッズ）。年によっては100%未満、発走前のオッズでは未確認）</span></div>` : ""}
       ${x.win150?.length ? `<div class="line"><span class="verdict go">◇混戦の穴単勝（検証中）</span> ${x.win150[0].type || "単勝"} <b>${x.win150[0].nums[0]}</b> ${(x.win150[0].stake || 1000).toLocaleString()}円 <span class="small">（混戦〈1番人気3倍以上・◎の勝率20%未満〉か、○が2〜3番人気で◎○が接戦のレースで、◇複勝ルールの馬。過去190レースで回収約160%（確定オッズ）。数千通りから探した条件なので偶然の可能性あり）</span></div>` : ""}
