@@ -8822,12 +8822,13 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261101h";
+const APP_BUILD = "20261101i";
 // 10/31：PCのアプリが新しくなったら、画面を自動で読み込み直す（2分ごとに確認。一括計算などの処理中は待つ）
 if (typeof __HEADLESS === "undefined" || !__HEADLESS) setTimeout(function appAutoReload(){
   (async () => { try {
-    if (/^(localhost|127\.0\.0\.1)$/.test(location.hostname) && !(typeof BATCH !== "undefined" && BATCH.running)){
-      const t = await fetch("/?chk=" + Date.now(), { cache: "no-store" }).then(r => r.ok ? r.text() : ""), m = t.match(/const APP_BUILD = "(\w+)"/);
+    // 11/1：クラウド版（スマホ・GitHub Pages）でも確認する
+    if (!(typeof BATCH !== "undefined" && BATCH.running)){
+      const t = await fetch(location.pathname.replace(/[^/]*$/, "") + "?chk=" + Date.now(), { cache: "no-store" }).then(r => r.ok ? r.text() : ""), m = t.match(/const APP_BUILD = "(\w+)"/);
       if (m && m[1] !== APP_BUILD){ console.log("[自動更新] 新しい版", m[1]); location.reload(); return; }
     } } catch (e) {}
     setTimeout(appAutoReload, 120000); })();
