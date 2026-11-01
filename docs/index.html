@@ -5529,18 +5529,30 @@ function factsOf(ctx, e){
   const flat = runs.filter(q => q.surface === "芝" || q.surface === "ダ"), last5 = flat.slice(0, 5);
   const t3 = last5.length ? last5.filter(q => +q.pos >= 1 && +q.pos <= 3).length / last5.length : null;
   return { fs: isFirstSurf(ctx, e) ? 1 : 0, ls: runs[0] && runs[0].surface === S ? 1 : 0, pf: prevPaceFavored(e) ? 1 : 0, fd: isFrontDirt(ctx, e) ? 1 : 0,
-    t2: isTataki2(ctx, e) ? 1 : 0, kk: isPrevKickTop(e) ? 1 : 0, t3: t3 ?? 0, t3na: t3 == null ? 1 : 0, nsd: flat.filter(q => q.surface === S && Math.abs((+q.dist || 0) - D) <= 200).length };
+    t2: isTataki2(ctx, e) ? 1 : 0, kk: isPrevKickTop(e) ? 1 : 0, t3: t3 ?? 0, t3na: t3 == null ? 1 : 0, nsd: flat.filter(q => q.surface === S && Math.abs((+q.dist || 0) - D) <= 200).length, ...restFacts(ctx, e, runs, last5) };
 }
+// 11/1：休み明け（前走から70日以上）・休み明け×先行（近5走の1角の平均が前25%以内）・休み明け×馬体重-10kg以下・叩き3戦目（90日以内に2走）。
+//  3着内の見込み（top3）にだけ使う。2019〜26年の3期間とも、学習から外した答え合わせで見込みの精度がわずかに上がった（休み明けの先行馬・馬体重減は割り引き）
+function restFacts(ctx, e, runs, last5){
+  try { const dt = ctx?.race?.date, L = runs[0]; if (!dt || !L?.date) return { lay: 0, layfr: 0, laybwd: 0, t3rd: 0 };
+    const dd = aiDays(dt, L.date), lay = dd >= 70 ? 1 : 0;
+    const v = last5.map(q => q.passing?.length && q.field > 1 ? (q.passing[0] - 1) / (q.field - 1) : null).filter(x => x != null);
+    const fr = v.length && v.reduce((a, b) => a + b, 0) / v.length <= 0.25 ? 1 : 0, bd = e?.bwDiff != null && isFinite(+e.bwDiff) && +e.bwDiff <= -10 ? 1 : 0;
+    const n90 = runs.filter(q => q.date && q.date < dt && aiDays(dt, q.date) <= 90).length;
+    return { lay, layfr: lay && fr ? 1 : 0, laybwd: lay && bd ? 1 : 0, t3rd: n90 === 2 ? 1 : 0 };
+  } catch (err) { return { lay: 0, layfr: 0, laybwd: 0, t3rd: 0 }; } }
 const ADJ_COEF = {   // 全期間のデータで当てはめた係数（ロジスティック回帰）
   win: { b0: 0.2017, base: 1.0519, fs: 0.0888, ls: 0.0774, pf: -0.0137, fd: 0.0008, t2: -0.1112, kk: -0.0657, t3: -0.2569, t3na: -0.1015, nsd: -0.0279 },
   // 11/1：券種の売れ方のズレ（馬連・3連複・ワイドが単勝・複勝と比べてどれだけ買われているか、レース内の中央値との差）を足した勝つ見込み。
   //  期間ごとに学習から外した答え合わせで、3期間とも見込みの精度が上がり、印（妙味）の◎は単勝回収 86〜88%→92〜94%・複勝 87〜89%→91%
   win2: { b0: 0.3079, base: 1.0337, fs: -0.0334, ls: -0.0873, pf: -0.0127, fd: -0.0105, t2: -0.1206, kk: -0.042, t3: -0.2827, t3na: -0.2544, nsd: -0.034, z_umaren: 0.4984, z_trio: 0.1344, z_wide: -0.2619, z_u_pl: 0.4403, z_t_pl: 0.2265 },
-  top3: { b0: -0.1144, base: 0.8583, fs: -0.1304, ls: 0.0964, pf: -0.0582, fd: -0.0865, t2: -0.0996, kk: -0.1126, t3: -0.2792, t3na: -0.0507, nsd: 0.0331 } };
+  // 11/1：休み明け系と叩き3戦目を足して当てはめ直し（以前の top3: b0 -0.1144, base 0.8583, fs -0.1304, ls 0.0964, pf -0.0582, fd -0.0865, t2 -0.0996, kk -0.1126, t3 -0.2792, t3na -0.0507, nsd 0.0331）
+  top3: { b0: -0.0919, base: 0.8571, fs: -0.1275, ls: 0.0832, pf: -0.0588, fd: -0.0695, t2: -0.1159, kk: -0.1288, t3: -0.2634, t3na: -0.0746, nsd: 0.0318, layfr: -0.0951, lay: -0.0407, laybwd: -0.1333, t3rd: 0.0146 } };
 function adjProb(kind, base, ft){
   const c = ADJ_COEF[kind], b = Math.min(0.995, Math.max(0.0005, base));
   let z = c.b0 + c.base * Math.log(b / (1 - b)) + c.fs * ft.fs + c.ls * ft.ls + c.pf * ft.pf + c.fd * ft.fd + c.t2 * ft.t2 + c.kk * ft.kk + c.t3 * ft.t3 + c.t3na * ft.t3na + c.nsd * Math.log1p(ft.nsd);
   if (ft.pz) ["z_umaren", "z_trio", "z_wide", "z_u_pl", "z_t_pl"].forEach(k => { z += (c[k] || 0) * (ft.pz[k] || 0); });
+  ["lay", "layfr", "laybwd", "t3rd"].forEach(k => { if (c[k]) z += c[k] * (ft[k] || 0); });
   return 1 / (1 + Math.exp(-z));
 }
 // 印（◎○▲）用の勝つ見込み：単勝オッズ＋8年分で効いた要素。オッズがそろっていないときは null（シミュの順のまま）
@@ -7114,14 +7126,16 @@ function triForm(ts){
   return out;
 }
 const triFormText = ts => triForm(ts).map(f => `${f.ax} − ${f.a} − ${f.b.join(",")}`);
-// 2026-10-24：5番人気以下の「3着内率」は、シミュの値をそのまま出すと高すぎた（シミュ40〜60%の穴馬が実際は21〜26%）。
-//  過去の約1,600レース（修正後のエンジン・5番人気以下約7,800頭）の「シミュの値→実際」の表で直して表示する。選ぶ順番（大小）は変わらない。
-const T3CAL = [[0, 0.02], [0.034, 0.055], [0.144, 0.15], [0.243, 0.20], [0.341, 0.235], [0.6, 0.27], [1, 0.35]];
-function calT3(p, pop){
-  if (p == null || !(+pop >= 5)) return p;
-  for (let k = 1; k < T3CAL.length; k++){ const [x1, y1] = T3CAL[k], [x0, y0] = T3CAL[k - 1]; if (p <= x1) return y0 + (y1 - y0) * (p - x0) / (x1 - x0); }
-  return T3CAL[T3CAL.length - 1][1];
-}
+// 11/1：シミュの「3着内率」「勝率」は自信過剰だった（例：シミュ80%台の人気馬が実際は78%、シミュ40〜60%の穴馬が実際は27〜31%）。
+//  2019〜2022年の約17万頭で「シミュの値→実際の率」の表を人気別（1〜4番人気／5番人気以下）に作り、学習に使っていない2024〜26年で答え合わせ済み
+//  （例：1〜4番人気でシミュ87%→直した値78%・実際78%、シミュ75%→66%・実際67%）。表示用だけで、印・勝負レースの判定・選ぶ順番は変えない
+const T3CAL_FAV = [[0.0, 0.316], [0.149, 0.316], [0.228, 0.321], [0.268, 0.333], [0.299, 0.342], [0.326, 0.375], [0.35, 0.38], [0.373, 0.384], [0.396, 0.431], [0.421, 0.443], [0.445, 0.447], [0.47, 0.469], [0.496, 0.469], [0.524, 0.511], [0.554, 0.531], [0.586, 0.547], [0.621, 0.594], [0.663, 0.594], [0.713, 0.628], [0.761, 0.675], [0.806, 0.71], [0.857, 0.752], [0.898, 0.814], [0.945, 0.881], [1.0, 0.881]], T3CAL_ANA = [[0.0, 0.009], [0.0, 0.009], [0.002, 0.018], [0.006, 0.029], [0.011, 0.036], [0.018, 0.047], [0.026, 0.063], [0.036, 0.067], [0.047, 0.07], [0.059, 0.082], [0.072, 0.09], [0.086, 0.093], [0.102, 0.115], [0.119, 0.136], [0.138, 0.136], [0.159, 0.156], [0.184, 0.177], [0.212, 0.188], [0.248, 0.211], [0.286, 0.24], [0.325, 0.25], [0.375, 0.256], [0.43, 0.265], [0.529, 0.289], [1.0, 0.289]];
+const WCAL_FAV = [[0.0, 0.088], [0.023, 0.088], [0.046, 0.102], [0.062, 0.112], [0.075, 0.123], [0.087, 0.123], [0.099, 0.123], [0.11, 0.125], [0.122, 0.14], [0.133, 0.149], [0.146, 0.156], [0.159, 0.171], [0.174, 0.171], [0.191, 0.206], [0.21, 0.207], [0.232, 0.234], [0.257, 0.245], [0.29, 0.245], [0.333, 0.278], [0.382, 0.308], [0.436, 0.363], [0.505, 0.377], [0.576, 0.474], [0.69, 0.559], [1.0, 0.559]], WCAL_ANA = [[0.0, 0.003], [0.0, 0.003], [0.0, 0.003], [0.0, 0.003], [0.001, 0.007], [0.002, 0.01], [0.003, 0.011], [0.004, 0.014], [0.006, 0.014], [0.009, 0.019], [0.011, 0.019], [0.014, 0.024], [0.018, 0.024], [0.022, 0.028], [0.027, 0.031], [0.034, 0.037], [0.041, 0.042], [0.051, 0.042], [0.064, 0.052], [0.079, 0.06], [0.096, 0.072], [0.119, 0.081], [0.148, 0.081], [0.215, 0.083], [1.0, 0.083]];
+function calTab(T, p){ if (p == null || !isFinite(p)) return p; if (p <= T[0][0]) return T[0][1];
+  for (let k = 1; k < T.length; k++){ const [x1, y1] = T[k], [x0, y0] = T[k - 1]; if (p <= x1) return x1 > x0 ? y0 + (y1 - y0) * (p - x0) / (x1 - x0) : y1; }
+  return T[T.length - 1][1]; }
+function calT3(p, pop){ if (p == null || !(+pop >= 1)) return p; return calTab(+pop <= 4 ? T3CAL_FAV : T3CAL_ANA, p); }
+function calWin(p, pop){ if (p == null || !(+pop >= 1)) return p; return calTab(+pop <= 4 ? WCAL_FAV : WCAL_ANA, p); }
 // 2026-10-25：自信度（★5段階）の元になる「3着内の見込み」を、注目穴馬の選び方と同じ式（単勝オッズからの3着内率を補正）で全馬ぶん出す。
 //  画像・X投稿文・カードで同じ値を使い、表示がずれないようにする
 function marketPe(field){
@@ -7151,7 +7165,7 @@ function summarizeSim(r, sim){
   const ws = sim.weighted.slice().sort((a, b) => b.win - a.win);
   const vsc = sim.vsc || sim.mkp; const w = vsc ? sim.weighted.slice().sort((a, b) => vsc[b.i] - vsc[a.i]) : ws;
   const f = sim.ctx.field, PE = marketPe(f);
-  const mk = s => ({ num: s.num, name: s.name, win: s.win, top2: s.top2, top3: calT3(s.top3, f[s.i].pop), top3Sim: s.top3, pe: PE ? PE[s.i] : null, odds: f[s.i].odds ?? null, pop: f[s.i].pop ?? null, waku: f[s.i].waku ?? null, jockey: f[s.i].jockey || null, style: f[s.i].prof?.n > 0 ? (f[s.i].prof?.style || f[s.i].style || null) : null });   // 出走歴なしは脚質を出さない（10/25）
+  const mk = s => ({ num: s.num, name: s.name, win: calWin(s.win, f[s.i].pop), winSim: s.win, top2: s.top2, top3: calT3(s.top3, f[s.i].pop), top3Sim: s.top3, pe: PE ? PE[s.i] : null, odds: f[s.i].odds ?? null, pop: f[s.i].pop ?? null, waku: f[s.i].waku ?? null, jockey: f[s.i].jockey || null, style: f[s.i].prof?.n > 0 ? (f[s.i].prof?.style || f[s.i].style || null) : null });   // 出走歴なしは脚質を出さない（10/25）
   const tri = sim.triTop[0];
   const tk = t => `${t.type} ${t.nums.join("-")} ${t.stake}円→的中${Math.round(t.stake * t.odds).toLocaleString()}円`;
   const tks = pl => pl && !pl.none && !pl.noOdds && pl.tickets?.length ? pl.tickets.map(t => ({ type: t.type, nums: t.nums, stake: t.stake, odds: t.odds })) : null;
@@ -7294,7 +7308,7 @@ function summarizeSim(r, sim){
       //  今の金額のままで 的中 20→24%・17→21%、回収 209→218%・192→200%
       //  （21時の「472kg以下は複勝」は前半の回収が175→170%に下がったのでやめた）
       return cs.length ? [{ type: "単勝", nums: [cs[0].num], stake: ws[0].num === fav.num ? 1000 : 500 }] : null; })(),
-    dark: sim.dark ? { waku: sim.dark.f.waku ?? null, conf: !!sim.dark.conf, ana: (sim.dark.f.ana || []).filter(a => !ODDS_TAGS.has(a)).slice(0, 4), top2: sim.dark.a.top2 ?? null, num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: sim.dark.pe ?? calT3(MM ? MM.place[sim.dark.i] : sim.dark.a.top3, sim.dark.f.pop), peMkt: sim.dark.peMkt ?? null, placeEV: sim.dark.placeEV ?? null, top3Sim: MM ? MM.place[sim.dark.i] : sim.dark.a.top3, win: MM ? MM.win[sim.dark.i] : sim.dark.a.win, jockey: sim.dark.f.jockey || null, style: sim.dark.f.prof?.n > 0 ? (sim.dark.f.prof?.style || null) : null, why: darkWhy(sim) } : null,
+    dark: sim.dark ? { waku: sim.dark.f.waku ?? null, conf: !!sim.dark.conf, ana: (sim.dark.f.ana || []).filter(a => !ODDS_TAGS.has(a)).slice(0, 4), top2: sim.dark.a.top2 ?? null, num: sim.dark.f.num, name: sim.dark.f.name, odds: sim.dark.f.odds, pop: sim.dark.f.pop, top3: sim.dark.pe ?? calT3(MM ? MM.place[sim.dark.i] : sim.dark.a.top3, sim.dark.f.pop), peMkt: sim.dark.peMkt ?? null, placeEV: sim.dark.placeEV ?? null, top3Sim: MM ? MM.place[sim.dark.i] : sim.dark.a.top3, win: MM ? MM.win[sim.dark.i] : calWin(sim.dark.a.win, sim.dark.f.pop), winSim: sim.dark.a.win, jockey: sim.dark.f.jockey || null, style: sim.dark.f.prof?.n > 0 ? (sim.dark.f.prof?.style || null) : null, why: darkWhy(sim) } : null,
     ...dkTickets(ws.map(x => x.num), sim.dark?.f.num),
     ...moTickets(ws, f, r),
     fr: (() => { const H = f.filter(x => x.odds > 1), pw = MM ? H.map(x => MM.win[f.indexOf(x)]) : H.map(x => sim.weighted.find(s2 => s2.num === x.num)?.win || 0);
@@ -8806,7 +8820,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261101e";
+const APP_BUILD = "20261101f";
 // 10/31：PCのアプリが新しくなったら、画面を自動で読み込み直す（2分ごとに確認。一括計算などの処理中は待つ）
 if (typeof __HEADLESS === "undefined" || !__HEADLESS) setTimeout(function appAutoReload(){
   (async () => { try {
