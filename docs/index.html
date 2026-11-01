@@ -388,7 +388,7 @@ tr.darkrow{background:color-mix(in srgb,var(--gold) 9%,transparent)}
 
 <div class="wrap">
   <header class="top">
-    <div class="brand">競馬展開シミュレーター<small>JRA 日曜開催対応</small></div>
+    <div class="brand">競馬展開シミュレーター<small>JRA 日曜開催対応 <span id="appVer" style="opacity:.7"></span></small></div>
     <div class="src" id="src"></div>
     <button class="learnchip" id="learnChip" hidden></button>
   </header>
@@ -8822,17 +8822,26 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261101i";
+const APP_BUILD = "20261101j";
 // 10/31：PCのアプリが新しくなったら、画面を自動で読み込み直す（2分ごとに確認。一括計算などの処理中は待つ）
+// 11/1：スマホ（クラウド版）でも確認。新しい版を見つけたら、オフライン用の保存（サービスワーカーとキャッシュ）を消してから読み込み直す（古い画面が残り続けないように）。
+//  開いて5秒後に1回目を確認。画面の上（タイトルの横）に版を表示
+try { const av = document.getElementById("appVer"); if (av) av.textContent = "版 " + APP_BUILD; } catch (e) {}
+async function appHardReload(nb){
+  try { if (navigator.serviceWorker?.getRegistrations){ for (const g of await navigator.serviceWorker.getRegistrations()) await g.unregister(); } } catch (e) {}
+  try { if (window.caches?.keys){ for (const k of await caches.keys()) await caches.delete(k); } } catch (e) {}
+  const u = new URL(location.href); u.searchParams.set("v", nb || String(Date.now())); location.replace(u.toString());
+}
 if (typeof __HEADLESS === "undefined" || !__HEADLESS) setTimeout(function appAutoReload(){
   (async () => { try {
-    // 11/1：クラウド版（スマホ・GitHub Pages）でも確認する
     if (!(typeof BATCH !== "undefined" && BATCH.running)){
-      const t = await fetch(location.pathname.replace(/[^/]*$/, "") + "?chk=" + Date.now(), { cache: "no-store" }).then(r => r.ok ? r.text() : ""), m = t.match(/const APP_BUILD = "(\w+)"/);
-      if (m && m[1] !== APP_BUILD){ console.log("[自動更新] 新しい版", m[1]); location.reload(); return; }
+      const t = await fetch(location.pathname.replace(/[^/]*$/, "") + "index.html?chk=" + Date.now(), { cache: "no-store" }).then(r => r.ok ? r.text() : "").catch(() => "");
+      const t2 = t || await fetch(location.pathname.replace(/[^/]*$/, "") + "?chk=" + Date.now(), { cache: "no-store" }).then(r => r.ok ? r.text() : "").catch(() => "");
+      const m = t2.match(/const APP_BUILD = "(\w+)"/);
+      if (m && m[1] !== APP_BUILD){ console.log("[自動更新] 新しい版", m[1]); await appHardReload(m[1]); return; }
     } } catch (e) {}
     setTimeout(appAutoReload, 120000); })();
-}, 120000);   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
+}, 5000);   // 画面で確かめる版（10/24：エンジン修正・注目穴馬の選び方・画像の文字のはみ出し）
 const PRE25 = { busy: false, msg: "", res: null,
   hit: { mu: [3.37976, 11.89168, 14.55231], s: [0.68478, 4.63845, 2.34832], w: [-0.42417, -0.23955, -0.06202], b: -1.92086 }, ca: 1.0949232, cb: 0.2081896 };
 const pre25Pev = (f, n) => { if (!f || !f.pl || !f.ph || !(f.odds > 1)) return null; const x = [Math.log(f.odds), Math.log(f.odds) ** 2, n]; let z = PRE25.hit.b; for (let j = 0; j < 3; j++) z += PRE25.hit.w[j] * (x[j] - PRE25.hit.mu[j]) / PRE25.hit.s[j]; return 1 / (1 + Math.exp(-z)) * (PRE25.ca * f.pl + PRE25.cb * (f.ph - f.pl)); };
