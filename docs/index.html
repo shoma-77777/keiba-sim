@@ -6203,10 +6203,12 @@ function raceCondLines(r, ctx){
   }
   return [l1, l2].filter(Boolean);
 }
-// AIの印（◎○▲＝シミュの勝率上位3頭、☆＝注目穴馬）。2D再生・動画で馬の丸に付ける
+// AIの印（◎○▲、☆＝注目穴馬）。動画で馬の丸に付ける。
+// 11/1：カード・画像と同じ並び（オッズ＋8年分の要素の「妙味重視」の順＝sim.vsc、なければ補正後の勝率 sim.mkp、どちらもなければシミュの勝率）にそろえた（以前はシミュの勝率順で、印とずれていた）
 function marksOf(sim){
   const out = {}; if (!sim?.weighted) return out;
-  sim.weighted.slice().sort((a, b) => b.win - a.win).slice(0, 3).forEach((s, k) => { out[sim.ctx.field[s.i].num] = "◎○▲"[k]; });
+  const sc = sim.vsc || sim.mkp;
+  sim.weighted.slice().sort((a, b) => sc ? (sc[b.i] - sc[a.i]) : (b.win - a.win || a.avgPos - b.avgPos)).slice(0, 3).forEach((s, k) => { out[sim.ctx.field[s.i].num] = "◎○▲"[k]; });
   const d = sim.dark?.f?.num; if (d != null && !out[d]) out[d] = "☆";
   return out;
 }
@@ -6254,7 +6256,7 @@ function vidCard(g, L, info){
     [["◎", "AI本命"], ["☆", "注目穴馬"]].forEach(([m, lab], j) => { const num = Object.keys(info.marks || {}).find(k => info.marks[k] === m); if (!num) return;
       const w = c.rows.filter(x => String(x.num) === num).length, t3 = c.rows.filter(x => x.top3.map(String).includes(num)).length, st = statOf(num);
       T(`${lab}${m}${num}番：この5回 1着${w}・3着内${t3}回`, W / 2, H * 0.2 + (632 + j * 74) * u, 28, m === "◎" ? "#ffd23a" : "#ffcf6a");
-      if (st) T(`（シミュ1万回では 勝率${(st.win * 100).toFixed(1)}%・3着内${(st.top3 * 100).toFixed(1)}%${m === "☆" && info.darkPe ? `／オッズからの見込み3着内${Math.round(info.darkPe * 100)}%` : ""}）`, W / 2, H * 0.2 + (664 + j * 74) * u, 21, "#cfe"); });
+      if (st){ const pp = (info.field.find(f => String(f.num) === String(num)) || {}).pop; T(`（見込み 勝率${(calWin(st.win, pp) * 100).toFixed(1)}%・3着内${(calT3(st.top3, pp) * 100).toFixed(1)}%${m === "☆" && info.darkPe ? `／オッズからの見込み3着内${Math.round(info.darkPe * 100)}%` : ""}）`, W / 2, H * 0.2 + (664 + j * 74) * u, 21, "#cfe"); } });
     T(info.race, W / 2, H * 0.2 + 786 * u, 34, "#fff");
     info.cond.forEach((l, i) => T(l, W / 2, H * 0.2 + (826 + i * 34) * u, 22, "#d6e4da"));
     T("※1万回のシミュレーションから5回。実際の結果ではありません", W / 2, H * 0.2 + (836 + info.cond.length * 34) * u, 21, "#bcd");
@@ -8820,7 +8822,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261101f";
+const APP_BUILD = "20261101g";
 // 10/31：PCのアプリが新しくなったら、画面を自動で読み込み直す（2分ごとに確認。一括計算などの処理中は待つ）
 if (typeof __HEADLESS === "undefined" || !__HEADLESS) setTimeout(function appAutoReload(){
   (async () => { try {
