@@ -824,6 +824,14 @@ def auto_odds_loop():
     last = {}
     while True:
         time.sleep(60)
+        # 11/1：アプリのファイル（web/index.html など）が入れ替わったら、再起動しなくても5分以内にクラウド（スマホ用）も新しい版にする
+        try:
+            if time.time() - last.get("appchk", 0) >= 5 * 60:
+                last["appchk"] = time.time(); cm = cloud_mod()
+                if cm and not cm.STATE.get("running"):
+                    cf = cm.load_conf()
+                    if cf.get("token") and cf.get("appVersion") != cm.app_version(): _safe(lambda: cm.republish(DATA, write_status))
+        except Exception: pass
         # 10/31：オッズが取れなかったレース（回数制限で断られた等）は、今日・明日の分を20分おきに、そのレースだけ取り直す
         try:
             now = dt.datetime.now()
