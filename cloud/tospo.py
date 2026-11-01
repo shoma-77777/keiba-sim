@@ -164,6 +164,14 @@ def stop_id_for(date_iso):
     v = ids[k - 1] if k <= len(ids) else ids[-1]
     return max(0, int(v) - 600)      # 余裕を持って少し古めまで
 
+
+def id_after(date_iso):
+    """その日付より後の最初の目安の記事ID（＋余裕）。これより新しい記事はレース後なので読まない（11/1）"""
+    stop_id_for("2000-01-01")      # 目安の表を用意
+    for d, i in _ANCH:
+        if d > date_iso: return int(i) + 800
+    return 10 ** 9
+
 def collect_race(f, race, pr):
     """1レース分：出走馬ごとに、そのレースの名前が付いた発走前の記事のコメントを集める"""
     key = race_key(race.get("name")); rd = race["date"]
@@ -173,10 +181,17 @@ def collect_race(f, race, pr):
         hid = e.get("horseId")
         if not hid: continue
         today = dt.date.today().isoformat()
-        lst = horse_articles(f, hid, stop_id=None if d0 >= (dt.date.today() - dt.timedelta(days=12)).isoformat() else stop_id_for(d0))
+        recent = d0 >= (dt.date.today() - dt.timedelta(days=12)).isoformat()
+        lo = None if recent else stop_id_for(d0)
+        lst = horse_articles(f, hid, stop_id=lo, pages=400)
         cand = [(a, t) for a, t in lst if key and (key in norm(t) or (len(key) >= 4 and key[:4] in norm(t)))]
+        # 11/1 夕：レース名が付いた記事は「レース後」の記事（勝った馬ほど多い）が先に並ぶため、新しい順に4本だけ見るとレース前の記事に届かなかった
+        #  （＝人気馬・勝った馬ほどコメントが取れない偏りの原因）。記事IDでレースの前後を絞ってから、レースに近い順に見る
+        if not recent:
+            hi = id_after(rd); cand = [(a, t) for a, t in cand if lo <= a <= hi]
+        cand.sort(key=lambda x: -x[0])
         arts = []
-        for aid, t in cand[:4]:
+        for aid, t in cand[:6]:
             a = article(f, aid)
             if not a or not a["date"] or not (d0 <= a["date"] < rd): continue   # 発走前（前日まで）の記事だけ
             # 何頭もまとめた記事では、その馬の名前のすぐ後ろ（160字以内で、ほかの出走馬の名前より後）にあるコメントだけを使う
