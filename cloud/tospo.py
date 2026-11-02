@@ -66,6 +66,25 @@ def _grade(name):
     return 0
 
 
+WHO_RE = re.compile(r"(調教師|騎手|ジョッキー|助手|厩務員|オーナー|生産者|師)")
+def who_of(ctx):
+    """「」の直前の文から、話した人の立場（調教師・騎手・助手など）を推定（11/3）。分からなければ「不明」"""
+    c = unicodedata.normalize("NFKC", ctx or "")[-90:]
+    ms = list(WHO_RE.finditer(c))
+    if not ms: return "不明"
+    w = ms[-1].group(1)
+    return {"師": "調教師", "ジョッキー": "騎手", "厩務員": "助手"}.get(w, w)
+
+
+def kind_of(title):
+    """記事の種類（見出しから）：追い切り／枠順確定後／生情報・陣営／その他"""
+    t = unicodedata.normalize("NFKC", title or "")
+    if re.search(r"枠順確定|枠順決定|枠順発表|枠順", t): return "枠順確定後"
+    if re.search(r"追い切り|追切|最終追い|日曜追い|1週前", t): return "追い切り"
+    if re.search(r"生情報|陣営|耳より|日曜情報|外厩|共同会見|記者会見", t): return "生情報・陣営"
+    return "その他"
+
+
 def score(quotes):
     t = " ".join(quotes)
     g = sum(len(re.findall(w, t)) for w in GOOD); b = sum(len(re.findall(w, t)) for w in BAD)
@@ -172,6 +191,75 @@ def id_after(date_iso):
         if d > date_iso: return int(i) + 800
     return 10 ** 9
 
+def _keep(a, e, race):
+    """記事から、この馬についてのコメントだけを残す（何頭もまとめた記事では、その馬の名前のすぐ後ろのコメント）。話し手と記事の種類も付ける"""
+    nm = unicodedata.normalize("NFKC", e.get("name") or ""); others = [unicodedata.normalize("NFKC", x.get("name") or "") for x in race.get("entries") or [] if x.get("name") and x is not e]
+    keep = []; who = []
+    for q, c in zip(a["quotes"], a.get("ctx") or [""] * len(a["quotes"])):
+        c = unicodedata.normalize("NFKC", c)
+        if nm and nm in c:
+            pos = c.rfind(nm)
+            if not any(o and c.rfind(o) > pos for o in others): keep.append(q); who.append(who_of(c))
+    if not keep and nm and nm in unicodedata.normalize("NFKC", a["title"]) and not any(o and o in unicodedata.normalize("NFKC", a["title"]) for o in others):
+        keep = a["quotes"][:8]; who = [who_of(c) for c in (a.get("ctx") or [""] * len(keep))[:8]]     # 見出しがこの馬だけの記事は、本文のコメントを全部使う
+    a["quotes"] = keep[:8]; a["who"] = who[:8]; a["kind"] = kind_of(a.get("title")); a.pop("ctx", None)
+    if not keep: return False
+    s, g, b = score(a["quotes"]); a["score"] = s; a["good"] = g; a["bad"] = b
+    # 話し手ごとの良い・悪い（11/3：調教師と騎手を分けて確かめるため）
+    by = {}
+    for q, w in zip(a["quotes"], a["who"]):
+        x = by.setdefault(w, [0, 0, 0]); s1, g1, b1 = score([q]); x[0] += s1; x[1] += g1; x[2] += b1
+    a["byWho"] = by
+    return True
+
+
+def reparse(races=None):
+    """集め済みの記事を読み直して、話し手（調教師・騎手など）と記事の種類を付け直す（11/3）。記事の選び方は変えない"""
+    with LOCK:
+        if ST["running"]: return False
+        ST.update(running=True, stop=False, startedAt=dt.datetime.now().isoformat(timespec="seconds"), done=0)
+    def go():
+        try:
+            f = _F(); L = races if races is not None else graded_past("2021-10-01"); RB = {r["id"]: r for r in L}
+            files = sorted(DIR.glob("race_*.json")); todo = []
+            for p in files:
+                try: j = json.loads(p.read_text(encoding="utf-8"))
+                except Exception: continue
+                if j.get("id") in RB and not j.get("reparsed"): todo.append((p, j))
+            with LOCK: ST.update(total=len(todo), done=0)
+            _log(f"話し手の付け直し：{len(todo)}レース")
+            for p, j in todo:
+                if ST["stop"]: break
+                race = RB[j["id"]]; E = {e.get("horseId"): e for e in race.get("entries") or []}; out = {}
+                for hid, arts in (j.get("horses") or {}).items():
+                    e = E.get(hid)
+                    if not e: continue
+                    new = []
+                    for a0 in arts:
+                        a = article(f, a0["id"])
+                        if a and _keep(a, e, race): new.append(a)
+                    if new: out[hid] = new
+                    with LOCK: ST["cur"] = f"{j.get('date')} {j.get('name')} {e.get('name')}"
+                j["horses"] = out; j["reparsed"] = True
+                p.write_text(json.dumps(j, ensure_ascii=False), encoding="utf-8")
+                with LOCK: ST["done"] += 1
+            _log("話し手の付け直しを終えました" if not ST["stop"] else "話し手の付け直しを止めました")
+        except Exception as ex:
+            _log(f"止まりました: {ex}"); traceback.print_exc()
+        finally:
+            with LOCK: ST["running"] = False
+    threading.Thread(target=go, daemon=True).start(); return True
+
+
+def collect_upcoming(races):
+    """クラウド（GitHub Actions）用：これからの重賞のコメントを、その場で集める（スレッドを使わない）"""
+    pr = _prog(); f = _F(); n = 0
+    for r in races:
+        try: out = collect_race(f, r, pr); n += len(out); _log(f"{r['date']} {r.get('name')}：{len(out)}頭分のコメント")
+        except Exception as ex: _log(f"{r.get('name')} で警告: {ex}")
+    return n
+
+
 def collect_race(f, race, pr):
     """1レース分：出走馬ごとに、そのレースの名前が付いた発走前の記事のコメントを集める"""
     key = race_key(race.get("name")); rd = race["date"]
@@ -194,23 +282,11 @@ def collect_race(f, race, pr):
         for aid, t in cand[:6]:
             a = article(f, aid)
             if not a or not a["date"] or not (d0 <= a["date"] < rd): continue   # 発走前（前日まで）の記事だけ
-            # 何頭もまとめた記事では、その馬の名前のすぐ後ろ（160字以内で、ほかの出走馬の名前より後）にあるコメントだけを使う
-            nm = unicodedata.normalize("NFKC", e.get("name") or ""); others = [unicodedata.normalize("NFKC", x.get("name") or "") for x in race.get("entries") or [] if x.get("name") and x is not e]
-            keep = []
-            for q, c in zip(a["quotes"], a.get("ctx") or [""] * len(a["quotes"])):
-                c = unicodedata.normalize("NFKC", c)
-                if nm and nm in c:
-                    pos = c.rfind(nm)
-                    if not any(o and c.rfind(o) > pos for o in others): keep.append(q)
-            if not keep and nm and nm in unicodedata.normalize("NFKC", a["title"]) and not any(o and o in unicodedata.normalize("NFKC", a["title"]) for o in others):
-                keep = a["quotes"][:8]     # 見出しがこの馬だけの記事は、本文のコメントを全部使う
-            a["quotes"] = keep[:8]; a.pop("ctx", None)
-            if not keep: continue
-            s, g, b = score(a["quotes"]); a["score"] = s; a["good"] = g; a["bad"] = b
+            if not _keep(a, e, race): continue
             arts.append(a)
         if arts: out[hid] = arts
         with LOCK: ST["cur"] = f"{rd} {race.get('venue')}{race.get('no')}R {race.get('name')} {e.get('name')}"
-    (DIR / f"race_{race['id']}.json").write_text(json.dumps({"id": race["id"], "date": rd, "name": race.get("name"), "key": key, "horses": out}, ensure_ascii=False), encoding="utf-8")
+    (DIR / f"race_{race['id']}.json").write_text(json.dumps({"id": race["id"], "date": rd, "name": race.get("name"), "key": key, "at": dt.datetime.now().isoformat(timespec="seconds"), "reparsed": True, "horses": out}, ensure_ascii=False), encoding="utf-8")
     pr["done"][race["id"]] = sum(len(v) for v in out.values()); _save_prog(pr)
     return out
 

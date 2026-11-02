@@ -89,6 +89,29 @@ def run_one(a, ymd, now):
         S.update_date(ymd, odds_only=False)
 
     archive(ymd)
+    if kind in ("full", "odds"): tospo_upcoming(ymd)
+
+
+# 11/3：スマホでも東スポの陣営コメントを使えるように、その日の重賞のコメントをクラウドでも集める（docs/data/tospo/race_*.json）。
+#  前日の夜と当日の朝に1回ずつ（12時間以内に集めていれば集め直さない）。1レース数分かかるので、オッズの取得のあとに行う
+def tospo_upcoming(ymd):
+    try:
+        import tospo
+        snap = S.snapshot_path(ymd)
+        if not snap.exists(): return
+        races = [r for r in json.loads(snap.read_text(encoding="utf-8")).get("races", []) if tospo._grade(r.get("name")) >= 5 and r.get("entries") and r.get("surface") != "障"]
+        todo = []
+        for r in races:
+            p = tospo.DIR / f"race_{r['id']}.json"
+            try: at = dt.datetime.fromisoformat(json.loads(p.read_text(encoding="utf-8")).get("at") or "2000-01-01") if p.exists() else None
+            except Exception: at = None
+            if at and (dt.datetime.now() - at).total_seconds() < 12 * 3600: continue   # 集めた時刻はファイルの中に書く（Actions はファイルの日時が毎回変わるため）
+            todo.append(r)
+        if not todo: return
+        print(f"東スポの陣営コメント：{ymd} の重賞 {len(todo)}レース", flush=True)
+        tospo.collect_upcoming(todo)
+    except Exception as ex:
+        print(f"東スポのコメント集めに失敗: {ex}", flush=True)
 
 
 # 2026-10-25：保存庫（archive/YYYYMMDD.json.gz・公開されない場所）。docs/data の races_*.json・pre_*.json は14日で消すので、
