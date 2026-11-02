@@ -23,11 +23,13 @@ import keiba_collector as kc   # noqa: E402
 import backfill as bf          # noqa: E402
 import jra_collect as jc        # noqa: E402
 import tospo                    # noqa: E402  10/31：東スポの陣営コメント
+import keibalab                 # noqa: E402  11/3：競馬ラボの騎手・調教師コメント
 
 WEB = HERE / "web"
 DATA = Path(os.environ.get("KEIBA_DATA") or (HERE / "data")); DATA.mkdir(parents=True, exist_ok=True)
 bf.init(DATA)
 tospo.init(DATA)
+keibalab.init(DATA)
 jc.init(DATA)
 DB_PATH = Path(os.environ.get("KEIBA_DB") or (HERE / "keiba.db"))
 TWEAKS = DATA / "tweaks.json"
@@ -417,6 +419,10 @@ class Handler(SimpleHTTPRequestHandler):
             fp = DATA / "lock.json"
             return self._json(json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {})
         if u.path == "/api/tospo/status": return self._json(tospo.status())
+        if u.path == "/api/keibalab/status": return self._json(keibalab.status())
+        if u.path == "/api/keibalab/export":   # 11/3：検証用に、集めたコメントを data/keibalab/export.json にまとめる
+            ex = keibalab.export(); (keibalab.DIR / "export.json").write_text(json.dumps(ex, ensure_ascii=False), encoding="utf-8")
+            return self._json({"ok": True, "articles": len(ex), "items": sum(len(v["items"]) for v in ex.values())})
         if u.path == "/api/tospo/race": return self._json(tospo.for_race((q.get("id") or [""])[0]) or {})
         if u.path == "/api/jra/status": return self._json(jc.status())
         if u.path == "/api/jra/incidents": return self._json(jc.incidents())
@@ -630,7 +636,7 @@ class Handler(SimpleHTTPRequestHandler):
                 with open(lp, "a", encoding="utf-8") as f: f.write(body.replace("\n", " ") + "\n")
             except Exception: pass
             return self._json({"ok": True})
-        if u.path in ("/api/backfill/start", "/api/backfill/stop", "/api/backfill/done", "/api/backfill/reprocess", "/api/backfill/auto", "/api/tospo/start", "/api/tospo/stop", "/api/tospo/reparse"):
+        if u.path in ("/api/backfill/start", "/api/backfill/stop", "/api/backfill/done", "/api/backfill/reprocess", "/api/backfill/auto", "/api/tospo/start", "/api/tospo/stop", "/api/tospo/reparse", "/api/keibalab/start", "/api/keibalab/stop"):
             n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n).decode("utf-8") if n else "{}"
             try: j = json.loads(body or "{}")
             except Exception: j = {}
@@ -645,6 +651,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"ok": tospo.start(j.get("from") or "2021-10-01")})
             if u.path == "/api/tospo/stop": tospo.stop(); return self._json({"ok": True})
             if u.path == "/api/tospo/reparse": return self._json({"ok": tospo.reparse()})   # 11/3：話し手（調教師・騎手）を付け直す
+            if u.path == "/api/keibalab/start": return self._json({"ok": keibalab.start(j.get("low") or keibalab.LOW_ID, j.get("high"))})
+            if u.path == "/api/keibalab/stop": keibalab.stop(); return self._json({"ok": True})
             if u.path == "/api/backfill/auto": bf.set_auto(j.get("on")); return self._json({"ok": True})
             if u.path == "/api/backfill/reprocess": return self._json({"ok": True, "n": bf.unmark_all() if j.get("all") else bf.unmark(j.get("dates") or [])})
             ymd = re.sub(r"\D", "", str(j.get("date") or ""))[:8]
