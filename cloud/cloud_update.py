@@ -18,6 +18,7 @@ DATA = ROOT / "docs" / "data"
 os.environ["KEIBA_DATA"] = str(DATA)
 os.environ["KEIBA_DB"] = str(HERE / "keiba.db")   # SQLite はクラウドでは使い捨て
 os.environ["KEIBA_CLOUD_RUN"] = "1"
+os.environ["KEIBA_COMBOHIST"] = str(ROOT / "archive" / "combohist")   # 11/7：発走前の馬連・ワイド・3連複オッズの推移（保存庫に残す）
 sys.path.insert(0, str(HERE))
 import server as S  # noqa: E402
 

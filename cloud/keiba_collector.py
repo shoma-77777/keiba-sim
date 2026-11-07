@@ -17,7 +17,7 @@ SQLite（keiba.db）に保存し、シミュレーターアプリ用の JSON を
 - サイト側のHTML構造が変わると取得できなくなることがあります。その場合はセレクタを調整してください。
 """
 import argparse, datetime as dt, json, os, re, sqlite3, sys, time, hashlib
-COLLECTOR_VER = "20261021b"   # 発走前の単勝・複勝オッズを oddsHist に残す版
+COLLECTOR_VER = "20261107a"   # 発走前の単勝・複勝オッズを oddsHist に残す版
 from pathlib import Path
 
 try:
@@ -272,7 +272,28 @@ def combo_odds(f, race, ttl_hours=0.5, skip=()):
     if out:
         race["comboOdds"] = out
         race["comboAsOf"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        _combo_hist(race, out)
     return len(out)
+
+# 2026-11-07：発走前の馬連・ワイド・3連複オッズの推移を残す（研究 limitless_ai：購入時点の各券種の売れ方を前向きに検証するため）。
+#  comboOdds は取得のたびに上書きされ最後は確定オッズになるので、発走180分前〜発走までの取得分を別ファイルに追記する。
+#  取得の回数は増やさない（単勝オッズの更新のたびに既に取っている値を保存するだけ）。保存先：環境変数 KEIBA_COMBOHIST（無ければ data/combohist）
+def _combo_hist(race, out):
+    try:
+        import gzip
+        m = re.match(r"(\d{1,2}):(\d{2})", race.get("postTime") or "")
+        if not m or not race.get("date"): return
+        now = dt.datetime.now()
+        post = dt.datetime.strptime(f"{race['date']} {int(m.group(1)):02d}:{m.group(2)}", "%Y-%m-%d %H:%M")
+        mb = round((post - now).total_seconds() / 60)
+        if mb < 0 or mb > 180: return
+        d = Path(os.environ.get("KEIBA_COMBOHIST") or (Path(os.environ.get("KEIBA_DATA") or (Path(__file__).resolve().parent / "data")) / "combohist"))
+        d.mkdir(parents=True, exist_ok=True)
+        rec = {"id": race.get("id"), "t": now.strftime("%Y-%m-%d %H:%M:%S"), "mb": mb, **{k: v for k, v in out.items() if k in ("馬連", "ワイド", "三連複")}}
+        with gzip.open(d / f"{race['date'].replace('-', '')}.jsonl.gz", "ab") as fh:
+            fh.write((json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8"))
+    except Exception as ex:
+        print(f"  馬連などの推移の保存スキップ ({race.get('id')}): {ex}")
 
 def odds(f, race, ttl_hours=0.5):
     """単勝・複勝オッズと人気。取得のたびに履歴（oddsHist）を残し、人気の変動を追えるようにする。
