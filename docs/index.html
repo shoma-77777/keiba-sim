@@ -7452,7 +7452,7 @@ async function darkImage(r, k){
   const story = k.story || [], bul = k.bullets || [];
   const sL = story.map(p => lines("　" + p, PS, MW, "500")), bL = bul.map(b => lines(b, BS, BW));
   const storyH = sL.reduce((a, L) => a + L.length * PL + 22, 0), bulH = bL.reduce((a, L) => a + L.length * BL + 14, 0);
-  const TOP = 770, H = TOP + 80 + storyH + 110 + bulH + 170;
+  const TOP = 770, H = TOP + 80 + storyH + 110 + bulH + 60;
   const c = document.createElement("canvas"); c.width = W; c.height = H; const g = c.getContext("2d");
   const font = (sz, w = "bold", f = FB) => g.font = `${w} ${sz}px ${f}`;
   const txt = (t, x0, y0, sz, col = "#fff", o = {}) => { font(sz, o.w || "bold", o.f || FB); g.fillStyle = col; g.textAlign = o.al || "left"; g.textBaseline = "alphabetic"; if (o.max) g.fillText(String(t), x0, y0, o.max); else g.fillText(String(t), x0, y0); };
@@ -7486,9 +7486,6 @@ async function darkImage(r, k){
   y += 30; txt("プラスに働いた要素", 40, y, 34, "#ff8fb1", { f: FDf, w: "normal" }); y += 20;
   g.beginPath(); g.moveTo(40, y); g.lineTo(W - 40, y); g.stroke(); y += 46;
   bL.forEach((L, i) => { rr(54, y - 26, 32, 32, 8, "#ff5a8c"); txt(String(i + 1), 70, y - 2, 22, "#fff", { al: "center" }); font(BS); g.fillStyle = "#f2f2f2"; g.textAlign = "left"; L.forEach((ln, j) => g.fillText(ln, 102, y + j * BL)); y += L.length * BL + 14; });
-  g.fillStyle = "rgba(255,255,255,0.08)"; g.fillRect(0, H - 120, W, 120);
-  txt(`作成 ${new Date(k.made).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}${k.afterPost ? "（発走後に作成・参考）" : "（発走前に固定・変更なし）"}｜穴馬AI ${k.model}`, 40, H - 76, 22, "#ccc", { max: W - 80 });
-  txt("候補＝単勝10倍以上 または 6番人気以下。過去の検証（2024〜26年）で1レース1頭の3着以内は約22%。馬券は余裕資金で。", 40, H - 40, 20, "#aaa", { max: W - 80 });
   return c.toDataURL("image/png");
 }
 function darkXText(r, k){
