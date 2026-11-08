@@ -7595,6 +7595,100 @@ async function showDarkImage(id){
   m.querySelectorAll("[data-dhcopy]").forEach(bt => bt.onclick = async () => { try { const blob = await (await fetch(urls[+bt.dataset.dhcopy])).blob(); await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]); toast("画像をコピーしました"); } catch (e) { toast("この環境ではコピーできません。保存してください"); } });
 }
 window.showDarkImage = showDarkImage;
+// ===== 11/9：穴馬の答え合わせ（毎日の見直し用）。外れた推奨馬と、推奨しなかったのに3着以内に来た穴馬を一覧にする =====
+//  ここでは予想を変えない。仮説を書き出すための材料で、エンジンに入れるかは過去の全データで確かめてから決める
+//  推奨馬：この端末に固定した選出があればそれ、なければ発走前の最後のオッズで選び直したもの
+function dhPreOddsRace(r){
+  const post = `${r.date} ${r.postTime || "23:59"}`;
+  return (r.entries || []).filter(e => !e.scratched).map(e => { const h = (e.oddsHist || []).filter(s => String(s.t).slice(0, 16) < post), s = h[h.length - 1]; return s ? { ...e, odds: s.o, pop: s.p } : { ...e }; });
+}
+async function dhReviewRace(r){
+  if (!r?.result?.pay || /新馬/.test(r.name || "")) return null;
+  await DH.load("darkhorse.json");
+  const ents = dhPreOddsRace(r), N = ents.length;
+  const race = { date: r.date, venue: r.venue, surface: r.surface, distance: +r.distance, going: (typeof goingOf === "function" ? goingOf(r) : r.going) || "良", name: r.name, entries: ents };
+  const P = DH.pick(race, dhHorseOf); if (P.none) return null;
+  const srt = P.all.slice().sort((a, b) => b.p3 - a.p3), rankOf = x => srt.indexOf(x) + 1, cs = P.cands.slice().sort((a, b) => b.p3 - a.p3);
+  const lock = dhLockGet(r.id), pickNums = lock ? [lock, ...(lock.extras || [])].map(q => +q.num) : [P.best, ...P.cands.filter(x => x !== P.best && rankOf(x) <= 3)].map(x => +x.e.num);
+  const pay = r.result.pay["複勝"] || {}, rows = r.result.rows || [], C = r.result.corners || [];
+  const crn = (num, last) => { const c = C.length ? C[last ? C.length - 1 : 0] : null; if (!Array.isArray(c)) return null; const k = c.indexOf(+num); return k >= 0 ? k + 1 : null; };
+  const l3s = rows.map(x => parseFloat(x.l3f)).filter(v => !isNaN(v)).sort((a, b) => a - b);
+  const winT = rows.find(x => x.pos === 1)?.time;
+  const tsec = t => { const m = String(t || "").match(/(\d+):(\d+\.\d)/); return m ? +m[1] * 60 + +m[2] : parseFloat(t); };
+  const out = cs.map((x, ci) => {
+    const num = +x.e.num, row = rows.find(y => +y.num === num) || {}, l3 = parseFloat(row.l3f), c1 = crn(num, false), c4 = crn(num, true);
+    dhContribGroups(x); const G = Object.entries(x.c3G || {}).sort((a, b) => a[1] - b[1]);
+    const fr = x.f["近5走 前半位置平均"];
+    return { id: r.id, date: r.date, race: `${r.venue}${r.no}R`, name: r.name, surf: r.surface, dist: +r.distance, N, num, horse: x.e.name, pop: x.e.pop ?? null, odds: x.e.odds ?? null,
+      p3: x.p3, candRank: ci + 1, rankAll: rankOf(x), pick: pickNums.includes(num), hit: !!pay[num], place: pay[num] || 0, pos: row.pos ?? null,
+      c1, c4, c1rel: c1 && N > 1 ? (c1 - 1) / (N - 1) : null, c4rel: c4 && N > 1 ? (c4 - 1) / (N - 1) : null, styleRel: isNaN(fr) ? null : fr,
+      l3, l3rk: isNaN(l3) ? null : l3s.indexOf(l3) + 1, gap: winT && row.time ? +(tsec(row.time) - tsec(winT)).toFixed(1) : null,
+      plus: G.slice().reverse().filter(([, v]) => v > 0.004).slice(0, 3).map(([g]) => g), minus: G.filter(([, v]) => v < -0.004).slice(0, 3).map(([g]) => g) };
+  });
+  return out;
+}
+// レースの中身から言えること（記録だけから。レース後に分かる情報なので、予想には使っていない）
+function dhRunTags(o){
+  const t = [];
+  if (o.c1rel != null && o.styleRel != null && o.c1rel - o.styleRel >= 0.3) t.push("いつもより後ろの位置");
+  if (o.c1rel != null && o.styleRel != null && o.styleRel - o.c1rel >= 0.3) t.push("いつもより前の位置");
+  if (o.c4rel != null && o.c4rel <= 0.25) t.push(o.hit ? "先行して粘った" : "先行して失速");
+  if (o.l3rk && o.l3rk <= 3) t.push(o.hit ? `上がり${o.l3rk}位で差した` : `上がり${o.l3rk}位でも届かず`);
+  if (o.c4 && o.pos && o.c4 - o.pos >= 5) t.push(`4角${o.c4}番手から追い込み`);
+  if (!o.hit && o.pos && o.pos > o.N / 2 && !t.length) t.push("見せ場なし");
+  return t;
+}
+const DH_REV = { busy: false, data: null };
+async function dhReviewCompute(){
+  if (DH_REV.busy) return; DH_REV.busy = true;
+  try {
+    const races = Object.values(DB.races).filter(r => r.date >= "2026-11-08" && r.result?.pay).sort((a, b) => (a.date + a.postTime).localeCompare(b.date + b.postTime));
+    const rows = []; for (const r of races){ try { const x = await dhReviewRace(r); if (x) rows.push(...x); } catch (e) { console.warn("[穴馬答え合わせ]", r.id, e); } }
+    DH_REV.data = rows;
+  } finally { DH_REV.busy = false; }
+  if (ST.tab === "learn"){ const b = $("#dhRev"); if (b) b.innerHTML = dhReviewHtml(); dhReviewBind(); }
+}
+function dhReviewHtml(){
+  const D = DH_REV.data; if (!D) return `<p class="small">${DH_REV.busy ? "集計しています…" : "まだ集計していません"}</p>`;
+  const byDate = {}; D.forEach(o => (byDate[o.date] = byDate[o.date] || []).push(o));
+  const dates = Object.keys(byDate).sort();
+  const sum = rows => { const pk = rows.filter(o => o.pick), rs = [...new Set(pk.map(o => o.id))], multi = rs.filter(id => pk.filter(o => o.id === id).length >= 2);
+    return { races: rs.length, picks: pk.length, hits: pk.filter(o => o.hit).length, multi: multi.length, multiAny: multi.filter(id => pk.some(o => o.id === id && o.hit)).length, multiBoth: multi.filter(id => pk.filter(o => o.id === id && o.hit).length >= 2).length,
+      ret: pk.length ? Math.round(pk.reduce((s, o) => s + o.place, 0) / pk.length) : 0, missed: rows.filter(o => !o.pick && o.hit).length, cand: rows.length, candHit: rows.filter(o => o.hit).length }; };
+  const S = sum(D), pct = (a, b) => b ? (a / b * 100).toFixed(1) + "%" : "—";
+  const sel = LS.get("dhRevDate", dates[dates.length - 1]) , d = dates.includes(sel) ? sel : dates[dates.length - 1], R = byDate[d] || [];
+  const miss = R.filter(o => o.pick && !o.hit), came = R.filter(o => !o.pick && o.hit).sort((a, b) => a.candRank - b.candRank), good = R.filter(o => o.pick && o.hit);
+  const raceTxt = o => `${o.c1 ? `1角${o.c1}番手` : ""}${o.c4 ? `→4角${o.c4}番手` : ""}→${o.pos ?? "—"}着${o.l3rk ? `・上がり${o.l3rk}位` : ""}${o.gap != null && o.pos > 1 ? `・勝ち馬と${o.gap}秒` : ""}`;
+  const tr = (o, kind) => `<tr><td>${esc(o.race)}</td><td>${o.num} ${esc(o.horse)}</td><td>${o.pop ?? "—"}人</td><td>${(o.p3 * 100).toFixed(1)}%<br><span class="small">候補${o.candRank}位・全体${o.rankAll}位</span></td><td>${raceTxt(o)}</td><td>${esc(dhRunTags(o).join("・") || "—")}</td><td class="small">${kind === "came" ? "AIがマイナスに見た点：" + esc(o.minus.join("・") || "—") : "AIがプラスに見た点：" + esc(o.plus.join("・") || "—")}</td></tr>`;
+  // 来た穴馬（推奨外）と外れた推奨馬で、レースの中身の傾向を比べる（仮説の手がかり）
+  const tagCount = rows => { const c = {}; rows.forEach(o => dhRunTags(o).forEach(t => { const k = t.replace(/\d+/g, "N"); c[k] = (c[k] || 0) + 1; })); return Object.entries(c).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${k} ${v}`).join("・") || "—"; };
+  const allCame = D.filter(o => !o.pick && o.hit), allMiss = D.filter(o => o.pick && !o.hit);
+  const styleOf = rows => { const v = rows.map(o => o.styleRel).filter(x => x != null); return v.length ? (v.filter(x => x < 0.35).length / v.length * 100).toFixed(0) + "%" : "—"; };
+  return `<p class="small">推奨馬は、この端末に固定した選出があればそれ、なければ<b>発走前の最後のオッズ</b>で選び直したもの。ここは見直しの材料で、予想は変えません。エンジンに入れるのは、過去の全データで確かめて効果が出たものだけです。</p>
+    <table class="tbl small"><tr><th>日付</th><th>推奨</th><th>3着以内</th><th>複勝回収</th><th>2頭以上推奨</th><th>推奨外で来た穴馬</th></tr>
+      ${dates.map(dt => { const s = sum(byDate[dt]); return `<tr><td>${dt.slice(5).replace("-", "/")}</td><td>${s.picks}頭（${s.races}R）</td><td>${s.hits}（${pct(s.hits, s.picks)}）</td><td>${s.ret}%</td><td>${s.multi}R（1頭でも${s.multiAny}・両方${s.multiBoth}）</td><td>${s.missed}頭（候補${s.cand}頭中${s.candHit}頭が3着内）</td></tr>`; }).join("")}
+      <tr><td><b>合計</b></td><td>${S.picks}頭（${S.races}R）</td><td><b>${S.hits}（${pct(S.hits, S.picks)}）</b></td><td>${S.ret}%</td><td>${S.multi}R（1頭でも${S.multiAny}・両方${S.multiBoth}）</td><td>${S.missed}頭</td></tr></table>
+    <p class="small">過去の検証（2024〜26年）の目安：推奨の3着以内 約23%、2頭推奨のレースで1頭でも 約47%・両方 約5%。1日だけでは±7ポイントほどぶれます。</p>
+    <p class="small"><b>累計の傾向</b>：推奨外で来た穴馬（${allCame.length}頭）のレース内容 ${esc(tagCount(allCame))}／先行型の割合 ${styleOf(allCame)}。外れた推奨馬（${allMiss.length}頭）のレース内容 ${esc(tagCount(allMiss))}／先行型の割合 ${styleOf(allMiss)}。</p>
+    <div class="ctrls"><label class="small">日付 <select id="dhRevSel">${dates.map(dt => `<option value="${dt}" ${dt === d ? "selected" : ""}>${dt}</option>`).join("")}</select></label>
+      <button class="btn" id="dhRevCsv">見直し用のデータを保存（CSV）</button> <button class="btn" id="dhRevRe">集計し直す</button></div>
+    <h4>当たった推奨馬（${good.length}頭）</h4>${good.length ? `<table class="tbl small"><tr><th>レース</th><th>馬</th><th>人気</th><th>AIの見込み</th><th>レース内容</th><th>見立て</th><th>AI</th></tr>${good.map(o => tr(o, "pick")).join("")}</table>` : "<p class='small'>なし</p>"}
+    <h4>外れた推奨馬（${miss.length}頭）：期待しすぎたか、レースで何が起きたか</h4>${miss.length ? `<table class="tbl small"><tr><th>レース</th><th>馬</th><th>人気</th><th>AIの見込み</th><th>レース内容</th><th>見立て</th><th>AI</th></tr>${miss.map(o => tr(o, "pick")).join("")}</table>` : "<p class='small'>なし</p>"}
+    <h4>推奨しなかったのに3着以内に来た穴馬（${came.length}頭）：AIが見落とした要素はないか</h4>${came.length ? `<table class="tbl small"><tr><th>レース</th><th>馬</th><th>人気</th><th>AIの見込み</th><th>レース内容</th><th>見立て</th><th>AI</th></tr>${came.map(o => tr(o, "came")).join("")}</table>` : "<p class='small'>なし</p>"}`;
+}
+function dhReviewBind(){
+  const s = $("#dhRevSel"); if (s) s.onchange = () => { LS.set("dhRevDate", s.value); $("#dhRev").innerHTML = dhReviewHtml(); dhReviewBind(); };
+  const re = $("#dhRevRe"); if (re) re.onclick = () => { DH_REV.data = null; $("#dhRev").innerHTML = dhReviewHtml(); dhReviewCompute(); };
+  const cv = $("#dhRevCsv"); if (cv) cv.onclick = () => {
+    const D = DH_REV.data || [], K = ["date", "race", "name", "surf", "dist", "N", "num", "horse", "pop", "odds", "p3", "candRank", "rankAll", "pick", "hit", "place", "pos", "c1", "c4", "styleRel", "l3", "l3rk", "gap"];
+    const csv = [K.concat(["plus", "minus", "tags"]).join(",")].concat(D.map(o => K.map(k => o[k] ?? "").concat([o.plus.join("|"), o.minus.join("|"), dhRunTags(o).join("|")]).map(v => `"${String(v).replace(/"/g, '""')}"`).join(","))).join("\n");
+    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv" })); a.download = `穴馬答え合わせ_${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+  };
+}
+function dhReviewPanel(){
+  if (!DH_REV.data && !DH_REV.busy) setTimeout(dhReviewCompute, 50);
+  return `<div class="learnbox"><h3>穴馬の答え合わせ（毎日の見直し）</h3><div id="dhRev">${dhReviewHtml()}</div></div>`;
+}
 
 const ROW_VER = "20261107f";   // 10/24：エンジン修正＋穴馬の3着内率の表示補正＋注目穴馬の選び方（5〜8番人気・市場×シミュ）＋画像の推奨理由のはみ出し修正
 async function showRaceImage(id){
@@ -9406,7 +9500,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261109a";
+const APP_BUILD = "20261109b";
 // 10/31：PCのアプリが新しくなったら、画面を自動で読み込み直す（2分ごとに確認。一括計算などの処理中は待つ）
 // 11/1：スマホ（クラウド版）でも確認。新しい版を見つけたら、オフライン用の保存（サービスワーカーとキャッシュ）を消してから読み込み直す（古い画面が残り続けないように）。
 //  開いて5秒後に1回目を確認。画面の上（タイトルの横）に版を表示
@@ -9509,7 +9603,7 @@ function renderLearnTab(){
   if (!BF.status && !BF.loading && SERVER.enabled && !SERVER.cloud && SERVER.on){ BF.loading = true; bfRefresh().then(() => { BF.loading = false; if (ST.tab === "learn") renderLearnTab(); }); }
   const m = LEARN.model, d = ST.date;
   const dates = m?.hist || [];
-  el.innerHTML = `${preregPanel()}${researchPanel()}
+  el.innerHTML = `${dhReviewPanel()}${preregPanel()}${researchPanel()}
     <!-- 10/27：「蓄積しているデータ」の表示は不要なので削除（開催日ごとの大きな表で、画面を重くしていた） -->
     ${m ? `<div class="learnbox"><h3>学習した内容（いまの予想に反映中）</h3>
       <p class="small"><b>モデルとオッズの統合</b>：p ∝ モデル<sup>${Bets.CAL.a}</sup> × オッズ<sup>${Bets.CAL.b}</sup>（学習前は 0.3・0.85${(m.version || 1) < 2 ? "。旧方式の学習値は使っていません" : ""}）</p>
@@ -9525,6 +9619,7 @@ function renderLearnTab(){
     ${lockPanel()}
     ${histPanel()}
     ${bfPanel()}`;
+  dhReviewBind();
   const mr = $("#mkReport"); if (mr) mr.onclick = () => makeReport(false);
   const mrd = $("#mkReportDeep"); if (mrd) mrd.onclick = () => makeReport(true);
   const mc = $("#mkCross"); if (mc) mc.onclick = makeCross;
