@@ -7446,22 +7446,30 @@ function dhContribGroups(h){
   h.c3G = G; h.plusG = Object.entries(G).filter(([, v]) => v > 0.004).sort((a, b) => b[1] - a[1]).map(([g, v]) => ({ g, v }));
 }
 const dhHorseOf = e => DB.horses[e.horseId] || DB.horses[e.name] || null;
-// fixedNum があればその馬（固定済みの選出）の文章だけを作り直す
+// 1頭ぶんの選出データ（見出し・本文・投稿文の数字はすべてここから）。base があれば固定済みの値（人気・オッズ・見込み・順位・作成時刻）を使う
+function dhMakeK(P, h, r, rank, base){
+  h.runs = h.f._runs; dhContribGroups(h); h.bul = dhBullets(P, h);
+  const k0 = base || { p3: h.p3, rankAll: rank, pop: h.e.pop ?? null, odds: h.e.odds ?? null, field: P.N };
+  const st = dhStory(P, h, r, k0);
+  const sim = ST.sims?.[r.id]; let eng = null;
+  if (sim?.weighted){ const ws = sim.weighted.slice().sort((a, b) => b.top3 - a.top3); const q = ws.findIndex(w => +sim.ctx.field[w.i]?.num === +h.e.num); if (q >= 0) eng = { rank: q + 1, top3: ws[q].top3 }; }
+  return { id: r.id, made: new Date().toISOString(), num: h.e.num, waku: h.e.waku, name: h.e.name, jockey: h.e.jockey, pop: k0.pop, odds: k0.odds, oddsAt: r.oddsAsOf || null,
+    p3: k0.p3, p1: h.p1, nCand: P.cands.length, rankAll: k0.rankAll, field: k0.field, eng, story: st.paras, scen: st.scen || null, bullets: h.bul.map(b => b.s), keys: h.bul.map(b => b.key), textVer: 3,
+    model: DH.M.ver, asof: DH.M.asof, afterPost: raceStart(r) <= new Date(), ...(base ? { made: base.made, p1: base.p1 ?? h.p1, afterPost: base.afterPost, oddsAt: base.oddsAt, eng: base.eng ?? eng } : {}) };
+}
+// 選出：穴馬候補の中でAIの見込みが一番高い馬。加えて、全頭の中でAI評価3位以内に入った候補も推奨する（11/9〜。過去の検証で2頭目以降も3着以内25.0%）
+// fixedNum があれば、その馬（固定済み）の文章だけを固定時の数字で作り直す
 async function dhPickRace(r, fixedNum, k0){
   await DH.load("darkhorse.json");
   const ents = (r.entries || []).filter(e => !e.scratched);
   const race = { date: r.date, venue: r.venue, surface: r.surface, distance: +r.distance, going: (typeof goingOf === "function" ? goingOf(r) : r.going) || "良", name: r.name, entries: ents };
   const P = DH.pick(race, dhHorseOf); if (P.none) return P;
   P.race = race; P.horseOf = dhHorseOf; P.N = ents.length;
-  const h = fixedNum != null ? (P.all.find(o => +o.e.num === +fixedNum) || P.best) : P.best; h.runs = h.f._runs;
-  if (fixedNum != null){ const srt = P.all.slice().sort((a, b) => b.p3 - a.p3); P.rankAll = srt.indexOf(h) + 1; }
-  dhContribGroups(h); h.bul = dhBullets(P, h);
-  const st = dhStory(P, h, r, k0);
-  const sim = ST.sims?.[r.id]; let eng = null;
-  if (sim?.weighted){ const ws = sim.weighted.slice().sort((a, b) => b.top3 - a.top3); const k = ws.findIndex(q => +sim.ctx.field[q.i]?.num === +h.e.num); if (k >= 0) eng = { rank: k + 1, top3: ws[k].top3 }; }
-  return { id: r.id, made: new Date().toISOString(), num: h.e.num, waku: h.e.waku, name: h.e.name, jockey: h.e.jockey, pop: h.e.pop ?? null, odds: h.e.odds ?? null, oddsAt: r.oddsAsOf || null,
-    p3: h.p3, p1: h.p1, nCand: P.cands.length, rankAll: P.rankAll, field: ents.length, eng, story: st.paras, scen: st.scen || null, bullets: h.bul.map(b => b.s), keys: h.bul.map(b => b.key), textVer: 3,
-    model: DH.M.ver, asof: DH.M.asof, afterPost: raceStart(r) <= new Date() };
+  const srt = P.all.slice().sort((a, b) => b.p3 - a.p3), rankOf = x => srt.indexOf(x) + 1;
+  if (fixedNum != null){ const h = P.all.find(o => +o.e.num === +fixedNum); if (!h) return { none: "固定した馬が出馬表にいません" }; return dhMakeK(P, h, r, rankOf(h), k0); }
+  const k = dhMakeK(P, P.best, r, rankOf(P.best));
+  k.extras = P.cands.filter(x => x !== P.best && rankOf(x) <= 3).sort((a, b) => b.p3 - a.p3).map(x => dhMakeK(P, x, r, rankOf(x)));
+  return k;
 }
 function dhLockGet(id){ try { return JSON.parse(localStorage.getItem("dhLock_" + id) || "null"); } catch (e) { return null; } }
 function dhLockSet(id, v){ try { localStorage.setItem("dhLock_" + id, JSON.stringify(v)); } catch (e) {} }
@@ -7494,7 +7502,7 @@ async function darkImage(r, k, variant){
   const wk = (k.waku || wakuNo(r, k.num, k.field)) || 1;
   try { g.save(); g.globalAlpha = 0.9; drawHorse(g, 640, 70, 0.95, ["#fff1c1", "#d9a521", "#6b4b0e", "#a9821c", "#ffffff", WAKU[wk - 1] || "#e05080"]); g.restore(); } catch (e) {}
   g.fillStyle = "#ff5a8c"; g.beginPath(); g.moveTo(0, 0); g.lineTo(560, 0); g.lineTo(530, 64); g.lineTo(0, 64); g.closePath(); g.fill();
-  txt("AI穴馬予想", 36, 47, 40, "#fff", { f: FDf, w: "normal" });
+  txt(`AI穴馬予想${k._tot > 1 ? `  ${k._idx}/${k._tot}` : ""}`, 36, 47, 40, "#fff", { f: FDf, w: "normal" });
   const date = r.date ? r.date.replace(/-/g, ".") : "", wd = r.date ? "日月火水木金土"[new Date(r.date).getDay()] : "";
   txt(`${date}（${wd}）${r.postTime || ""}発走`, W - 30, 44, 26, "#ffd1df", { al: "right" });
   txt(`${r.venue}${r.no}R`, 40, 150, 70, "#fff", { f: FDf, w: "normal" });
@@ -7545,9 +7553,12 @@ async function darkImage(r, k, variant){
   return c.toDataURL("image/png");
 }
 function darkXText(r, k){
-  const nm = s0 => String(s0 || "").replace(/\s/g, ""); const race = nm(r.name).replace(/[（(].*?[)）]/g, "");
-  const ks = [...new Set((k.keys || []).map(x => DH_NOUN[x]).filter(Boolean))].slice(0, 3), why = ks.length ? "決め手：" + ks.join("／") : "";
-  const t = [`【AI穴馬】${r.venue}${r.no}R ${race}`, `${k.num}番 ${nm(k.name)}${k.pop ? `（${k.pop}番人気` : ""}${k.odds ? `・${k.odds}倍）` : k.pop ? "）" : ""}`, `3着以内の見込み${(k.p3 * 100).toFixed(1)}%${dhPopBase(k.pop) && k.p3 / dhPopBase(k.pop) >= 1.1 ? `（${k.pop}番人気の平均${(dhPopBase(k.pop) * 100).toFixed(1)}%の${(k.p3 / dhPopBase(k.pop)).toFixed(1)}倍）` : ""}`, why, `#${r.venue}${r.no}R #競馬予想 #穴馬`].filter(Boolean).join("\n");
+  const nm = s0 => String(s0 || "").replace(/\s/g, ""); const race = nm(r.name).replace(/[（(].*?[)）]/g, ""), L = [k, ...(k.extras || [])];
+  const line = q => `${q.num}番 ${nm(q.name)}${q.pop ? `（${q.pop}番人気${q.odds ? `・${q.odds}倍` : ""}）` : ""} 3着内${(q.p3 * 100).toFixed(1)}%`;
+  let t;
+  if (L.length === 1){ const ks = [...new Set((k.keys || []).map(x => DH_NOUN[x]).filter(Boolean))].slice(0, 3);
+    t = [`【AI穴馬】${r.venue}${r.no}R ${race}`, `${k.num}番 ${nm(k.name)}${k.pop ? `（${k.pop}番人気${k.odds ? `・${k.odds}倍` : ""}）` : ""}`, `3着以内の見込み${(k.p3 * 100).toFixed(1)}%${dhPopBase(k.pop) && k.p3 / dhPopBase(k.pop) >= 1.1 ? `（${k.pop}番人気の平均${(dhPopBase(k.pop) * 100).toFixed(1)}%の${(k.p3 / dhPopBase(k.pop)).toFixed(1)}倍）` : ""}`, ks.length ? "決め手：" + ks.join("／") : "", `#${r.venue}${r.no}R #競馬予想 #穴馬`].filter(Boolean).join("\n"); }
+  else t = [`【AI穴馬・${L.length}頭推奨】${r.venue}${r.no}R ${race}`, ...L.map(line), `#${r.venue}${r.no}R #競馬予想 #穴馬`].join("\n");
   return [...t].length > 140 ? t.slice(0, 139) + "…" : t;
 }
 async function showDarkImage(id){
@@ -7560,24 +7571,28 @@ async function showDarkImage(id){
     try { k = await dhPickRace(r); } catch (e) { console.error(e); toast("穴馬AIの計算でエラー：" + e.message); return; }
     if (k.none){ toast(k.none); return; }
     dhLockSet(id, k);
-  } else if (k.textVer !== 3){
-    // 文章の形式が古い固定データ：馬・人気・オッズ・作成時刻はそのままで、文章だけ新しい形で作り直す
-    try { const k2 = await dhPickRace(r, k.num, k); if (!k2.none){ k = { ...k, story: k2.story, scen: k2.scen, bullets: k2.bullets, keys: k2.keys, textVer: 3 }; dhLockSet(id, k); } } catch (e) { console.warn(e); }
   }
-  if (!dhConsistent(k)){
-    try { const k2 = await dhPickRace(r, k.num, k); if (!k2.none){ k = { ...k, story: k2.story, scen: k2.scen, bullets: k2.bullets, keys: k2.keys, textVer: 3 }; dhLockSet(id, k); } } catch (e) { console.warn(e); }
-    if (!dhConsistent(k)){ toast("数字の整合が取れないため画像を作りませんでした"); console.error("[穴馬] 数字の不一致", k); return; }
+  // 推奨した全頭（1頭目＋全頭3位以内の候補）。それぞれ見出しと本文の数字を確かめる
+  const list = [k, ...(k.extras || [])];
+  for (let i = 0; i < list.length; i++){
+    let q = list[i];
+    if (q.textVer !== 3 || !dhConsistent(q)){ try { const q2 = await dhPickRace(r, q.num, q); if (!q2.none) q = { ...q, story: q2.story, scen: q2.scen, bullets: q2.bullets, keys: q2.keys, textVer: 3 }; } catch (e) { console.warn(e); } }
+    if (!dhConsistent(q)){ toast("数字の整合が取れないため画像を作りませんでした"); console.error("[穴馬] 数字の不一致", q); return; }
+    list[i] = q;
   }
-  let url = await darkImage(r, k);
+  k = { ...list[0], extras: list.slice(1) }; dhLockSet(id, k);
+  const urls = []; for (let i = 0; i < list.length; i++) urls.push(await darkImage(r, { ...list[i], _idx: i + 1, _tot: list.length }));
   let m = $("#imgModal"); if (!m){ m = document.createElement("div"); m.id = "imgModal"; m.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9999;display:flex;align-items:center;justify-content:center;padding:12px"; document.body.appendChild(m); }
-  const fn = `${r.date}_${r.venue}${r.no}R_AI穴馬.png`;
-  m.innerHTML = `<div style="background:#111;padding:12px;border-radius:12px;max-height:100%;overflow:auto;text-align:center"><img id="dhImg" src="${url}" style="max-width:min(480px,90vw);height:auto;display:block;margin:0 auto 10px">
+  m.innerHTML = `<div style="background:#111;padding:12px;border-radius:12px;max-height:100%;overflow:auto;text-align:center">
+    ${list.length > 1 ? `<div style="color:#ffd1df;font-weight:700;margin-bottom:6px">このレースは${list.length}頭を推奨（全頭の中でAI評価3位以内の穴馬）</div>` : ""}
+    ${list.map((q, i) => `<div style="margin-bottom:12px"><img src="${urls[i]}" style="max-width:min(480px,90vw);height:auto;display:block;margin:0 auto 6px">
+      <a class="btn primary" href="${urls[i]}" download="${r.date}_${r.venue}${r.no}R_AI穴馬${list.length > 1 ? "_" + (i + 1) : ""}_${q.num}番.png">${list.length > 1 ? `${i + 1}頭目（${q.num}番）を保存` : "画像を保存"}</a> <button class="btn" data-dhcopy="${i}">画像をコピー</button></div>`).join("")}
     <div class="small" style="color:#ccc;margin-bottom:6px">${fixed ? "この端末で最初に作った時点の選出を表示しています（後から変わりません）" : "この選出をこの端末に固定しました（作り直しても同じ馬になります）"}</div>
-    <a class="btn primary" id="dhSave" href="${url}" download="${fn}">画像を保存</a> <button class="btn" id="imgCopy">画像をコピー</button> <button class="btn" id="imgClose">閉じる</button>
+    <button class="btn" id="imgClose">閉じる</button>
     <div style="text-align:left;margin-top:10px"><div class="small" style="color:#ccc">X投稿用の文章</div><textarea id="xtText" style="width:100%;min-height:120px;font-size:14px">${esc(darkXText(r, k))}</textarea><button class="btn" id="xtCopy">文章をコピー</button></div></div>`;
   $("#xtCopy").onclick = async () => { try { await navigator.clipboard.writeText($("#xtText").value); toast("文章をコピーしました"); } catch (e) { $("#xtText").select(); } };
   $("#imgClose").onclick = () => m.remove();
-  $("#imgCopy").onclick = async () => { try { const blob = await (await fetch(url)).blob(); await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]); toast("画像をコピーしました"); } catch (e) { toast("この環境ではコピーできません。保存してください"); } };
+  m.querySelectorAll("[data-dhcopy]").forEach(bt => bt.onclick = async () => { try { const blob = await (await fetch(urls[+bt.dataset.dhcopy])).blob(); await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]); toast("画像をコピーしました"); } catch (e) { toast("この環境ではコピーできません。保存してください"); } });
 }
 window.showDarkImage = showDarkImage;
 
@@ -9391,7 +9406,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261108d";
+const APP_BUILD = "20261109a";
 // 10/31：PCのアプリが新しくなったら、画面を自動で読み込み直す（2分ごとに確認。一括計算などの処理中は待つ）
 // 11/1：スマホ（クラウド版）でも確認。新しい版を見つけたら、オフライン用の保存（サービスワーカーとキャッシュ）を消してから読み込み直す（古い画面が残り続けないように）。
 //  開いて5秒後に1回目を確認。画面の上（タイトルの横）に版を表示
