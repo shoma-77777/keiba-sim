@@ -7325,94 +7325,117 @@ function dhRunPara(x, k, ctx){
     if (aft){ S.push(`このレースで${o.pos === 1 ? "勝った" : o.pos + "着に入った"}${o.h.name}は、その後${dhRaceName(aft.race)}で${aft.pos}着。相手関係から見てもレベルの高い一戦だった。`); ex.push("相手関係"); break; } }
   return { text: S.join(""), ex, pos, mg };
 }
+// 比べる基準（平均）：成績表の合計から。騎手は競馬場ごと、調教師は全体、種牡馬は芝ダごと
+let DH_BASE = null;
+function dhBase(){
+  if (DH_BASE) return DH_BASE; const M = DH.M, sum = (o, f) => { let n = 0, t = 0; for (const k in o){ if (f(k)){ n += o[k][0]; t += o[k][2]; } } return n ? t / n : null; };
+  const jv = {}, ss = {}; for (const k in M.JKV){ const v = k.split("|")[1]; if (!(v in jv)) jv[v] = sum(M.JKV, x => x.endsWith("|" + v)); }
+  ["芝", "ダ", "障"].forEach(sf => ss[sf] = sum(M.SR, x => { const p = x.split("|"); return p.length === 2 && p[1] === sf; }));
+  DH_BASE = { jv, tr: sum(M.TR, () => true), ss }; return DH_BASE;
+}
+const dhPct = v => (v * 100).toFixed(0) + "%";
+const dhTimes = (v, b) => (v / b).toFixed(1) + "倍";
+// 人気ごとの3着以内率（2019〜26年・新馬戦を除く）と、AIの自信度ランクごとの実績（2024〜26年・学習に使っていないレース）
+const DH_POPBASE = [0.6456, 0.5219, 0.416, 0.3354, 0.2635, 0.2163, 0.1669, 0.1296, 0.103, 0.0781, 0.0626, 0.0509, 0.0341, 0.031, 0.0195, 0.0142, 0.0127, 0.0102];
+const DH_CONF = [{"rank": "S", "min": 0.2729, "hit": 0.2894, "win": 0.0647, "n": 1268, "odds": 14.0}, {"rank": "A", "min": 0.2279, "hit": 0.2441, "win": 0.0537, "n": 1901, "odds": 14.5}, {"rank": "B", "min": 0.1906, "hit": 0.2105, "win": 0.0553, "n": 1900, "odds": 16.1}, {"rank": "C", "min": 0.0, "hit": 0.1782, "win": 0.0465, "n": 1268, "odds": 20.4}];
+const dhPopBase = pop => pop ? DH_POPBASE[Math.min(pop, DH_POPBASE.length) - 1] : null;
+const dhConf = p3 => DH_CONF.find(c => p3 >= c.min) || DH_CONF[DH_CONF.length - 1];
+// 狙いの形（レース後に答え合わせできる、具体的な展開の見立て）
+function dhScenario(P, h, r){
+  const f = h.f, N = P.N || P.all.length, fr = f["近5走 前半位置平均"], fc = f["先行馬の数"];
+  const lr = (() => { const v = f["近5走上がり指数最高"]; if (v == null || isNaN(v)) return null; return P.all.map(o => o.f["近5走上がり指数最高"]).filter(x => x != null && !isNaN(x) && x > v).length + 1; })();
+  const pW = ST.sims?.[r.id]?.weightsInfo?.pW; let pace = "";
+  if (pW){ const ks = Object.entries(pW).sort((a, b) => b[1] - a[1])[0], J = { slow: "スローペース", mid: "平均ペース", high: "ハイペース" }; pace = `展開シミュレーションでは${J[ks[0]]}になる確率が${dhPct(ks[1])}でいちばん高い。`; }
+  if (fr == null || isNaN(fr)) return null;
+  const pos = Math.max(1, Math.round(fr * (N - 1)) + 1);
+  if (fr < 0.35) return `${pace}この馬は近5走の1コーナーで平均${pos}番手前後につける先行型${!isNaN(fc) && fc <= 3 ? `で、メンバーに先行馬は${fc}頭しかいない` : ""}。好位で流れに乗り、4コーナーを先頭集団で回れれば、直線で粘り込んで3着以内に残る。`;
+  if (fr >= 0.55) return `${pace}この馬は近5走の1コーナーで平均${pos}番手前後から運ぶ差し型${lr && lr <= 3 ? `で、上がりのベストはメンバー${lr}位` : ""}。${pW && pW.high >= 0.35 ? "先行勢が競り合って前が止まれば" : "前が少しでも苦しくなれば"}、直線で外から一気に差し込んでくる。`;
+  return `${pace}この馬は近5走の1コーナーで平均${pos}番手前後の中団から運ぶタイプ。道中で脚をため、勝負どころで前との差を詰められれば、直線で3着争いに加わってくる。`;
+}
 // 推奨理由の本文（段落の配列）と、敗因として挙げられる要素
 function dhStory(P, h, r, k0){
-  const e = h.e, f = h.f, hh = P.horseOf(e) || {}, raw = dhRawRuns(hh, P.race.date), N = P.all.length, surf = P.race.surface, venue = P.race.venue, dist = P.race.distance;
+  const e = h.e, f = h.f, hh = P.horseOf(e) || {}, raw = dhRawRuns(hh, P.race.date); let N = P.N || P.all.length; const surf = P.race.surface, venue = P.race.venue, dist = P.race.distance;
   const rk = key => { const v = f[key]; if (v == null || isNaN(v)) return null; const vs = P.all.map(o => o.f[key]).filter(x => x != null && !isNaN(x)); return vs.filter(x => x > v).length + 1; };
-  const ctx = { name: e.name, date: P.race.date, cl: dhGrade(P.race.name) }, paras = [], ex = new Set();
-  if (!raw.length) return { paras: ["今回が初出走のため、過去のレースからの評価はない。"], ex: [] };
-  // ① 近走（3走、4走前は好走時のみ）
+  const ctx = { name: e.name, date: P.race.date, cl: dhGrade(P.race.name) }, paras = [], ex = new Set(), B = dhBase();
+  const p3v = k0?.p3 ?? h.p3, rkAll = k0?.rankAll ?? P.rankAll, pop = k0?.pop ?? e.pop, odds = k0?.odds ?? e.odds, pb = dhPopBase(pop);
+  if (k0?.field) N = k0.field;
+  // ① 書き出し：人気とAIの評価のずれ
+  const ratio = pb ? p3v / pb : null, oddsT = odds ? `（単勝${odds}倍）` : "";
+  if (ratio && ratio >= 1.1) paras.push(`${N}頭立ての${pop}番人気${oddsT}だが、穴馬AIの評価は全${N}頭中${rkAll}位。過去、${pop}番人気の馬が3着以内に入ったのは${(pb * 100).toFixed(1)}%だが、AIはこの馬の3着以内を${(p3v * 100).toFixed(1)}%と見積もった。人気から見た期待の${ratio.toFixed(1)}倍にあたる。`);
+  else if (pb) paras.push(`${N}頭立ての${pop}番人気${oddsT}。穴馬AIの評価は全${N}頭中${rkAll}位で、3着以内の見込みは${(p3v * 100).toFixed(1)}%（${pop}番人気の馬の過去の平均は${(pb * 100).toFixed(1)}%）。穴馬の候補（単勝10倍以上または6番人気以下）の中では、AIがいちばん高く評価した馬だ。`);
+  else paras.push(`${N}頭立ての伏兵${oddsT}。穴馬AIの評価は全${N}頭中${rkAll}位で、3着以内の見込みは${(p3v * 100).toFixed(1)}%。`);
+  if (!raw.length) return { paras, ex: [], scen: dhScenario(P, h, r) };
+  // ② 近走（3走、4走前は好走時のみ）
   let shown = 0; raw.slice(0, 4).forEach((x, k) => { if (k === 3 && !(+x.pos <= 3)) return; const o = dhRunPara(x, k, ctx); o.ex.forEach(t => ex.add(t)); paras.push(o.text); shown = k + 1; });
-  // ② これまでの実績
+  // ③ これまでの実績（プラスになるものだけ）
   const older = raw.slice(Math.max(3, shown)).filter(x => +x.pos <= 3 && (dhGrade(x.race) || 0) >= 4).slice(0, 3);
-  const t3 = raw.filter(x => +x.pos <= 3).length, w = raw.filter(x => +x.pos === 1).length;
-  const same = raw.filter(x => x.venue === venue && x.surface === surf && +x.dist === +dist), sameS = raw.filter(x => x.surface === surf);
-  let p2 = `通算${raw.length}戦${w}勝、3着以内は${t3}回。`;
-  if (older.length){ const top = Math.max(...older.map(x => dhGrade(x.race) || 0)); p2 += `過去には${older.map(x => `${dhRaceName(x.race)}${x.pos}着`).join("、")}と、${top >= 7 ? "重賞" : top >= 6 ? "オープン" : "特別戦"}でも上位争いをしてきた。`; }
-  if (same.length) p2 += `今回と同じ${venue}${DH_SURF(surf)}${dist}mは${same.length}戦して${same.filter(x => +x.pos <= 3).length ? `3着以内${same.filter(x => +x.pos <= 3).length}回` : `最高${Math.min(...same.map(x => +x.pos))}着`}。`;
-  else if (sameS.length && sameS.filter(x => +x.pos <= 3).length) p2 += `${DH_SURF(surf)}では${sameS.length}戦して3着以内${sameS.filter(x => +x.pos <= 3).length}回。`;
-  paras.push(p2);
-  // ③ 今回の状態と騎手
-  const p3 = [], dd = f["休養日数"];
-  if (f["叩き2戦目"]) p3.push(`今回は休み明けを一度使われての2戦目（前走から${dd}日）で、上積みが見込めるローテーション`);
-  else if (f["叩き3戦目"]) p3.push(`今回は休み明けから3戦目（前走から${dd}日）`);
-  else if (f["連闘"]) p3.push("今回は連闘での出走");
-  else if (dd >= 70) p3.push(`今回は${Math.round(dd / 30)}か月ぶりの休み明け`);
-  else if (!isNaN(dd)) p3.push(`今回は前走から${dd}日の間隔`);
-  const tr = e.training; if (tr?.grade && /^[SAB]/.test(tr.grade)) p3.push(`調教の評価は${tr.grade}${tr.comment ? `（${tr.comment}）` : ""}`);
-  const jkRuns = raw.slice(0, 10).filter(x => dhJkEq(x.jockey, e.jockey)), jkName = (jkRuns[0]?.jockey || String(e.jockey || "").replace(/[▲△☆◇★]/g, "")) + "騎手";
-  const lastJk = raw[0] && dhJkEq(raw[0].jockey, e.jockey);
-  if (jkRuns.length && !lastJk) p3.push(`鞍上は${jkName}に戻る。このコンビは${jkRuns.length}戦して3着以内${jkRuns.filter(x => +x.pos <= 3).length}回`);
-  else if (lastJk) p3.push(`鞍上は前走に続いて${jkName}`);
-  else p3.push(`鞍上は${jkName}に乗り替わる${isNaN(f["騎手 同競馬場3着内率"]) ? "" : `。${jkName}の${venue}での3着内率は${(f["騎手 同競馬場3着内率"] * 100).toFixed(0)}%`}`);
-  if (!isNaN(f["馬体重"]) && !isNaN(f["馬体重増減"])) p3.push(`馬体重は${f["馬体重"]}kg（${f["馬体重増減"] > 0 ? "+" : f["馬体重増減"] === 0 ? "±" : ""}${f["馬体重増減"]}）`);
-  paras.push(p3.join("。") + "。");
-  // ④ 今回の条件
-  const p4 = [], sr = rk("近5走スピード最高"), lr = rk("近5走上がり指数最高"), fc = f["先行馬の数"], fr = f["近5走 前半位置平均"];
-  if (sr && sr <= Math.max(3, Math.round(N / 4))) p4.push(`近5走の走破タイムのベストはメンバー${sr}位で、能力比較では上位に入る`);
+  const same = raw.filter(x => x.venue === venue && x.surface === surf && +x.dist === +dist), sameS = raw.filter(x => x.surface === surf), t3s = A => A.filter(x => +x.pos <= 3).length;
+  const p2 = [];
+  if (older.length){ const top = Math.max(...older.map(x => dhGrade(x.race) || 0)); p2.push(`過去には${older.map(x => `${dhRaceName(x.race)}${x.pos}着`).join("、")}と、${top >= 7 ? "重賞" : top >= 6 ? "オープン" : "特別戦"}でも上位争いをしてきた`); }
+  if (same.length && t3s(same)) p2.push(`今回と同じ${venue}${DH_SURF(surf)}${dist}mは${same.length}戦して3着以内${t3s(same)}回と、舞台適性は証明済み`);
+  else if (sameS.length >= 2 && t3s(sameS) / sameS.length >= 0.3) p2.push(`${DH_SURF(surf)}では${sameS.length}戦して3着以内${t3s(sameS)}回（${dhPct(t3s(sameS) / sameS.length)}）`);
+  if (p2.length) paras.push(p2.join("。") + "。");
+  // ④ 今回の上積み材料（平均より上のものだけを、平均と比べて書く）
+  const p4 = [], dd = f["休養日数"];
+  if (f["叩き2戦目"]) p4.push(`今回は休み明けを一度使われての2戦目（前走から${dd}日）。実戦を一度挟んだ上積みが見込める`);
+  const tr = e.training; if (tr?.grade && /^[SA]/.test(tr.grade)) p4.push(`調教の評価は${tr.grade}${tr.comment ? `（${tr.comment}）` : ""}と上々`);
+  const jkRuns = raw.slice(0, 10).filter(x => dhJkEq(x.jockey, e.jockey)), jkName = (jkRuns[0]?.jockey || String(e.jockey || "").replace(/[▲△☆◇★]/g, "")) + "騎手", lastJk = raw[0] && dhJkEq(raw[0].jockey, e.jockey);
+  const jv = f["騎手 同競馬場3着内率"], jb = B.jv[venue];
+  if (jkRuns.length >= 2 && !lastJk && t3s(jkRuns) / jkRuns.length >= 0.4) p4.push(`鞍上は${jkName}に戻る。このコンビは${jkRuns.length}戦して3着以内${t3s(jkRuns)}回と好相性`);
+  if (!isNaN(jv) && jb && jv / jb >= 1.15) p4.push(`${jkName}の${venue}での3着内率は${dhPct(jv)}で、全騎手平均の${dhPct(jb)}を大きく上回る（${dhTimes(jv, jb)}）`);
+  const tv = f["調教師3着内率"]; if (!isNaN(tv) && B.tr && tv / B.tr >= 1.2) p4.push(`${e.trainer || ""}厩舎の3着内率は${dhPct(tv)}と、全厩舎平均の${dhPct(B.tr)}を上回る`);
+  const sv = f["父 同芝ダ3着内率"], sb = B.ss[surf]; if (hh.sire && !isNaN(sv) && sb && sv / sb >= 1.15) p4.push(`父${hh.sire}の産駒は${DH_SURF(surf)}で3着内率${dhPct(sv)}と、${DH_SURF(surf)}の種牡馬平均${dhPct(sb)}より高い`);
+  const sr = rk("近5走スピード最高"), lr = rk("近5走上がり指数最高");
+  if (sr && sr <= Math.max(3, Math.round(N / 4))) p4.push(`近5走の走破タイムのベストはメンバー${sr}位。${pop && pop > sr ? `${pop}番人気という評価に比べ、時計の比較では明らかに上位にいる` : "時計の比較では上位"}`);
   if (lr && lr <= 3) p4.push(`上がりのベストもメンバー${lr}位と、末脚は${lr === 1 ? "このメンバーで一番" : "メンバー屈指"}`);
-  if (!isNaN(fc) && !isNaN(fr)){ if (fr < 0.35 && fc <= 3) p4.push(`前に行く馬が${fc}頭と少なく、先行できるこの馬には楽な流れが見込める`); else if (fr >= 0.5 && fc >= 5) p4.push(`前に行きたい馬が${fc}頭と多く、ペースが速くなれば後ろから運ぶこの馬に向く`); }
   if (f["クラス変化"] < 0) p4.push("前走から降級し、相手は楽になる");
-  if (f["距離変化"] && Math.abs(f["距離変化"]) >= 200 && (h.c3G?.["距離"] || 0) > 0) p4.push(`${f["距離変化"] > 0 ? "距離延長" : "距離短縮"}（${raw[0].dist}m→${dist}m）もプラスに働くとAIは見ている`);
+  if (f["距離変化"] && Math.abs(f["距離変化"]) >= 200 && (h.c3G?.["距離"] || 0) > 0.01) p4.push(`${f["距離変化"] > 0 ? "距離延長" : "距離短縮"}（${raw[0].dist}m→${dist}m）もAIはプラスと判断している`);
   if (N <= 10) p4.push(`${N}頭立ての少頭数で、穴馬でも3着以内に届きやすい`);
-  p4.push(`穴馬AIは、オッズを使わずに過去の成績・展開・騎手・血統など144の要素からこの馬を評価し、3着以内に入る確率を${(h.p3 * 100).toFixed(1)}%と見積もった。全${N}頭中${P.rankAll}位の評価である`);
-  paras.push(p4.join("。") + "。");
+  if (p4.length) paras.push(p4.join("。") + "。");
   // ⑤ 結論
-  const exs = [...ex].slice(0, 3), pop = k0?.pop ?? e.pop, odds = k0?.odds ?? e.odds;
-  const NOUN = DH_NOUN;
-  const strong = [...new Set((h.bul || []).map(b => NOUN[b.key]).filter(Boolean))].slice(0, 3);
-  paras.push(`${exs.length ? `近走の敗戦には${exs.join("・")}という明確な理由があり、能力そのものが落ちた内容ではない。` : ""}${strong.length ? `${strong.join("、")}を総合すれば、巻き返す根拠は十分にある。` : ""}${pop ? `${pop}番人気${odds ? `・単勝${odds}倍` : ""}と評価を落としている今回こそ、狙いたい一頭だ。` : "狙いたい一頭だ。"}`);
-  return { paras, ex: exs };
+  const exs = [...ex].slice(0, 3), strong = [...new Set((h.bul || []).map(b => DH_NOUN[b.key]).filter(Boolean))].slice(0, 3);
+  paras.push(`${exs.length ? `近走の敗戦には${exs.join("・")}という明確な理由があり、能力そのものが落ちた内容ではない。` : ""}${strong.length ? `${strong.join("、")}を総合すれば、${ratio && ratio >= 1.1 && pop ? pop + "番人気は過小評価と言える。" : "人気以上に走れる下地はある。"}` : ""}${ratio && ratio >= 1.1 ? "人気の盲点になっている今回こそ、狙いたい一頭だ。" : "穴で一考したい一頭だ。"}`);
+  return { paras, ex: exs, scen: dhScenario(P, h, r) };
 }
 // プラスに働いた要素（箇条書き・10個以内）。key は結論の文で使う短い名前
 function dhBullets(P, h){
-  const f = h.f, e = h.e, R = h.runs, l = R[0], N = P.all.length, hh = P.horseOf(e) || {};
+  const f = h.f, e = h.e, R = h.runs, l = R[0], N = P.N || P.all.length, hh = P.horseOf(e) || {};
   const rk = key => { const v = f[key]; if (v == null || isNaN(v)) return null; const vs = P.all.map(o => o.f[key]).filter(x => x != null && !isNaN(x)); return vs.filter(x => x > v).length + 1; };
   const rkL = key => { const v = f[key]; if (v == null || isNaN(v)) return null; const vs = P.all.map(o => o.f[key]).filter(x => x != null && !isNaN(x)); return vs.filter(x => x < v).length + 1; };
   const pc = v => (v * 100).toFixed(0) + "%";
   const B = (g) => { switch (g){
-    case "近3走の着順": case "近5走の着順": case "前走の着順": case "2走前の着順": case "3走前の着順": case "近5走の最高着順": case "着順の安定度": { if (!l) return null; const r3 = rkL("近3走着順比平均"); if (!r3 || r3 > Math.ceil(N / 2)) return null; return { key: "近走の安定感", s: `近3走は${R.slice(0, 3).map(x => x.pos + "着").join("・")}で、頭数を考えた着順はメンバー${r3}位` }; }
-    case "前走の着差": case "近3走の着差": case "近5走の着差": { const m = f["近5走着差最小"]; if (isNaN(m)) return null; return { key: "着差の小ささ", s: m <= 0 ? "近5走に勝ち星がある" : `近5走で勝ち馬に最も迫ったのは${m.toFixed(1)}秒差（メンバー${rkL("近5走着差最小")}位）` }; }
+    case "近3走の着順": case "近5走の着順": case "前走の着順": case "2走前の着順": case "3走前の着順": case "近5走の最高着順": case "着順の安定度": { if (!l) return null; const r3 = rkL("近3走着順比平均"); if (!r3 || r3 > Math.ceil(N / 3)) return null; return { key: "近走の安定感", s: `${R.length >= 3 ? "近3走" : R.length === 2 ? "近2走" : "前走"}は${R.slice(0, 3).map(x => x.pos + "着").join("・")}で、頭数を考えた着順はメンバー${r3}位` }; }
+    case "前走の着差": case "近3走の着差": case "近5走の着差": { const m = f["近5走着差最小"]; if (isNaN(m)) return null; const rm = rkL("近5走着差最小"); if (m > 0 && (!rm || rm > Math.ceil(N / 3))) return null; return { key: "着差の小ささ", s: m <= 0 ? "近5走に勝ち星がある" : `近5走で勝ち馬に最も迫ったのは${m.toFixed(1)}秒差（メンバー${rm}位）` }; }
     case "近5走の好走数": return f["近5走3着内回数"] ? { key: "近走の好走", s: `近5走で3着以内が${f["近5走3着内回数"]}回` } : null;
-    case "通算成績": case "キャリア": return f["出走数"] ? { key: "実績", s: `通算${f["出走数"]}戦${f["勝利数"]}勝・3着以内${R.filter(x => x.pos <= 3).length}回` } : null;
-    case "走破タイム": case "走破タイム（同じ芝ダ）": case "走破タイム（同じ条件）": case "走破タイムの上昇": { const r = rk("近5走スピード最高"); if (!r || r > Math.ceil(N / 2)) return null; return { key: "時計の速さ", s: `近5走の走破タイムのベストがメンバー${r}位${f["スピード上昇(前走-3走前)"] > 0 ? "で、近走は時計が上向き" : ""}` }; }
-    case "上がり": { const r = rk("近5走上がり指数最高"); const b = R.slice(0, 5).filter(x => x.l3).sort((a, b2) => a.l3 - b2.l3)[0]; return r && r <= Math.ceil(N / 2) ? { key: "末脚", s: `近5走の上がりのベストがメンバー${r}位${b ? `（${b.l3.toFixed(1)}秒）` : ""}` } : null; }
-    case "前走の人気": case "近走の人気": case "人気と着順の関係": { const d = f["近5走 人気-着順 平均"]; if (isNaN(d)) return null; return d > 0 ? { key: "人気以上に走る力", s: `近5走は平均して人気より${d.toFixed(1)}着上の着順で、人気以上に走っている` } : { key: "人気の盲点", s: "近走の着順で人気を落とし、実力に比べて評価が低い" }; }
+    case "通算成績": case "キャリア": return f["出走数"] >= 3 && R.filter(x => x.pos <= 3).length / f["出走数"] >= 0.3 ? { key: "実績", s: `通算${f["出走数"]}戦${f["勝利数"]}勝・3着以内${R.filter(x => x.pos <= 3).length}回` } : null;
+    case "走破タイム": case "走破タイム（同じ芝ダ）": case "走破タイム（同じ条件）": case "走破タイムの上昇": { const r = rk("近5走スピード最高"); if (!r || r > Math.ceil(N / 3)) return null; return { key: "時計の速さ", s: `近5走の走破タイムのベストがメンバー${r}位${f["スピード上昇(前走-3走前)"] > 0 ? "で、近走は時計が上向き" : ""}` }; }
+    case "上がり": { const r = rk("近5走上がり指数最高"); const b = R.slice(0, 5).filter(x => x.l3).sort((a, b2) => a.l3 - b2.l3)[0]; return r && r <= Math.ceil(N / 3) ? { key: "末脚", s: `近5走の上がりのベストがメンバー${r}位${b ? `（${b.l3.toFixed(1)}秒）` : ""}` } : null; }
+    case "前走の人気": case "近走の人気": case "人気と着順の関係": { const d = f["近5走 人気-着順 平均"]; if (isNaN(d) || d <= 0.5) return null; return { key: "人気以上に走る力", s: `近5走は平均して人気より${d.toFixed(1)}着上の着順で、人気以上に走っている` }; }
     case "位置取り": { const v = f["近5走 前半位置平均"]; if (isNaN(v)) return null; return { key: "位置取りの自在さ", s: `近5走の平均位置は${v < 0.25 ? "前" : v < 0.5 ? "好位" : v < 0.75 ? "中団" : "後方"}で、${v < 0.5 ? "前で運べる脚質" : "末脚を生かす脚質"}` }; }
     case "前走の直線": return l?.c4 && l.c4 > l.pos ? { key: "前走の末脚", s: `前走は4コーナー${l.c4}番手から${l.pos}着まで追い上げた` } : null;
     case "前走の道中": return l?.c1 && l?.c4 && l.c1 > l.c4 ? { key: "前走の機動力", s: `前走は道中で${l.c1}番手から${l.c4}番手まで位置を上げた` } : null;
     case "前走のペース": { if (!l?.p1) return null; const pd = l.p1 - l.p2, fr = l.c1 && l.n ? (l.c1 - 1) / Math.max(l.n - 1, 1) : null;
       if (pd <= -1.5 && fr != null && fr < 0.4) return { key: "前走の粘り", s: `前走は前に厳しいハイペースを${l.c1}番手で先行し、${l.pos}着に粘った` };
       if (pd >= 1.0 && fr != null && fr >= 0.45) return { key: "前走の末脚", s: `前走は前有利のスローペースを${l.c1}番手から運び、${l.pos}着まで追い上げた` };
-      return { key: "前走の内容", s: `前走は前半3ハロン${l.p1}秒・後半${l.p2}秒の流れを${l.c1 ? l.c1 + "番手で" : ""}運び、${l.pos}着` }; }
-    case "ローテーション": { const dd = f["休養日数"]; if (isNaN(dd)) return null; return { key: "ローテーション", s: f["叩き2戦目"] ? `休み明けを一度使われての2戦目（前走から${dd}日）` : f["叩き3戦目"] ? `休み明けから3戦目（前走から${dd}日）` : f["連闘"] ? "連闘での出走" : dd >= 70 ? `${Math.round(dd / 30)}か月の休み明けで、リフレッシュしての出走` : `前走から${dd}日の詰まりすぎない間隔` }; }
-    case "距離": return f["距離変化"] ? { key: "距離替わり", s: `${f["距離変化"] > 0 ? "距離延長" : "距離短縮"}（前走${l?.dist}m→今回${P.race.distance}m）` } : { key: "同距離", s: `前走と同じ${P.race.distance}m` };
-    case "芝・ダート": return l ? { key: "芝ダ替わり", s: l.s === P.race.surface ? `前走に続いて${DH_SURF(P.race.surface)}` : `前走の${DH_SURF(l.s)}から${DH_SURF(P.race.surface)}に替わる` } : null;
-    case "斤量": return { key: "斤量", s: `斤量${e.weight}kg${isNaN(f["斤量変化"]) || !f["斤量変化"] ? "" : `（前走から${f["斤量変化"] > 0 ? "+" : ""}${f["斤量変化"]}kg）`}` };
-    case "クラス": return f["クラス変化"] < 0 ? { key: "降級", s: "前走から降級し、相手が楽になる" } : f["クラス変化"] === 0 ? { key: "同クラス", s: "前走と同じクラスで、相手関係は大きく変わらない" } : null;
+      return null; }
+    case "ローテーション": { const dd = f["休養日数"]; return f["叩き2戦目"] ? { key: "ローテーション", s: `休み明けを一度使われての2戦目で、上積みが見込める（前走から${dd}日）` } : null; }
+    case "距離": return f["距離変化"] ? { key: "距離替わり", s: `${f["距離変化"] > 0 ? "距離延長" : "距離短縮"}（前走${l?.dist}m→今回${P.race.distance}m）をAIはプラスと判断` } : null;
+    case "芝・ダート": return l && l.s !== P.race.surface ? { key: "芝ダ替わり", s: `前走の${DH_SURF(l.s)}から${DH_SURF(P.race.surface)}に替わり、AIはプラスと判断` } : null;
+    case "斤量": return f["斤量変化"] <= -1 ? { key: "斤量", s: `斤量が前走から${-f["斤量変化"]}kg軽くなる（${e.weight}kg）` } : null;
+    case "クラス": return f["クラス変化"] < 0 ? { key: "降級", s: "前走から降級し、相手が楽になる" } : null;
     case "コース適性": case "距離適性": case "競馬場適性": { const a = R.filter(x => x.s === P.race.surface), b = R.filter(x => x.v === P.race.venue), t = A => A.filter(x => x.pos <= 3).length; const s = [a.length && t(a) ? `${DH_SURF(P.race.surface)}で3着以内${t(a)}回` : "", b.length && t(b) ? `${P.race.venue}で3着以内${t(b)}回` : ""].filter(Boolean).join("、"); return s ? { key: "コース適性", s } : null; }
     case "道悪": { const w = R.filter(x => /稍|重|不/.test(x.g || "") && x.s === P.race.surface), t = w.filter(x => x.pos <= 3).length; return w.length && t ? { key: "道悪", s: `${DH_SURF(P.race.surface)}の道悪で3着以内${t}回` } : null; }
-    case "騎手": { const jk = String(e.jockey || "").replace(/[▲△☆◇★]/g, ""); return { key: "騎手", s: `${jk}騎手は${P.race.venue}で3着内率${pc(f["騎手 同競馬場3着内率"])}${f["減量騎手"] ? "（減量の恩恵あり）" : ""}` }; }
-    case "厩舎": return { key: "厩舎", s: `${e.trainer || ""}厩舎は3着内率${pc(f["調教師3着内率"])}・${P.race.venue}で${pc(f["調教師 同競馬場3着内率"])}` };
-    case "血統": return hh.sire ? { key: "血統", s: `父${hh.sire}の産駒は${DH_SURF(P.race.surface)}で3着内率${pc(f["父 同芝ダ3着内率"])}${hh.damsire ? `（母の父${hh.damsire}）` : ""}` } : null;
-    case "馬体重": return isNaN(f["馬体重"]) ? null : { key: "馬体", s: `馬体重${f["馬体重"]}kg${isNaN(f["馬体重増減"]) ? "" : `（${f["馬体重増減"] > 0 ? "+" : f["馬体重増減"] === 0 ? "±" : ""}${f["馬体重増減"]}）`}` };
-    case "年齢": case "性別": return { key: "年齢", s: `年齢・性別（${e.sexAge || ""}）もAIの評価ではプラス` };
-    case "枠順": return { key: "枠順", s: `${e.waku || "—"}枠${e.num}番の枠順もAIの評価ではプラス` };
+    case "騎手": { const jk = String(e.jockey || "").replace(/[▲△☆◇★]/g, ""), v = f["騎手 同競馬場3着内率"], b = dhBase().jv[P.race.venue]; if (!isNaN(v) && b && v / b >= 1.15) return { key: "騎手", s: `${jk}騎手の${P.race.venue}での3着内率${pc(v)}は、全騎手平均${pc(b)}の${dhTimes(v, b)}` }; return f["減量騎手"] ? { key: "騎手", s: `${jk}騎手の減量で斤量が軽くなる` } : null; }
+    case "厩舎": { const v = f["調教師3着内率"], b = dhBase().tr; return !isNaN(v) && b && v / b >= 1.2 ? { key: "厩舎", s: `${e.trainer || ""}厩舎の3着内率${pc(v)}は、全厩舎平均${pc(b)}の${dhTimes(v, b)}` } : null; }
+    case "血統": { const v = f["父 同芝ダ3着内率"], b = dhBase().ss[P.race.surface]; return hh.sire && !isNaN(v) && b && v / b >= 1.15 ? { key: "血統", s: `父${hh.sire}の産駒は${DH_SURF(P.race.surface)}で3着内率${pc(v)}（種牡馬平均${pc(b)}の${dhTimes(v, b)}）` } : null; }
+    case "馬体重": return null;
+    case "年齢": case "性別": return null;
+    case "枠順": return null;
     case "展開": { const fc = f["先行馬の数"]; return { key: "展開", s: f["先行×先行少ない"] ? `先行馬が${fc}頭と少なく、前で運べる` : f["差し×先行多い"] ? `先行馬が${fc}頭と多く、差しが届く流れになりやすい` : f["内枠×先行"] ? "内枠から先行できる" : `メンバーの先行馬は${fc}頭` }; }
-    case "頭数": return { key: "頭数", s: N <= 10 ? `${N}頭立ての少頭数で、3着以内に入りやすい` : N <= 13 ? `${N}頭立てと頭数が多すぎず、紛れが少ない` : `${N}頭立ての多頭数で、展開の紛れが起きやすい` };
+    case "頭数": return N <= 10 ? { key: "頭数", s: `${N}頭立ての少頭数で、3着以内に入りやすい` } : null;
     default: return null; } };
-  const out = [], seen = new Set();
-  for (const x of h.plusG){ if (out.length >= 10) break; const b = B(x.g); if (!b || seen.has(b.s)) continue; seen.add(b.s); out.push({ ...b, v: x.v }); }
+  const out = [], seen = new Set(), seenK = new Set();
+  for (const x of h.plusG){ if (out.length >= 10) break; const b = B(x.g); if (!b || seen.has(b.s) || seenK.has(b.key)) continue; seen.add(b.s); seenK.add(b.key); out.push({ ...b, v: x.v }); }
   return out;
 }
 // AIの判断への寄与を要素ごとに合計（プラスの大きい順）
@@ -7427,7 +7450,7 @@ async function dhPickRace(r, fixedNum, k0){
   const ents = (r.entries || []).filter(e => !e.scratched);
   const race = { date: r.date, venue: r.venue, surface: r.surface, distance: +r.distance, going: (typeof goingOf === "function" ? goingOf(r) : r.going) || "良", name: r.name, entries: ents };
   const P = DH.pick(race, dhHorseOf); if (P.none) return P;
-  P.race = race; P.horseOf = dhHorseOf;
+  P.race = race; P.horseOf = dhHorseOf; P.N = ents.length;
   const h = fixedNum != null ? (P.all.find(o => +o.e.num === +fixedNum) || P.best) : P.best; h.runs = h.f._runs;
   if (fixedNum != null){ const srt = P.all.slice().sort((a, b) => b.p3 - a.p3); P.rankAll = srt.indexOf(h) + 1; }
   dhContribGroups(h); h.bul = dhBullets(P, h);
@@ -7435,12 +7458,19 @@ async function dhPickRace(r, fixedNum, k0){
   const sim = ST.sims?.[r.id]; let eng = null;
   if (sim?.weighted){ const ws = sim.weighted.slice().sort((a, b) => b.top3 - a.top3); const k = ws.findIndex(q => +sim.ctx.field[q.i]?.num === +h.e.num); if (k >= 0) eng = { rank: k + 1, top3: ws[k].top3 }; }
   return { id: r.id, made: new Date().toISOString(), num: h.e.num, waku: h.e.waku, name: h.e.name, jockey: h.e.jockey, pop: h.e.pop ?? null, odds: h.e.odds ?? null, oddsAt: r.oddsAsOf || null,
-    p3: h.p3, p1: h.p1, nCand: P.cands.length, rankAll: P.rankAll, field: ents.length, eng, story: st.paras, bullets: h.bul.map(b => b.s), keys: h.bul.map(b => b.key), textVer: 2,
+    p3: h.p3, p1: h.p1, nCand: P.cands.length, rankAll: P.rankAll, field: ents.length, eng, story: st.paras, scen: st.scen || null, bullets: h.bul.map(b => b.s), keys: h.bul.map(b => b.key), textVer: 3,
     model: DH.M.ver, asof: DH.M.asof, afterPost: raceStart(r) <= new Date() };
 }
 function dhLockGet(id){ try { return JSON.parse(localStorage.getItem("dhLock_" + id) || "null"); } catch (e) { return null; } }
 function dhLockSet(id, v){ try { localStorage.setItem("dhLock_" + id, JSON.stringify(v)); } catch (e) {} }
-async function darkImage(r, k){
+let DH_VARIANT = 3;   // 11/8：見出しはパターン3（人気→AI評価の逆転）に決定
+// 見出しと本文の数字が同じかを確かめる（3着以内の見込み・AI評価の順位・頭数・人気・人気の平均と倍率）
+function dhConsistent(k){
+  const s0 = (k.story || [])[0] || "", pb = dhPopBase(k.pop), need = [(k.p3 * 100).toFixed(1) + "%", `全${k.field}頭中${k.rankAll}位`];
+  if (k.pop) need.push(`${k.pop}番人気`); if (pb){ need.push((pb * 100).toFixed(1) + "%"); if (k.p3 / pb >= 1.1) need.push((k.p3 / pb).toFixed(1) + "倍"); }
+  const ok = need.every(t => s0.includes(t)); if (!ok) console.warn("[穴馬] 本文と見出しの数字が違う", need.filter(t => !s0.includes(t)), s0); return ok;
+}
+async function darkImage(r, k, variant){
   try { await document.fonts.load('48px "Dela Gothic One"'); await document.fonts.load('bold 24px "Zen Kaku Gothic New"'); } catch (e) {}
   const FDf = '"Dela Gothic One","Zen Kaku Gothic New",sans-serif', FB = '"Zen Kaku Gothic New","Hiragino Sans","Yu Gothic",sans-serif';
   const W = 1080, meas = document.createElement("canvas").getContext("2d");
@@ -7450,9 +7480,9 @@ async function darkImage(r, k){
     for (const ch of String(t)){ if (meas.measureText(line + ch).width > maxW && line && !NOHEAD.includes(ch)){ out.push(line); line = ch; } else line += ch; } if (line) out.push(line); return out; };
   const PS = 27, PL = 44, MW = W - 120, BS = 27, BL = 40, BW = W - 150;
   const story = k.story || [], bul = k.bullets || [];
-  const sL = story.map(p => lines("　" + p, PS, MW, "500")), bL = bul.map(b => lines(b, BS, BW));
+  const sL = story.map(p => lines("　" + p, PS, MW, "500")), bL = bul.map(b => lines(b, BS, BW)), scL = k.scen ? lines(k.scen, PS, MW - 40, "bold") : [];
   const storyH = sL.reduce((a, L) => a + L.length * PL + 22, 0), bulH = bL.reduce((a, L) => a + L.length * BL + 14, 0);
-  const TOP = 770, H = TOP + 80 + storyH + 110 + bulH + 60;
+  const scH = scL.length ? scL.length * PL + 150 : 0, TOP = 770, H = TOP + 80 + storyH + scH + 110 + bulH + 60;
   const c = document.createElement("canvas"); c.width = W; c.height = H; const g = c.getContext("2d");
   const font = (sz, w = "bold", f = FB) => g.font = `${w} ${sz}px ${f}`;
   const txt = (t, x0, y0, sz, col = "#fff", o = {}) => { font(sz, o.w || "bold", o.f || FB); g.fillStyle = col; g.textAlign = o.al || "left"; g.textBaseline = "alphabetic"; if (o.max) g.fillText(String(t), x0, y0, o.max); else g.fillText(String(t), x0, y0); };
@@ -7472,16 +7502,40 @@ async function darkImage(r, k){
   rr(48, y + 30, 120, 120, 12, WAKU[wk - 1] || "#fff", "#aaa"); txt(k.num, 108, y + 125, 86, WAKU_TX[wk - 1] || "#111", { al: "center", f: FDf, w: "normal" });
   txt(k.name || "", 196, y + 112, 74, "#fff", { f: FDf, w: "normal", max: W - 240 });
   txt(`${String(k.jockey || "").replace(/[▲△☆◇★]/g, "")}${k.pop ? `｜${k.pop}番人気` : ""}${k.odds ? `｜単勝${k.odds}倍` : ""}`, 198, y + 162, 32, "#ffd1df", { max: W - 240 });
-  const stat = (lab, val, x0, w) => { rr(x0, y + 196, w, 128, 14, "rgba(255,255,255,0.06)", "rgba(255,255,255,0.15)", 1.5); txt(lab, x0 + w / 2, y + 236, 24, "#ccc", { al: "center" }); txt(val, x0 + w / 2, y + 298, 52, "#ff8fb1", { al: "center", f: FDf, w: "normal" }); };
-  const cw = (W - 48 - 48 - 3 * 18) / 4;
-  stat("3着以内の見込み", (k.p3 * 100).toFixed(1) + "%", 48, cw); stat("1着の見込み", (k.p1 * 100).toFixed(1) + "%", 48 + (cw + 18), cw);
-  stat("AIスコア", Math.round(k.p3 * 1000), 48 + 2 * (cw + 18), cw); stat("穴馬の中で", `1位/${k.nCand}頭`, 48 + 3 * (cw + 18), cw);
-  txt(`全${k.field}頭の中でのAI評価 ${k.rankAll}位${k.eng ? `｜通常の予想エンジンでは3着内率${(k.eng.top3 * 100).toFixed(1)}%・${k.eng.rank}位` : ""}`, 48, y + 370, 26, "#eee", { max: W - 96 });
-  txt(`※オッズの時点：${k.oddsAt || "—"}${k.afterPost ? "（発走後に作成）" : ""}`, 48, y + 404, 22, "#aaa");
+  // 指標の見せ方（3パターン）：1＝人気の平均との比較／2＝自信度ランク／3＝人気とAI評価の逆転
+  const pb = dhPopBase(k.pop), cf = dhConf(k.p3), pctx = v => (v * 100).toFixed(1) + "%", V = variant || DH_VARIANT;
+  const box = (x0, w, h0, fill, stroke) => rr(x0, y + 192, w, h0, 14, fill, stroke, 2);
+  if (V === 1){
+    box(48, 420, 150, "rgba(255,90,140,0.16)", "#ff5a8c"); txt("AIの3着以内見込み", 258, y + 232, 24, "#ffd1df", { al: "center" }); txt(pctx(k.p3), 258, y + 318, 76, "#ff8fb1", { al: "center", f: FDf, w: "normal" });
+    txt("vs", 498, y + 285, 30, "#aaa", { al: "center" });
+    box(528, 250, 150, "rgba(255,255,255,0.05)", "rgba(255,255,255,0.18)"); txt(`${k.pop || "—"}番人気の平均`, 653, y + 232, 22, "#bbb", { al: "center" }); txt(pb ? pctx(pb) : "—", 653, y + 310, 52, "#ccc", { al: "center", f: FDf, w: "normal" });
+    box(796, 236, 150, "#ff5a8c", null); txt("人気の", 914, y + 232, 24, "#fff", { al: "center" }); txt(pb ? (k.p3 / pb).toFixed(1) + "倍" : "—", 914, y + 314, 62, "#fff", { al: "center", f: FDf, w: "normal" });
+    txt(`全${k.field}頭の中でAI評価${k.rankAll}位（人気は${k.pop || "—"}番）`, 48, y + 392, 28, "#eee", { max: W - 96 });
+  } else if (V === 2){
+    const RC = { S: "#ffd23a", A: "#ff5a8c", B: "#7fb6ff", C: "#9aa" }[cf.rank];
+    rr(48, y + 192, 170, 170, 18, RC); txt(cf.rank, 133, y + 330, 140, "#1a0f2e", { al: "center", f: FDf, w: "normal" });
+    txt("AI自信度ランク", 244, y + 228, 26, "#ffd1df");
+    txt(`過去このランクの穴馬は 3着以内 ${pctx(cf.hit)}`, 244, y + 280, 36, "#fff", { max: W - 290 });
+    txt(`（2024〜26年・${cf.n.toLocaleString()}頭・単勝の中央値${cf.odds}倍）`, 244, y + 318, 22, "#bbb", { max: W - 290 });
+    txt(`この馬の3着以内見込み ${pctx(k.p3)}${pb ? `（${k.pop}番人気の平均${pctx(pb)}の${(k.p3 / pb).toFixed(1)}倍）` : ""}`, 244, y + 356, 24, "#ff8fb1", { max: W - 290 });
+    txt(`全${k.field}頭の中でAI評価${k.rankAll}位（人気は${k.pop || "—"}番）`, 48, y + 400, 26, "#eee", { max: W - 96 });
+  } else {
+    box(48, W - 96, 150, "rgba(255,90,140,0.12)", "#ff5a8c");
+    txt("人気", 150, y + 236, 26, "#bbb", { al: "center" }); txt(`${k.pop || "—"}番`, 150, y + 318, 70, "#ccc", { al: "center", f: FDf, w: "normal" });
+    txt("→", 330, y + 305, 70, "#ff5a8c", { al: "center", f: FDf, w: "normal" });
+    txt("AI評価", 510, y + 236, 26, "#ffd1df", { al: "center" }); txt(`${k.rankAll}位`, 510, y + 318, 70, "#ff8fb1", { al: "center", f: FDf, w: "normal" });
+    g.strokeStyle = "rgba(255,255,255,0.2)"; g.beginPath(); g.moveTo(680, y + 212); g.lineTo(680, y + 322); g.stroke();
+    txt("3着以内の見込み", 850, y + 236, 24, "#ffd1df", { al: "center" }); txt(pctx(k.p3), 850, y + 314, 58, "#ff8fb1", { al: "center", f: FDf, w: "normal" });
+    txt(`全${k.field}頭の中で人気は${k.pop || "—"}番目、AIの評価は${k.rankAll}番目。${pb ? `${k.pop}番人気の過去の平均は${pctx(pb)}${k.p3 / pb >= 1.1 ? `（その${(k.p3 / pb).toFixed(1)}倍）` : ""}` : ""}`, 48, y + 392, 26, "#eee", { max: W - 96 });
+  }
   // 推奨理由
   y = TOP + 30; txt("推奨理由", 40, y, 38, "#ff8fb1", { f: FDf, w: "normal" }); y += 20;
   g.strokeStyle = "rgba(255,90,140,0.5)"; g.lineWidth = 2; g.beginPath(); g.moveTo(40, y); g.lineTo(W - 40, y); g.stroke(); y += 50;
   sL.forEach(L => { font(PS, "500"); g.fillStyle = "#f2f2f2"; g.textAlign = "left"; L.forEach((ln, j) => g.fillText(ln, 60, y + j * PL)); y += L.length * PL + 22; });
+  // 狙いの形（レース後に答え合わせできる見立て）
+  if (scL.length){ y += 20; rr(40, y, W - 80, scL.length * PL + 110, 16, "rgba(255,210,58,0.08)", "#ffd23a", 2.5);
+    txt("狙いの形", 70, y + 54, 34, "#ffd23a", { f: FDf, w: "normal" }); txt("（レース後に答え合わせ）", 250, y + 52, 22, "#d9c27a");
+    font(PS, "bold"); g.fillStyle = "#fff4cf"; g.textAlign = "left"; scL.forEach((ln, j) => g.fillText(ln, 70, y + 104 + j * PL)); y += scL.length * PL + 130; }
   // プラスに働いた要素
   y += 30; txt("プラスに働いた要素", 40, y, 34, "#ff8fb1", { f: FDf, w: "normal" }); y += 20;
   g.beginPath(); g.moveTo(40, y); g.lineTo(W - 40, y); g.stroke(); y += 46;
@@ -7491,7 +7545,7 @@ async function darkImage(r, k){
 function darkXText(r, k){
   const nm = s0 => String(s0 || "").replace(/\s/g, ""); const race = nm(r.name).replace(/[（(].*?[)）]/g, "");
   const ks = [...new Set((k.keys || []).map(x => DH_NOUN[x]).filter(Boolean))].slice(0, 3), why = ks.length ? "決め手：" + ks.join("／") : "";
-  const t = [`【AI穴馬】${r.venue}${r.no}R ${race}`, `${k.num}番 ${nm(k.name)}${k.pop ? `（${k.pop}番人気` : ""}${k.odds ? `・${k.odds}倍）` : k.pop ? "）" : ""}`, `3着以内の見込み${(k.p3 * 100).toFixed(1)}%`, why, `#${r.venue}${r.no}R #競馬予想 #穴馬`].filter(Boolean).join("\n");
+  const t = [`【AI穴馬】${r.venue}${r.no}R ${race}`, `${k.num}番 ${nm(k.name)}${k.pop ? `（${k.pop}番人気` : ""}${k.odds ? `・${k.odds}倍）` : k.pop ? "）" : ""}`, `3着以内の見込み${(k.p3 * 100).toFixed(1)}%${dhPopBase(k.pop) && k.p3 / dhPopBase(k.pop) >= 1.1 ? `（${k.pop}番人気の平均${(dhPopBase(k.pop) * 100).toFixed(1)}%の${(k.p3 / dhPopBase(k.pop)).toFixed(1)}倍）` : ""}`, why, `#${r.venue}${r.no}R #競馬予想 #穴馬`].filter(Boolean).join("\n");
   return [...t].length > 140 ? t.slice(0, 139) + "…" : t;
 }
 async function showDarkImage(id){
@@ -7504,16 +7558,20 @@ async function showDarkImage(id){
     try { k = await dhPickRace(r); } catch (e) { console.error(e); toast("穴馬AIの計算でエラー：" + e.message); return; }
     if (k.none){ toast(k.none); return; }
     dhLockSet(id, k);
-  } else if (k.textVer !== 2){
+  } else if (k.textVer !== 3){
     // 文章の形式が古い固定データ：馬・人気・オッズ・作成時刻はそのままで、文章だけ新しい形で作り直す
-    try { const k2 = await dhPickRace(r, k.num, k); if (!k2.none){ k = { ...k, story: k2.story, bullets: k2.bullets, keys: k2.keys, textVer: 2 }; dhLockSet(id, k); } } catch (e) { console.warn(e); }
+    try { const k2 = await dhPickRace(r, k.num, k); if (!k2.none){ k = { ...k, story: k2.story, scen: k2.scen, bullets: k2.bullets, keys: k2.keys, textVer: 3 }; dhLockSet(id, k); } } catch (e) { console.warn(e); }
   }
-  const url = await darkImage(r, k);
+  if (!dhConsistent(k)){
+    try { const k2 = await dhPickRace(r, k.num, k); if (!k2.none){ k = { ...k, story: k2.story, scen: k2.scen, bullets: k2.bullets, keys: k2.keys, textVer: 3 }; dhLockSet(id, k); } } catch (e) { console.warn(e); }
+    if (!dhConsistent(k)){ toast("数字の整合が取れないため画像を作りませんでした"); console.error("[穴馬] 数字の不一致", k); return; }
+  }
+  let url = await darkImage(r, k);
   let m = $("#imgModal"); if (!m){ m = document.createElement("div"); m.id = "imgModal"; m.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9999;display:flex;align-items:center;justify-content:center;padding:12px"; document.body.appendChild(m); }
   const fn = `${r.date}_${r.venue}${r.no}R_AI穴馬.png`;
-  m.innerHTML = `<div style="background:#111;padding:12px;border-radius:12px;max-height:100%;overflow:auto;text-align:center"><img src="${url}" style="max-width:min(480px,90vw);height:auto;display:block;margin:0 auto 10px">
+  m.innerHTML = `<div style="background:#111;padding:12px;border-radius:12px;max-height:100%;overflow:auto;text-align:center"><img id="dhImg" src="${url}" style="max-width:min(480px,90vw);height:auto;display:block;margin:0 auto 10px">
     <div class="small" style="color:#ccc;margin-bottom:6px">${fixed ? "この端末で最初に作った時点の選出を表示しています（後から変わりません）" : "この選出をこの端末に固定しました（作り直しても同じ馬になります）"}</div>
-    <a class="btn primary" href="${url}" download="${fn}">画像を保存</a> <button class="btn" id="imgCopy">画像をコピー</button> <button class="btn" id="imgClose">閉じる</button>
+    <a class="btn primary" id="dhSave" href="${url}" download="${fn}">画像を保存</a> <button class="btn" id="imgCopy">画像をコピー</button> <button class="btn" id="imgClose">閉じる</button>
     <div style="text-align:left;margin-top:10px"><div class="small" style="color:#ccc">X投稿用の文章</div><textarea id="xtText" style="width:100%;min-height:120px;font-size:14px">${esc(darkXText(r, k))}</textarea><button class="btn" id="xtCopy">文章をコピー</button></div></div>`;
   $("#xtCopy").onclick = async () => { try { await navigator.clipboard.writeText($("#xtText").value); toast("文章をコピーしました"); } catch (e) { $("#xtText").select(); } };
   $("#imgClose").onclick = () => m.remove();
@@ -9331,7 +9389,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261108a";
+const APP_BUILD = "20261108c";
 // 10/31：PCのアプリが新しくなったら、画面を自動で読み込み直す（2分ごとに確認。一括計算などの処理中は待つ）
 // 11/1：スマホ（クラウド版）でも確認。新しい版を見つけたら、オフライン用の保存（サービスワーカーとキャッシュ）を消してから読み込み直す（古い画面が残り続けないように）。
 //  開いて5秒後に1回目を確認。画面の上（タイトルの横）に版を表示
