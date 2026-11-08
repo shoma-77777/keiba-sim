@@ -7300,10 +7300,11 @@ function dhRunPara(x, k, ctx){
   const S = [];
   S.push(`${DH_ORD[k]}は${d8}の${x.venue}${DH_SURF(x.surface)}${x.dist}m、${nm}で${pos}着（${n ? n + "頭立て" : ""}${pop ? `・${pop}番人気` : ""}）。`);
   const rel = c1 && n ? (c1 - 1) / Math.max(n - 1, 1) : null;
-  const posPh = c1 == null ? "" : c1 === 1 ? "ハナを切り" : rel < 0.2 ? `${c1}番手の先行策で` : rel < 0.45 ? `好位${c1}番手から` : rel < 0.7 ? `中団${c1}番手から` : c1 === n ? "最後方から" : `後方${c1}番手から`;
+  const posPh = c1 == null ? "" : c1 === 1 ? "ハナを切って" : rel < 0.2 ? `${c1}番手の先行策で` : rel < 0.45 ? `好位${c1}番手から` : rel < 0.7 ? `中団${c1}番手から` : c1 === n ? "最後方から" : `後方${c1}番手から`;
   const mid = c1 != null && c4 != null && c1 - c4 >= 3 ? `勝負どころで${c4}番手まで押し上げ、` : c1 != null && c4 != null && c4 - c1 >= 3 ? `4コーナーでは${c4}番手と位置を下げ、` : "";
   const l3t = !isNaN(l3) ? `上がり3ハロン${l3.toFixed(1)}秒${l3rk === 1 ? "（メンバー最速）" : l3rk && l3rk <= 3 ? `（メンバー${l3rk}位）` : ""}` : "";
-  const heavy = !isNaN(wt) && (wt >= 59 || (wt >= 58 && (gr || 0) < 7)), wt58 = heavy ? `${wt}kgを背負い、` : "";
+  // 斤量：今回より重かったレースだけを「斤量が敗因」とする。今回も同じ斤量なら言い訳にせず、その斤量で好走したことを強みとして書く
+  const tw = parseFloat(ctx.wt), heavy = !isNaN(wt) && (wt >= 59 || (wt >= 58 && (gr || 0) < 7)), lighter = heavy && !isNaN(tw) && tw <= wt - 1, wt58 = lighter ? `${wt}kgを背負い、` : "";
   if (pos === 1) S.push(`${wt58}道中は${posPh || "流れに乗って"}進め、${mid}${l3t ? `直線では${l3t}を使って` : ""}勝ち切った。`);
   else S.push(`${wt58}${posPh ? `道中は${posPh}進め、` : ""}${mid}${l3t ? `直線では${l3t}を使ったが、` : ""}${win ? `勝ち馬${win}とは` : "勝ち馬とは"}${isNaN(mg) ? "差がついた" : (mg === 0 ? "タイム差なし" : `${mg.toFixed(1)}秒差`)}だった。`.replace(/^、/, ""));
   // 内容の評価（記録から言えることだけ）
@@ -7312,7 +7313,7 @@ function dhRunPara(x, k, ctx){
   if (pos > 1 && rel != null && rel >= 0.45 && pd != null && pd >= 1.0 && gained){ ev.push(`前が止まりにくいスローペースを${rel >= 0.7 ? "後方" : "中団"}から${c4 - pos}頭抜いて追い上げたもので、展開を考えれば着順以上に評価できる`); ex.push("展開"); }
   else if (rel != null && rel < 0.4 && pd != null && pd <= -1.5 && (pos <= 3 || mg <= 0.8)){ ev.push(`前に厳しいハイペースを先行して${pos <= 3 ? "馬券圏内に残しており" : "最後まで粘っており"}、着順以上に中身が濃い`); ex.push("展開"); }
   if (pos > 3 && l3rk && l3rk <= 2){ ev.push(`上がりは${l3rk === 1 ? "メンバー最速" : "メンバー2位"}で、敗因は能力ではなく位置取りの差と見られる`); ex.push("位置取り"); }
-  if (pos > 1 && heavy && mg <= 1.0){ ev.push(`${wt}kgの重い斤量を考えれば悲観する内容ではない`); ex.push("斤量"); }
+  if (pos > 1 && lighter && mg <= 1.0){ ev.push(`今回は${tw}kgと${(wt - tw).toFixed(0)}kg軽くなり、この斤量差は大きい`); ex.push("斤量"); }
   if (pos > 3 && (gr || 0) >= 7 && !isNaN(mg) && mg <= 0.5) ev.push(`${(gr || 0) >= 9 ? "GI" : "重賞"}で勝ち馬に${mg.toFixed(1)}秒差まで迫っており、このクラスでも能力は通用する`);
   else if (pos > 2 && !isNaN(mg) && mg <= 0.3 && !ev.length) ev.push("勝ち馬とはわずかな差で、着順ほど負けていない");
   if (gr && ctx.cl && gr > ctx.cl && pos > 1 && mg <= 1.0){ ev.push("今回より格上の相手と戦っての結果でもある"); ex.push("相手関係"); }
@@ -7356,7 +7357,7 @@ function dhScenario(P, h, r){
 function dhStory(P, h, r, k0){
   const e = h.e, f = h.f, hh = P.horseOf(e) || {}, raw = dhRawRuns(hh, P.race.date); let N = P.N || P.all.length; const surf = P.race.surface, venue = P.race.venue, dist = P.race.distance;
   const rk = key => { const v = f[key]; if (v == null || isNaN(v)) return null; const vs = P.all.map(o => o.f[key]).filter(x => x != null && !isNaN(x)); return vs.filter(x => x > v).length + 1; };
-  const ctx = { name: e.name, date: P.race.date, cl: dhGrade(P.race.name) }, paras = [], ex = new Set(), B = dhBase();
+  const ctx = { name: e.name, date: P.race.date, cl: dhGrade(P.race.name), wt: e.weight }, paras = [], ex = new Set(), B = dhBase();
   const p3v = k0?.p3 ?? h.p3, rkAll = k0?.rankAll ?? P.rankAll, pop = k0?.pop ?? e.pop, odds = k0?.odds ?? e.odds, pb = dhPopBase(pop);
   if (k0?.field) N = k0.field;
   // ① 書き出し：人気とAIの評価のずれ
@@ -7374,6 +7375,7 @@ function dhStory(P, h, r, k0){
   if (older.length){ const top = Math.max(...older.map(x => dhGrade(x.race) || 0)); p2.push(`過去には${older.map(x => `${dhRaceName(x.race)}${x.pos}着`).join("、")}と、${top >= 7 ? "重賞" : top >= 6 ? "オープン" : "特別戦"}でも上位争いをしてきた`); }
   if (same.length && t3s(same)) p2.push(`今回と同じ${venue}${DH_SURF(surf)}${dist}mは${same.length}戦して3着以内${t3s(same)}回と、舞台適性は証明済み`);
   else if (sameS.length >= 2 && t3s(sameS) / sameS.length >= 0.3) p2.push(`${DH_SURF(surf)}では${sameS.length}戦して3着以内${t3s(sameS)}回（${dhPct(t3s(sameS) / sameS.length)}）`);
+  const tw = parseFloat(e.weight); if (!isNaN(tw) && tw >= 57){ const hv = raw.filter(x => parseFloat(x.weight) >= tw - 0.5); if (hv.length >= 2 && t3s(hv) / hv.length >= 0.4) p2.push(`今回と同じ${tw}kg以上の斤量では${hv.length}戦して3着以内${t3s(hv)}回。重い斤量でも走れることは証明済みだ`); }
   if (p2.length) paras.push(p2.join("。") + "。");
   // ④ 今回の上積み材料（平均より上のものだけを、平均と比べて書く）
   const p4 = [], dd = f["休養日数"];
@@ -9389,7 +9391,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261108c";
+const APP_BUILD = "20261108d";
 // 10/31：PCのアプリが新しくなったら、画面を自動で読み込み直す（2分ごとに確認。一括計算などの処理中は待つ）
 // 11/1：スマホ（クラウド版）でも確認。新しい版を見つけたら、オフライン用の保存（サービスワーカーとキャッシュ）を消してから読み込み直す（古い画面が残り続けないように）。
 //  開いて5秒後に1回目を確認。画面の上（タイトルの横）に版を表示
