@@ -1,8 +1,3 @@
-2026-11-07 23:37:54 36レース見つかりました
-2026-11-07 23:38:03 東京1R 2歳未勝利 11頭・オッズnetkeiba
-2026-11-07 23:38:15 東京2R 2歳未勝利 11頭・オッズnetkeiba
-2026-11-07 23:38:26 東京3R 2歳未勝利 15頭・オッズnetkeiba
-2026-11-07 23:38:37 東京4R 2歳新馬 16頭・オッズnetkeiba
 2026-11-07 23:38:47 東京5R 2歳新馬 15頭・オッズnetkeiba
 2026-11-07 23:38:58 東京6R 3歳以上1勝クラス 15頭・オッズnetkeiba
 2026-11-07 23:39:08 東京7R 3歳以上1勝クラス 16頭・オッズnetkeiba
@@ -298,3 +293,8 @@
 2026-11-14 09:07:32 500/505頭
 2026-11-14 09:07:58 SQLiteへの保存で警告: NOT NULL constraint failed: entries.num
 2026-11-14 09:07:58 完了：36レース・505頭（重複除き505頭）を登録しました
+2026-11-14 09:25:15 オッズ取得できず 東京1R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/16頭分しか読めず
+2026-11-14 09:25:15 オッズ取得できず 東京2R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/17頭分しか読めず
+2026-11-14 09:25:15 オッズ取得できず 東京3R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/16頭分しか読めず
+2026-11-14 09:25:15 オッズ取得できず 東京4R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/12頭分しか読めず
+2026-11-14 09:25:15 オッズを更新しました（1/36レース・netkeiba・2026-11-14 09:23:52時点）
