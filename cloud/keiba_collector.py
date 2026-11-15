@@ -134,8 +134,8 @@ def body_weights(f, race, ttl_hours=0.1):
         if e["num"] in got: e.update(got[e["num"]])
     return len(got)
 
-def shutuba(f, race):
-    html = f.get(f"{BASE_RACE}/race/shutuba.html?race_id={race['id']}", ttl_hours=6, encoding="EUC-JP")
+def shutuba(f, race, ttl_hours=6):
+    html = f.get(f"{BASE_RACE}/race/shutuba.html?race_id={race['id']}", ttl_hours=ttl_hours, encoding="EUC-JP")
     sp = soup(html)
     nm = sp.select_one(".RaceName")
     if nm:
