@@ -856,6 +856,15 @@ def auto_odds_loop():
                     cf = cm.load_conf()
                     if cf.get("token") and cf.get("appVersion") != cm.app_version(): _safe(lambda: cm.republish(DATA, write_status))
         except Exception: pass
+        # 11/16：クラウドだけにある開催日（土曜など）のデータをPCへ取り込む（30分おき）。取り込んだ日は、その日の自動オッズ更新・結果取得の対象になる
+        try:
+            if not JOB["running"] and time.time() - last.get("pull", 0) >= 30 * 60:
+                last["pull"] = time.time(); cm = cloud_mod()
+                if cm and not cm.STATE.get("running") and cm.load_conf().get("token"):
+                    got = cm.pull_missing(DATA)
+                    if got: log("クラウドだけにあった開催日のデータを取り込みました：" + "・".join(got)); write_status()
+        except Exception as ex:
+            print("クラウドからの取り込みで警告:", ex)
         # 10/31：オッズが取れなかったレース（回数制限で断られた等）は、今日・明日の分を20分おきに、そのレースだけ取り直す
         try:
             now = dt.datetime.now()
