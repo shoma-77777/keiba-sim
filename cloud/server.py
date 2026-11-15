@@ -210,7 +210,7 @@ def update_date(ymd, odds_only=False, race_ids=None):
             #  馬番が空の馬がいるレースは出馬表を取り直す（オッズ履歴・調教・馬体重などは馬IDで引き継ぐ）
             refreshed = 0
             for r in races:
-                if not r.get("entries") or race_started(ymd, r, 0) or all(e.get("num") for e in r["entries"]): continue
+                if not r.get("entries") or all(e.get("num") for e in r["entries"]): continue   # 発走済みでも馬番が空なら取り直す（結果の読み取りにも馬番が要る）
                 try:
                     old = {e.get("horseId"): e for e in r["entries"]}
                     kc.shutuba(f, r, ttl_hours=0.0)
