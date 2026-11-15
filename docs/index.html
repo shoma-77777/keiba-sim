@@ -5424,7 +5424,16 @@ function dayBias(r){
 function trendOf(r){ const k = Object.keys(SEED.trends || {}).find(k => (r.name || "").includes(k)); return k ? { key: k, ...SEED.trends[k] } : null; }
 function forecastGoing(r){ const t = trackOf(r); if (!t?.goingProb) return null; return Object.entries(t.goingProb).sort((a, b) => b[1] - a[1])[0][0]; }
 function goingOf(r){ return ST.going[r.id] || r.going || forecastGoing(r) || "良"; }
-function paceOf(r){ return ST.pace[r.id] || "auto"; }
+// 11/15：ペースの初期値は「自然発生」ではなく、脚質構成からいちばん起きやすいペース（ユーザーの指示）。手で選んだらそれを使う
+const PACE_DEF = {};
+function paceDefault(r){
+  const key = r.id + "|" + goingOf(r) + "|" + (r.oddsAsOf || "") + "|" + (r.entries?.length || 0);
+  if (PACE_DEF[r.id]?.key === key) return PACE_DEF[r.id].p;
+  let p = "auto";
+  try { if (r.entries?.length){ const pf = Engine.paceForecast(makeCtx(r)); p = pf.best && PACES.includes(pf.best) ? pf.best : PACES.slice().sort((a, b) => (pf[b] || 0) - (pf[a] || 0))[0]; } } catch (e) {}
+  PACE_DEF[r.id] = { key, p }; return p;
+}
+function paceOf(r){ return ST.pace[r.id] || paceDefault(r); }
 const PACE_LABEL = { auto: "自然発生", slow: "スロー", mid: "ミドル", high: "ハイ" };
 const GOINGS = ["良", "稍", "重", "不"], PACES = ["slow", "mid", "high"];
 function makeCtx(r, goingOverride){
@@ -5448,7 +5457,7 @@ function renderBand(){
       ${r.entries?.length ? (() => { const pf = Engine.paceForecast(sim?.ctx || makeCtx(r)); return `<div class="paceline">展開予想 ${paceLine(pf)}<span class="small">${esc(paceWhy(pf))}</span></div>`; })() : ""}</div>
     <div class="ctrls">
       <label>馬場 <select id="going">${GOINGS.map(g => `<option ${goingOf(r) === g ? "selected" : ""}>${g}</option>`).join("")}</select></label>
-      <label>ペース <select id="pace">${Object.entries(PACE_LABEL).map(([k, v]) => `<option value="${k}" ${paceOf(r) === k ? "selected" : ""}>${v}</option>`).join("")}</select></label>
+      <label>ペース <select id="pace">${Object.entries(PACE_LABEL).map(([k, v]) => `<option value="${k}" ${paceOf(r) === k ? "selected" : ""}>${v}${!ST.pace[r.id] && paceOf(r) === k && k !== "auto" ? "（いちばん起きやすい）" : ""}</option>`).join("")}</select></label>
       ${trackOf(r) && r.surface === "芝" ? `<label>クッション値 <input id="cushion" class="tiny num" type="number" step="0.1" min="6" max="13" value="${trackOf(r).cushion}"></label>` : ""}
       <label>試行回数 <select id="runs">${[2000, 5000, 10000].map(n => `<option value="${n}" ${ST.runs === n ? "selected" : ""}>${n.toLocaleString()}回${n === 2000 ? "（全レース予想と同じ）" : ""}</option>`).join("")}</select></label>
       <button class="btn primary" id="runBtn" ${r.entries ? "" : "disabled"}>シミュレーション実行</button>
@@ -5769,7 +5778,7 @@ async function runSim(silent, opt = {}){
     const prev = ST.sims[r.id] || ST.lastSims?.[r.id];
     const runNo = (ST.runCount[r.id] || 0) + 1; ST.runCount[r.id] = runNo;
     // 買い方の計算に使う着順：馬場・ペースを指定したらその条件、指定なしなら予報で加重した全条件の混合
-    const explicit = !!ST.going[r.id] || paceOf(r) !== "auto";
+    const explicit = !!ST.going[r.id] || !!ST.pace[r.id];   // 11/15：初期値のペース（いちばん起きやすい）は「指定」に数えない＝買い方の計算はこれまでどおり全条件の加重
     const planRes = explicit ? res : mixRes(cells, ctx.N);
     const cands = Bets.candidates(ctx, planRes);
     const plans = cands ? { 1000: Bets.plan(ctx, planRes, 1000, cands), 5000: Bets.plan(ctx, planRes, 5000, cands) } : null;
@@ -5786,7 +5795,7 @@ async function runSim(silent, opt = {}){
     //  （◎○馬連の回収 55%→52%・4頭BOX 77%→70%・◎流し3点 69%→56%。流しは有意に悪化）ので、1着率の順に戻した。関数は残す
     const vsc = ml ? ml.stats.map(s => s.win + 1e-6 * (1 / (1 + s.avgPos))) : mkp;
     // 選んだ条件が12条件のどれかと同じなら、その条件の結果をそのまま使う（同じ条件なのに表と印が少しずれないように）
-    if (pm && matrix[goingOf(r).slice(0, 1) + "|" + pm]){ const c0 = matrix[goingOf(r).slice(0, 1) + "|" + pm]; res.stats = c0.stats; res.orders = c0.orders; }
+    if (pm && matrix[goingOf(r).slice(0, 1) + "|" + pm]){ const c0 = matrix[goingOf(r).slice(0, 1) + "|" + pm]; res.stats = c0.stats; res.orders = c0.orders; res.seedBase = c0.seedBase; }   // 11/15：再生・動画で同じ回を正しく再現できるよう seedBase も合わせる
     const selSc = null;
     ST.sims[r.id] = { mlKey, runs: RUNS, ctx, res, matrix, avgAll, weighted, mkp, vsc, selSc, triTop, triMap: tri, replayCells, weightsInfo, cands, plans, planBasis, planRuns: planRes.runs, planRes, dark, seed, runNo, prevStats: prev?.res?.stats || null,
       ms: performance.now() - t0, runPick: "best", going: ctx.race.going, pace: paceOf(r), cell: goingOf(r) + "|" + (pm || "mid") };
@@ -9535,7 +9544,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261111a";
+const APP_BUILD = "20261115a";
 // 10/31：PCのアプリが新しくなったら、画面を自動で読み込み直す（2分ごとに確認。一括計算などの処理中は待つ）
 // 11/1：スマホ（クラウド版）でも確認。新しい版を見つけたら、オフライン用の保存（サービスワーカーとキャッシュ）を消してから読み込み直す（古い画面が残り続けないように）。
 //  開いて5秒後に1回目を確認。画面の上（タイトルの横）に版を表示
