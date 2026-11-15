@@ -17,7 +17,7 @@ SQLite（keiba.db）に保存し、シミュレーターアプリ用の JSON を
 - サイト側のHTML構造が変わると取得できなくなることがあります。その場合はセレクタを調整してください。
 """
 import argparse, datetime as dt, json, os, re, sqlite3, sys, time, hashlib
-COLLECTOR_VER = "20261107a"   # 発走前の単勝・複勝オッズを oddsHist に残す版
+COLLECTOR_VER = "20261115a"   # 発走前の単勝・複勝オッズを oddsHist に残す版
 from pathlib import Path
 
 try:
@@ -95,12 +95,25 @@ def race_list(f, date):
             })
     return races
 
+def racedata(rd):
+    """.RaceData01 の要素から情報を読む。11/15：netkeiba の表示が「天候:晴 / 馬場:良」から「予報（天気アイコン） 稍」に変わったので、
+    文字で読めないときは天気アイコンの title と、馬場の span（Item03）から読む"""
+    info = parse_racedata(clean(rd.get_text()))
+    if not info.get("going"):
+        for sp_ in rd.select("span"):
+            t = clean(sp_.get_text())
+            if t and t[0] in "良稍重不" and len(t) <= 3 and "m" not in t: info["going"] = t[0]; break
+    if not info.get("weather"):
+        w = rd.select_one("[class*=Icon_Weather]")
+        if w and (w.get("title") or w.get("aria-label")): info["weather"] = w.get("title") or w.get("aria-label")
+    return info
+
 def parse_racedata(text):
     """'15:45発走 / 芝1800m (左) / 天候:晴 / 馬場:良' を分解"""
     out = {}
     m = re.search(r"(芝|ダ|障)\s*(\d{3,4})m", text)
     if m: out["surface"], out["distance"] = m.group(1), int(m.group(2))
-    m = re.search(r"\((右|左|直)", text);  out["direction"] = m.group(1) if m else None
+    m = re.search(r"(?:\(|m\s)\s*(右|左|直)", text);  out["direction"] = m.group(1) if m else None
     m = re.search(r"天候:(\S+)", text);   out["weather"] = m.group(1) if m else None
     m = re.search(r"馬場:(\S+)", text);   out["going"] = m.group(1)[0] if m else None
     m = re.search(r"(\d{1,2}:\d{2})発走", text); out["postTime"] = m.group(1) if m else None
@@ -119,7 +132,7 @@ def body_weights(f, race, ttl_hours=0.1):
     sp = soup(html)
     rd = sp.select_one(".RaceData01")
     if rd:
-        info = parse_racedata(clean(rd.get_text()))
+        info = racedata(rd)
         if info.get("going") and info["going"] != race.get("going"):
             race["goingPrev"] = race.get("going")
         if info.get("going"): race["going"] = info["going"]; race["goingAt"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -150,7 +163,7 @@ def shutuba(f, race, ttl_hours=6):
         if grade and grade not in name: name = f"{name}({grade})"
         race["name"] = name
     rd = sp.select_one(".RaceData01")
-    if rd: race.update({k: v for k, v in parse_racedata(clean(rd.get_text())).items() if v})
+    if rd: race.update({k: v for k, v in racedata(rd).items() if v})
     ents = []
     for tr in sp.select("tr.HorseList"):
         if "Cancel" in (tr.get("class") or []): continue          # 出走取消・除外
