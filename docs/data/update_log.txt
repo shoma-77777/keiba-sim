@@ -1,6 +1,3 @@
-2026-11-15 09:06:11 オッズ取得できず 東京2R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/17頭分しか読めず
-2026-11-15 09:06:11 オッズ取得できず 東京3R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/16頭分しか読めず
-2026-11-15 09:06:11 オッズ取得できず 東京4R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/12頭分しか読めず
 2026-11-15 09:06:11 エラー: オッズを1レースも取得できませんでした（発売開始前か、ネット接続の問題）。東京1R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/16頭分しか読めず
 2026-11-15 09:15:11 自動オッズ更新（15分おき）
 2026-11-15 09:17:29 オッズ取得できず 東京1R: netkeiba: unsupported format string passed to NoneType.__format__ / Yahoo!競馬: 0/16頭分しか読めず
@@ -298,3 +295,6 @@
 2026-11-21 14:43:14 オッズを更新しました（24/24レース・netkeiba・2026-11-21 14:41:50時点）・結果確定18レース
 2026-11-21 14:44:39 馬場状態（最新）：京都ダ：良・京都芝：良・福島ダ：不・福島芝：稍
 2026-11-21 14:45:27 オッズを更新しました（24/24レース・netkeiba・2026-11-21 14:44:10時点）・結果確定18レース
+2026-11-21 14:55:31 クッション値は取得できませんでした（平均値を使います）: 403 Client Error: Forbidden for url: https://www.jra.go.jp/keiba/baba/_data_cushion.html
+2026-11-21 14:55:36 馬場状態（最新）：京都ダ：良・京都芝：良・福島芝：稍
+2026-11-21 14:56:23 京都10R・京都11R・京都12R・福島11R・福島12R のオッズを更新しました（netkeiba・2026-11-21 14:55:15時点）
