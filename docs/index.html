@@ -86,6 +86,7 @@ select,input[type=number],input[type=search],input[type=text]{background:var(--s
 
 /* タブ */
 .tabs{display:flex;gap:2px;margin-top:16px;border-bottom:1px solid var(--line);overflow-x:auto}
+#dhRev{max-width:100%;overflow-x:auto}   /* 11/29：穴馬の答え合わせの表がスマホで画面の横にはみ出していた */
 .tab{all:unset;cursor:pointer;padding:9px 14px;font-weight:700;color:var(--muted);border-bottom:3px solid transparent;white-space:nowrap}
 .tab[aria-selected="true"]{color:var(--ink);border-color:var(--turf)}
 .panel{padding-top:14px}
@@ -9685,7 +9686,7 @@ function darkText1018(ctx, f, maxLen = 110){
 // ===== 2025年の独立評価（research_prereg_2025.md の4仮説を、式も判定も変えずに1回だけ）=====
 //  ・使うモデルは凍結した学習済みモデル（2025年の記録を含まないことをサーバーで確認）。画面の予想に使うモデルは、終わったら元に戻す
 //  ・注目穴馬の選び方は pickDarkHorse と同じ手順（候補の並べ方をそのまま書き出すだけ。選定ルールは変えていない）
-const APP_BUILD = "20261129a";
+const APP_BUILD = "20261129b";
 // 10/31：PCのアプリが新しくなったら、画面を自動で読み込み直す（2分ごとに確認。一括計算などの処理中は待つ）
 // 11/1：スマホ（クラウド版）でも確認。新しい版を見つけたら、オフライン用の保存（サービスワーカーとキャッシュ）を消してから読み込み直す（古い画面が残り続けないように）。
 //  開いて5秒後に1回目を確認。画面の上（タイトルの横）に版を表示
@@ -10260,7 +10261,20 @@ function xGradedPanel(d, list, rowOf){
     ${posts.map((p, i) => p.t ? `<div class="xpost"><pre class="small" style="white-space:pre-wrap;margin:0">${esc(p.t)}</pre><div class="ctrls"><span class="small">${xLen(p.t)}/280</span><button class="btn" data-xgcopy="${i}">コピー</button></div></div>`
       : `<div class="xpost small">${esc(p.r.venue)}${p.r.no}R ${esc(p.r.name)}：まだ計算していません（全レースを一括計算してください）</div>`).join("")}</div>`;
 }
-function renderAllTab(){
+// 2026-11-29：全レース予想タブを押したときは、今の時刻に一番近いレース（これから発走する一番早いレース。全部終わっていれば最後のレース）のカードから表示する
+const ALL_SCROLL = { want: false };
+function allScrollNow(){
+  if (!ALL_SCROLL.want || ST.tab !== "all") return;
+  const list = Object.values(DB.races).filter(r => r.date === ST.date && r.postTime); if (!list.length) return;
+  const now = new Date(), today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  if (ST.date !== today){ ALL_SCROLL.want = false; return; }   // 今日でなければ一番上から
+  const srt = list.slice().sort((a, b) => raceStart(a) - raceStart(b)), next = srt.find(r => raceStart(r) >= new Date(now - 2 * 60000)) || srt[srt.length - 1];
+  const el = document.querySelector(`#p-all .rc[data-rid="${next.id}"]`); if (!el) return;   // カードがまだ無ければ、次の描き直しで移動する
+  ALL_SCROLL.want = false;
+  requestAnimationFrame(() => window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - 8, behavior: "auto" }));
+}
+function renderAllTab(){ renderAllTab0(); try { allScrollNow(); } catch (e) {} }
+function renderAllTab0(){
   const el = $("#p-all"); if (!el) return;
   const d = ST.date, ptm = r => { const m = /(\d{1,2}):(\d{2})/.exec(r.postTime || ""); return m ? +m[1] * 60 + +m[2] : 9999; }, list = Object.values(DB.races).filter(r => r.date === d).sort((a, b) => ptm(a) - ptm(b) || a.no - b.no || a.venue.localeCompare(b.venue, "ja"));
   loadServerSummary(d);
@@ -10275,10 +10289,10 @@ function renderAllTab(){
   const TOPD = list.map(r => moFill(r, rowOf(r))).filter(x => x?.dark).sort((a, b) => (b.dark.win ?? b.dark.top3 / 3) - (a.dark.win ?? a.dark.top3 / 3)).slice(0, 3);
   const card = r => {
     const x = moFill(r, rowOf(r)), fromSaved = !BATCH.rows[r.id] && x;
-    if (!r.entries?.length) return `<div class="rc pending"><div class="hd"><span class="vn">${esc(r.venue)}</span><span class="no">${r.no}R</span><span class="nm">${esc(r.name)}</span></div><div class="cond">出馬表なし</div></div>`;
-    if (!x) return `<div class="rc pending"><div class="hd"><span class="vn">${esc(r.venue)}</span><span class="no">${r.no}R</span><span class="nm">${esc(r.name)}</span></div><div class="cond">${r.surface}${r.distance}m・${r.entries.length}頭・${esc(r.postTime || "")}</div><div class="line small">${BATCH.running ? "計算待ち…" : "未計算"}</div><div class="foot"><button class="btn" data-open="${r.id}">このレースを開く</button></div></div>`;
+    if (!r.entries?.length) return `<div class="rc pending" data-rid="${r.id}"><div class="hd"><span class="vn">${esc(r.venue)}</span><span class="no">${r.no}R</span><span class="nm">${esc(r.name)}</span></div><div class="cond">出馬表なし</div></div>`;
+    if (!x) return `<div class="rc pending" data-rid="${r.id}"><div class="hd"><span class="vn">${esc(r.venue)}</span><span class="no">${r.no}R</span><span class="nm">${esc(r.name)}</span></div><div class="cond">${r.surface}${r.distance}m・${r.entries.length}頭・${esc(r.postTime || "")}</div><div class="line small">${BATCH.running ? "計算待ち…" : "未計算"}</div><div class="foot"><button class="btn" data-open="${r.id}">このレースを開く</button></div></div>`;
     const tk = TOPD.findIndex(t => t.id === x.id);
-    return `<div class="rc${tk >= 0 ? " topdark" : ""}">
+    return `<div class="rc${tk >= 0 ? " topdark" : ""}" data-rid="${r.id}">
       <div class="hd"><span class="vn">${esc(r.venue)}</span><span class="no">${r.no}R</span><span class="nm">${esc(r.name)}</span><span class="pt">${esc(r.postTime || "")}</span></div>
       ${(() => { const B = sb2Race(r).map(x => `${SB2.R[x.k].lab} ${x.k === "s7" ? `3連複 軸${x.e.num}番−${x.others.join("・")} 6点` : `${x.tickets[0].type}${x.e.num}番`} ${x.tickets.reduce((a, t) => a + t.stake, 0).toLocaleString()}円`);   // 11/29：新しい勝負の買い方
         return B.length ? `<div class="shoubu">🎯 勝負レース：${B.map(esc).join("／")}</div>` : ""; })()}
@@ -10298,7 +10312,6 @@ function renderAllTab(){
       ${x.ai1t?.length ? `<div class="line"><span class="verdict">◇AI穴単勝（検証中・記録だけ）</span> 単勝 <b>${x.ai1t.map(t => t.nums[0]).join("・")}</b> 各500円 <span class="small">（◇AI穴複勝と同じ馬。効果はまだ確かめられていないので記録だけ）</span></div>` : ""}
       ${x.ai1w?.length ? `<div class="line"><span class="verdict">◇AI穴ワイド（検証中・記録だけ）</span> ワイド <b>${x.ai1w.map(t => t.nums.join("-")).join("・")}</b> 各500円 <span class="small">（◇AI穴複勝の馬と1番人気。効果はまだ確かめられていないので記録だけ）</span></div>` : ""}
       ${x.pr28?.length ? `<div class="line"><span class="verdict">◇複勝ルール（検証中）</span> 複勝 <b>${x.pr28.map(t => t.nums[0]).join("・")}</b> 各1,000円 <span class="small">（◎が1〜2番人気のレースで、5番人気以下・複勝オッズ下限÷単勝0.28以上・シミュ3着内30%以上。初めての芝/ダート・ダートの先行馬は除く。過去310レースで的中44%・回収約130%（確定オッズ）。発走前のオッズでは未確認）</span></div>` : ""}
-      ${tospoHtml(r)}
       ${SB_OLD && x.tv3?.length ? `<div class="line"><span class="verdict go">◇割安軸（勝負${x.tv3[0].tier === "広げた分" ? "・広げた分" : ""}）</span> 複勝 <b>${x.tv3[0].nums[0]}</b> <b class="pos">${(x.tv3[0].stake || 1000).toLocaleString()}円</b>${x.tv3[0].zure != null ? ` <span class="small">（3連複での売れ方 ${x.tv3[0].zure > 1.19 ? "強い→2,000円" : "ふつう→1,000円"}）</span>` : ` <span class="small">（3連複のオッズ未取得→1,000円）</span>`}${x.tv3w?.length ? `　<span class="small">（的中率を上げたいとき：ワイド3頭BOX <b>${[...new Set(x.tv3w.flatMap(t => t.nums))].sort((a, b) => a - b).join("・")}</b> 各1,000円）</span>` : ""}<div class="small">${x.tv3[0].tier === "広げた分" ? "広げた分：6〜11番人気・1800m以下・複勝が割安・勝ったことあり・この競馬場の経験あり・3連複でも多く買われている馬（2019〜26年 251レース・回収138%）。" : ""}本線：1600m以下で、◇割安複勝の馬（7〜9番人気・複勝が割安・勝ったことあり）が、この競馬場（同じ芝/ダ）を走ったことがあるとき。2019〜26年で年約31レース・複勝の回収150%・的中27%・7年すべて100%超え（確定オッズ）。ワイドBOXも買うと的中34%・回収144%</div></div>` : ""}
       ${SB_OLD && x.tv3t?.length ? `<div class="line small">◇割安軸3連複（記録だけ）：${x.tv3t.length}点・${x.tv3t.reduce((a, t) => a + (t.stake || 100), 0).toLocaleString()}円</div>` : ""}
       ${x.pl7?.length ? `<div class="line"><span class="verdict">◇割安複勝（検証中）</span> 複勝 <b>${x.pl7.map(t => t.nums[0]).join("・")}</b> 各1,000円 <span class="small">（7〜9番人気で複勝オッズが単勝に比べて割安、過去に1勝以上。2019〜2026年の762頭で3着内20%・回収116%（確定オッズ）。年によっては100%未満、発走前のオッズでは未確認）</span></div>` : ""}
@@ -10452,7 +10465,7 @@ function setTab(t){
   if (t === "db") renderDB();
   if (t === "data") renderData();
 }
-$("#tabs").onclick = e => { const b = e.target.closest(".tab"); if (b) setTab(b.dataset.tab); };
+$("#tabs").onclick = e => { const b = e.target.closest(".tab"); if (!b) return; if (b.dataset.tab === "all") ALL_SCROLL.want = true; setTab(b.dataset.tab); };
 
 function renderAll(){ renderBand(); renderCard(); renderResult(); if (ST.tab === "replay") renderReplayPanel(); if (ST.tab === "db") renderDB(); }
 renderDays(); renderVenues(); renderAll(); renderUpd();
